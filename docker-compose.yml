@@ -1,0 +1,21 @@
+# Postgres only. Ollama runs natively on the host: Docker on macOS cannot
+# use the Apple Silicon GPU (Metal), so a containerized Ollama is CPU-only.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: codesearch
+      POSTGRES_PASSWORD: codesearch
+      POSTGRES_DB: codesearch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codesearch -d codesearch"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pgdata:

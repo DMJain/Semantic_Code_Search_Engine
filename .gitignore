@@ -1,0 +1,21 @@
+# Kubernetes checkout and other local data
+data/
+
+# Secrets
+.env
+
+# Build output
+bin/
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
