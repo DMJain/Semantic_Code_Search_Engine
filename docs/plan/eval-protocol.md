@@ -14,17 +14,17 @@ Scope = the slice ([architecture.md#corpus-and-slice](architecture.md#corpus-and
 
 ## Sources
 
-- **Semantic (25):** mined from GitHub. Merged PRs closing an issue ("Fixes #N"), merged in the 12 months before the pinned tag (widen by 6 months if yield is short), changed non-test non-generated files are 1-5 and all in the slice and all existing at the pinned tag. Query = issue title + first paragraph, unedited. Discard issues whose text names a changed file or function (leakage). Fallback tiers when yield is under 25: widen window, then allow 6-8 changed files, then KEP questions. At most 5 KEP/official-docs questions, written BEFORE looking at code. For 6-8 file PRs each file is reviewed by hand; incidental changes (renames, plumbing, trivial call-site updates) get grade 1 with the reason recorded (D-024).
-- **Structural (14):** symbols sampled with a fixed seed from slice symbols with at least one caller in the ground-truth graph; queries "who calls X" / "what does X call". At least 4 of the 14 target symbols whose ground-truth callers include interface-method or function-value calls (at least 1 in DEV, 3 in TEST). Seed and strata recorded in the query file header and S4 Results.
+- **Semantic (25):** mined from GitHub. Merged PRs closing an issue ("Fixes #N"), merged in the 12 months before the pinned tag (widen by 6 months if yield is short), changed non-test non-generated files are 1-5 and all in the slice and all existing at the pinned tag. Query = issue title + first paragraph (HTML comments from the issue template stripped; no other edit, recorded in `_meta`). Discard issues whose text names a changed file or function (leakage). Fallback tiers when yield is under 25: widen window, then allow 6-8 changed files, then KEP questions. The yield is probed in S1 before the slice is frozen; if it is short, the slice never grows beyond the D-005 compute budget: first change its composition within the same budget, then extend the mining window further back (KEP cap unchanged; outcome recorded in D-005). At most 5 KEP/official-docs questions, written BEFORE looking at code. For 6-8 file PRs each file is reviewed by hand; incidental changes (renames, plumbing, trivial call-site updates) get grade 1 with the reason recorded (D-024).
+- **Structural (14):** symbols sampled with a fixed seed from slice symbols with at least one caller in the ground-truth graph; only symbols whose short name is unique in the slice (otherwise the query is written `<Receiver>.<Name>`); queries "who calls X" / "what does X call". At least 4 of the 14 target symbols whose ground-truth callers include interface-method or function-value calls (at least 1 in DEV, 3 in TEST). Seed and strata recorded in the query file header and S4 Results.
 - **Lexical (11):** symbols sampled with a fixed seed; "find/where is X". About two thirds exact identifiers, one third partial/split fragments (e.g. "pod backoff"). Labeled `route=lexical` by intent even when phrased as fragments; the router confusion matrix measures disagreements.
 
 ## Labeling
 
-Never use the system under test to find labels. Allowed: grep, gopls, reading code, the ground-truth graph. Record per label `how` (grep | gopls | read | gt-graph | pr-diff) and, for grade 1 on PR-sourced labels, a `note`. Grades: primary = 2, secondary = 1. Structural queries whose label set exceeds 15 files: direct callers/callees primary (2), rest secondary (1).
+Never use the system under test to find labels. Allowed: grep, gopls, reading code, the ground-truth graph. Record per label `how` (grep | gopls | read | gt-graph | pr-diff) and, for grade 1 on PR-sourced labels, a `note`. Grades: primary = 2, secondary = 1. Structural queries: grade 2 = files with direct callers (or callees); grade 1 = files at hop 2 in the ground-truth graph, capped at 15 files in total. If direct files alone exceed 15, keep the 15 with the most call sites as grade 2 and record the omitted count in `_meta`.
 
 ## Freeze
 
-`eval/queries.test.jsonl` is committed and its sha256 recorded in `decisions.md` (D-010) at the end of S4, before any tuning. Only TEST is hashed; DEV stays editable. All tuning on DEV. TEST runs once per configuration (D-037), in S8 for Phase 1 and in S9 and P2-S8 for the later configurations, via `eval run --split test --final`, which refuses to run if the file hash differs from the recorded one.
+`eval/queries.test.jsonl` is committed and its sha256 recorded in `eval/queries.test.sha256` (linked from D-010 in `decisions.md`) at the end of S4, before any tuning. Only TEST is hashed; DEV stays editable. All tuning on DEV. TEST runs once per configuration (D-037), in S8 for Phase 1 and in S9 and P2-S8 for the later configurations, via `eval run --split test --final`, which refuses to run if the file hash differs from the recorded one.
 
 ## Retrieval metrics
 
@@ -32,7 +32,7 @@ Per configuration, overall and per route type: Recall@10, Hit@10, MRR, nDCG@10. 
 
 ## Statistics
 
-Paired bootstrap over queries, 10,000 resamples, fixed seed, 95% percentile CI of the metric difference versus the A0 baseline (D-022). CIs are mandatory in every comparison table. Per-route CIs are reported and flagged as wide (n = 8, 10, 17 on TEST). Results where the CI includes 0 are reported as "no demonstrated difference".
+Paired bootstrap over queries, 10,000 resamples, fixed seed, 95% percentile CI of the metric difference versus the named base configuration of each comparison (A0 for the ablation ladder; others as stated; D-022). CIs are mandatory in every comparison table. Per-route CIs are reported and flagged as wide (n = 8, 10, 17 on TEST). Results where the CI includes 0 are reported as "no demonstrated difference".
 
 ## ANN overlap
 
@@ -42,7 +42,7 @@ Paired bootstrap over queries, 10,000 resamples, fixed seed, 95% percentile CI o
 
 | ID | Definition |
 |---|---|
-| B0 | keyword baseline: BM25 (k1=1.2, b=0.75 fixed) over in-slice files, identifier-split tokens, no embeddings (D-030) |
+| B0 | keyword baseline, defined in [architecture.md#keyword-baseline-b0](architecture.md#keyword-baseline-b0) (D-030) |
 | A0 | flat baseline: `chunk_raw` embeddings, no header, semantic only |
 | A1 | A0 + context header (`chunk_header`) |
 | A2 | A1 + hierarchical summaries (coarse-to-fine), 7B summaries |
@@ -68,7 +68,7 @@ Accuracy versus labeled route type, confusion matrix, percent rule-routed versus
 
 ## Call-graph metrics
 
-Tree-sitter edge precision and recall versus the go/packages VTA graph on the slice, broken down by call kind (plain function, concrete method, interface method, function value). Edges are compared as `(caller, callee)` symbol pairs. An ambiguous tree-sitter call counts as a true positive only if the ground-truth callee is among its candidates; report ambiguous-rate and candidate-set size separately.
+Tree-sitter edge precision and recall versus the go/packages VTA graph on the slice, broken down by call kind (plain function, concrete method, interface method, function value). Edges are compared as `(caller, callee)` symbol pairs. Precision counts one unit per call site: an ambiguous tree-sitter call is a true positive only if the ground-truth callee is among its candidates; report ambiguous-rate and candidate-set size separately.
 
 ## Indexing metrics
 
@@ -76,19 +76,19 @@ Functions summarized per hour (per level), wall time per stage, vector counts pe
 
 ## Q&A evaluation
 
-15 TEST semantic queries, two systems: `/ask` (multi-hop) and single-shot RAG (D-018). Both use identical answer prompt constraints. Metrics: citation precision (valid citations / emitted citations); answer grade 0/1/2 by the author against a written rubric (committed before any answers are generated); hops used (`/ask` only); tokens and LLM calls per answer for both; quality reported alongside cost. The grading sheet shows only the answer text and citations in a seeded shuffled order, with no traces, hop counts or metadata. Optional LLM-as-judge is secondary, reported with agreement versus human grades.
+15 TEST semantic queries (the first 15 ids after a seeded shuffle, seed 77, recorded in `answers.json._meta`), two systems: `/ask` (multi-hop) and single-shot RAG (D-018). Both use identical answer prompt constraints. Metrics: citation precision (valid citations / emitted citations); answer grade 0/1/2 by the author against a written rubric (committed before any answers are generated); hops used (`/ask` only); tokens and LLM calls per answer for both; quality reported alongside cost. The grading sheet shows only the answer text and citations in a seeded shuffled order, with no traces, hop counts or metadata. Optional LLM-as-judge is secondary, reported with agreement versus human grades.
 
 ## Reproducibility
 
-Every result JSON records the Groq model ID and date. All router and Q&A calls use temperature 0. After the single TEST run, the `llm_cache` export (gzipped JSONL) is committed to `eval/results/` so numbers can be re-derived without Groq. If the Groq model is retired or changed before S8, record the new ID in decisions.md and re-run all DEV numbers with it before the final TEST run (D-007).
+Every result JSON records the Groq model ID and date. All router and Q&A calls use temperature 0. After the single TEST run and the Q&A TEST run (and judge, if run), the `llm_cache` export (gzipped JSONL) is committed to `eval/results/` so numbers can be re-derived without Groq. If the Groq model is retired or changed before S8, record the new ID in decisions.md and re-run all DEV numbers with it before the final TEST run (D-007).
 
 ## Memory measurement
 
-Used by every memory claim (D-038). macOS: physical footprint (`footprint` tool or `phys_footprint`), not RSS, because RSS undercounts Metal/unified-memory buffers and mmapped weights. Linux CI smoke job: the container cgroup's `memory.peak`. Both numbers are reported; each README claim names the measurement behind it. "Usable on an 8GB machine" is an inference from these numbers, not a test on 8GB hardware. Peak is the maximum over samples taken at 1 second intervals plus the final value.
+Used by every memory claim (D-038). macOS: physical footprint (`footprint` tool or `phys_footprint`) summed over the whole process tree (for Ollama: the server and its `runner` children), not RSS, because RSS undercounts Metal/unified-memory buffers and mmapped weights. Linux CI smoke job: the container cgroup's `memory.peak`. Both numbers are reported; each README claim names the measurement behind it. "Usable on an 8GB machine" is an inference from these numbers, not a test on 8GB hardware. Peak is the maximum over samples taken at 1 second intervals plus the final value.
 
 ## Phase 2 parity
 
-Run the Phase 2 default mode (D-031 semantics, D-056 model and dimension) through the same harness: `P2-float` and `P2-compact` on DEV during development and once each on the frozen TEST set (D-037). Report the delta versus A3n (the matching Phase 1 configuration) and versus A1, with paired-bootstrap CIs, overall and per route, flagged wide. Results filtered to the slice before dedupe and cut (D-039). Written to `eval/results/phase2/parity-{dev,test}.json`.
+Run the Phase 2 default mode (D-031 semantics, D-056 model and dimension) through the same harness: `P2-float` and `P2-compact` on DEV during development and once each on the frozen TEST set (D-037). Report the delta versus A3n (the matching Phase 1 configuration) and versus A1, with paired-bootstrap CIs, overall and per route, flagged wide. The slice prefixes are applied inside the vector search (`PathPrefixes`) and again by the collapse helper before dedupe and cut (D-039). Written to `eval/results/phase2/parity-{dev,test}.json`.
 
 ## Phase 2 compactness
 

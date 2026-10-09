@@ -28,8 +28,8 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 - Why: every number in the report comes from here.
 - Depends on: T01
 - Touches: `cmd/eval/run.go`, `internal/evalset/metrics.go`, `internal/evalconfig/`
-- Details: `eval run --config A0 --split dev [--final]`. Config registry `internal/evalconfig` maps ID to a `Retriever` (A0/A1 now; later sprints add A2-A4, E*, M1); records config, commit, model, `ef_search`, query-file sha256, date, Groq model ID (empty for now). For each query call the config's retriever (limit 10), compute per query: Recall@10, Hit@10, reciprocal rank, nDCG@10 per [#retrieval-metrics](../eval-protocol.md#retrieval-metrics) (relevant = grade >= 1; gains 2/1; ideal DCG from best 10 grades of the FULL label set). Output `eval/results/<config>/<split>.json`: per-query rows (ranked files, per-metric values) + aggregates overall and per route. `--split test` is refused without `--final`; with `--final` it verifies the TEST sha256 against D-010 (T14) and refuses a second final run of the same config unless `--rerun-reason` is given (recorded in JSON).
-- Acceptance: unit tests with hand-computed values pass (e.g. ranking [rel2, nonrel, rel1] vs labels {A:2,B:1,C:1} gives nDCG computed with ideal [2,1,1]); `go run ./cmd/eval run --config A1 --split dev` on a 3-query fixture file writes the JSON with the fields above; `--split test` without `--final` exits non-zero.
+- Details: `eval run --config A0 --split dev [--final]`. Config registry `internal/evalconfig` maps ID to a `Retriever` (A0/A1 now; later sprints add A2-A4, E*, M1); records config, commit, model, `ef_search`, query-file sha256, date, Groq model ID (empty for now). For each query call the config's retriever (limit 10), compute per query: Recall@10, Hit@10, reciprocal rank, nDCG@10 per [#retrieval-metrics](../eval-protocol.md#retrieval-metrics) (relevant = grade >= 1; gains 2/1; ideal DCG from best 10 grades of the FULL label set). Output `eval/results/<config>/<split>.json`: per-query rows (ranked files, per-metric values) + aggregates overall and per route. `--split test` is refused without `--final`; with `--final` it verifies the TEST sha256 against `eval/queries.test.sha256` (T14) and refuses a second final run of the same config unless `--rerun-reason infra:<text>` is given (only for infrastructure failures; recorded in JSON).
+- Acceptance: unit tests with hand-computed values pass (e.g. ranking [rel2, nonrel, rel1] vs labels {A:2,B:1,C:1} gives nDCG computed with ideal [2,1,1]); `go run ./cmd/eval run --config A1 --split dev` on a 3-query fixture file writes the JSON with the fields above; `--split test` without `--final` exits non-zero; `--rerun-reason` without the `infra:` prefix is rejected.
 - Tests: metric unit tests (perfect, empty, ties, label set > 10), JSON golden for a fake retriever; refusal-path tests.
 - Out of scope: bootstrap (T03), report (T04).
 - Owner: agent
@@ -57,10 +57,10 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 ### S4-T05 - GitHub mining tool (fetch)
 - Why: semantic queries come from real issues, limiting author bias ([#sources](../eval-protocol.md#sources)).
 - Depends on: none
-- Touches: `internal/config/config.go`, `.env.example`, `cmd/eval/mine.go`
-- Details: add `GITHUB_TOKEN` to config and `.env.example` (empty, commented, never committed; `.gitignore` already ignores `.env`). `eval mine --since <tag date minus 12 months> --until <tag date>` uses GitHub REST (`/search/issues?q=repo:kubernetes/kubernetes is:pr is:merged merged:A..B` paginated, then per PR: body for `Fixes|Closes|Resolves #N`, the issue (`title`, body first paragraph), changed files via `/pulls/{n}/files`). Without `GITHUB_TOKEN` it exits with `set GITHUB_TOKEN (read-only, public repos) in .env`. Handles rate limits (`X-RateLimit-Remaining`, sleep until reset), caches raw responses under `eval/candidates/cache/` (gitignored) so reruns are free. Writes `eval/candidates/semantic.raw.jsonl`.
-- Acceptance: unset token -> exact message above and non-zero exit; with token, `eval mine --limit 50` writes 50 rows each with `pr`, `issue`, `title`, `first_paragraph`, `files[]`; second run makes 0 HTTP calls (cache); unit test with `httptest.Server` covers pagination and rate-limit sleep.
-- Tests: `httptest.Server` for pagination, rate limit, missing "Fixes" line.
+- Touches: `cmd/eval/mine.go`
+- Details: reuse the `GITHUB_TOKEN` config and the HTTP client of S1-T12 (`eval mine-yield`); do not duplicate them. `eval mine --since <tag date minus 12 months> --until <tag date>` queries GitHub REST search in weekly `merged:` windows with `base:master` and `linked:issue` (a window that hits the 1,000-result cap is split in halves; throttle to 20 requests per minute; honor `X-RateLimit-Remaining`/`Reset`), then per PR: body for `Fixes|Closes|Resolves #N`, the issue (`title`, body first paragraph), changed files via `/pulls/{n}/files`. Raw responses are cached under `eval/candidates/cache/` (gitignored since S1-T12) so reruns are free. Writes `eval/candidates/semantic.raw.jsonl` (committed, so the candidate pool is reproducible).
+- Acceptance: unset token -> exactly `set GITHUB_TOKEN (read-only, public repos) in .env` and non-zero exit; with token, `eval mine --limit 50` writes 50 rows each with `pr`, `issue`, `title`, `first_paragraph`, `files[]`; second run makes 0 HTTP calls; `git check-ignore eval/candidates/cache` exits 0; unit test with `httptest.Server` covers pagination, cap splitting and rate-limit sleep.
+- Tests: `httptest.Server` for pagination, cap splitting, rate limit, missing "Fixes" line.
 - Out of scope: filtering (T06).
 - Owner: agent
 
@@ -68,8 +68,8 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 - Why: apply the eligibility and leakage rules mechanically before human review.
 - Depends on: T05
 - Touches: `cmd/eval/mine_filter.go`
-- Details: `eval mine-filter` reads raw rows and keeps PRs where: changed non-test non-generated files (use the walk exclusion predicates) number 1-5, all in the slice, all present in `files` at the pinned tag. Leakage: drop if the issue title/first paragraph contains any changed file basename (without `.go`) or any function/type name declared in the changed files (word-boundary, case-sensitive). Output tiered candidates `eval/candidates/semantic.tier1.jsonl` (1-5 files, 12 months), `tier2` (window +6 months), `tier3` (6-8 files; flag for manual per-file review), with the drop reasons counted. Report yield per tier.
-- Acceptance: prints yield per tier and drop-reason counts; unit tests show a PR whose issue text names `schedulePod` is dropped and one with 6 files appears only in tier3; yield of tier1 + tier2 >= 25 or the shortfall message points to tier3 and KEP questions (max 5).
+- Details: `eval mine-filter` reads raw rows and keeps PRs where: changed non-test non-generated files (use the walk exclusion predicates) number 1-5, all in the slice, all present in `files` at the pinned tag. Leakage: drop if the issue title/first paragraph contains any changed file basename (without `.go`) or any function/type name declared in the changed files (word-boundary, case-sensitive; only names of at least 6 characters that are not on a stoplist of common words such as `Update`, `Handle`, `String`, `Delete`, `Create`). Output tiered candidates `eval/candidates/semantic.tier1.jsonl` (1-5 files, 12 months), `tier2` (window +6 months), `tier3` (6-8 files; flag for manual per-file review), with the drop reasons counted. Report yield per tier.
+- Acceptance: prints yield per tier and drop-reason counts; unit tests show a PR whose issue text names `schedulePod` is dropped, one whose text only contains `Run` or `Update` is kept, and one with 6 files appears only in tier3; yield of tier1 + tier2 >= 25 or the shortfall message points to tier3 and KEP questions (max 5).
 - Tests: table tests for each filter rule and leakage.
 - Out of scope: choosing queries (human, T08/T10/T11).
 - Owner: agent
@@ -78,7 +78,7 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 - Why: seeded, stratified sampling removes author bias ([#sources](../eval-protocol.md#sources)).
 - Depends on: T01
 - Touches: `cmd/eval/sample.go`
-- Details: `eval sample --kind structural --seed 101` picks 14 in-slice symbols with >= 1 `gopackages` caller, stratified: >= 4 whose GT callers include `interface_method` or `func_value` edges (>= 1 for DEV, >= 3 for TEST, split assignment 4 DEV / 10 TEST by seeded shuffle respecting the strata), the rest random; query text `who calls <Name>` or `what does <Name> call` (seeded coin). Draft labels: files of GT callers/callees (`how: gt-graph`, grade 2 for direct, applying D-012 for > 15 files). `--kind lexical --seed 202` picks 11 in-slice symbols (~7 exact identifiers `where is <Name> defined`, ~4 split fragments like `pod backoff` generated from `SplitIdentifiers(name)` first two parts); draft label = the file defining the symbol (`how: grep`) plus files with other symbols named identically (grade 1). Both write candidates under `eval/candidates/` with the seed and strata in `_meta`. Never uses retrievers.
+- Details: `eval sample --kind structural --seed 101` picks 14 in-slice symbols with >= 1 `gopackages` caller whose short name is unique in the slice (methods are written `<Receiver>.<Name>` in the query), stratified: >= 4 whose GT callers include `interface_method` or `func_value` edges (>= 1 for DEV, >= 3 for TEST, split assignment 4 DEV / 10 TEST by seeded shuffle respecting the strata), the rest random; query text `who calls <Name>` or `what does <Name> call` (seeded coin). Draft labels per D-012: files of direct GT callers/callees grade 2, files at hop 2 in the GT graph grade 1, at most 15 files in total (`how: gt-graph`; omitted count in `_meta`). `--kind lexical --seed 202` picks 11 in-slice symbols (DEV 3 = 2 exact + 1 fragment, TEST 8 = 5 exact + 3 fragment, assigned by seeded shuffle; route `lexical` by intent for every row) (~7 exact identifiers `where is <Name> defined`, ~4 split fragments like `pod backoff` generated from `SplitIdentifiers(name)` first two parts); draft label = the file defining the symbol (`how: grep`) plus files with other symbols named identically (grade 1). Both write candidates under `eval/candidates/` with the seed and strata in `_meta`. Never uses retrievers.
 - Acceptance: same seed gives byte-identical output on two runs; structural output contains >= 4 stratum-qualifying symbols (script check `jq`); every draft label path passes `eval validate`; `grep -rn "retrieve\." cmd/eval/sample.go` returns nothing.
 - Tests: determinism test; strata test with a fixture graph.
 - Out of scope: human review (T09, T12, T13).
@@ -88,7 +88,7 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 - Why: DEV set for all tuning.
 - Depends on: T06
 - Touches: `eval/queries.dev.jsonl`
-- Details: pick 8 from tier1 (<= 2 KEP questions may be written instead; write KEP questions BEFORE reading code). For each: read the PR, check leakage by eye, grade changed files 2/1 (incidental = 1 with note), record `how`. Never run the retrievers while labeling.
+- Details: take 8 from the vetted tier-1 pool by a seeded shuffle (seed 101; the order is recorded and reused in T10 and T11) (<= 2 KEP questions may be written instead; write KEP questions BEFORE reading code). For each: read the PR, check leakage by eye, grade changed files 2/1 (incidental = 1 with note), record `how`. Never run the retrievers while labeling.
 - Acceptance: `eval validate` passes for these rows; 8 semantic rows in DEV; each label has `how`; no row was produced using `indexer search` (self-attest in Results).
 - Tests: none.
 - Out of scope: other routes.
@@ -108,7 +108,7 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 - Why: TEST semantic = 17.
 - Depends on: T08
 - Touches: `eval/queries.test.jsonl`
-- Details: as T08, 9 queries; the tier-2 pool and KEP questions (total KEP across DEV+TEST <= 5).
+- Details: as T08 (next 9 in the same seeded order), 9 queries; the tier-2 pool and KEP questions (total KEP across DEV+TEST <= 5).
 - Acceptance: `eval validate` clean for these rows; KEP count tracked in Results.
 - Tests: none.
 - Out of scope: running any retriever on TEST queries.
@@ -147,9 +147,9 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 ### S4-T14 - Freeze TEST
 - Why: no tuning before the TEST hash is recorded (D-010).
 - Depends on: T13, T02
-- Touches: `cmd/eval/freeze.go`, `docs/plan/decisions.md` (D-010)
-- Details: `eval freeze` runs `validate --strict`, prints `sha256(eval/queries.test.jsonl)` and writes it into D-010 with date and commit; `eval freeze --verify` recomputes and compares. Commit both files and the decisions entry in one commit. Add a CI step `go run ./cmd/eval freeze --verify` (skips with a message if D-010 is still PENDING).
-- Acceptance: `go run ./cmd/eval freeze` prints the hash and D-010 contains it; editing one byte of the test file makes `freeze --verify` exit non-zero; CI verifies.
+- Touches: `cmd/eval/freeze.go`, `eval/queries.test.sha256`, `.github/workflows/ci.yml`, `docs/plan/decisions.md` (D-010)
+- Details: `eval freeze` runs `validate --strict`, prints `sha256(eval/queries.test.jsonl)`, writes it to `eval/queries.test.sha256` and records date and commit in D-010 (which links to the file); `eval freeze --verify` recomputes and compares. Commit the file, the sha256 file and the decisions entry in one commit. Add a CI step `go run ./cmd/eval freeze --verify` (skips with a message while `eval/queries.test.sha256` is absent).
+- Acceptance: `go run ./cmd/eval freeze` prints the hash and `eval/queries.test.sha256` contains it; editing one byte of the test file makes `freeze --verify` exit non-zero; CI verifies.
 - Tests: unit test for hash and verify.
 - Out of scope: running TEST.
 - Owner: agent
@@ -158,7 +158,7 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 - Why: a plain keyword baseline shows what embeddings add (D-030).
 - Depends on: S3-T10, S4-T02
 - Touches: `internal/retrieve/bm25.go`, `internal/evalconfig/`
-- Details: `BM25` implements `Retriever`. Build an in-memory inverted index at startup over the in-slice files at the pinned tag (read from `KUBE_DIR`, same exclusion rules as walk): each file is one document tokenized with `chunk.SplitIdentifiers` (originals and parts, lowercased). Score = standard BM25 with fixed `k1=1.2`, `b=0.75` (constants, not tuned), IDF `ln(1 + (N - n + 0.5)/(n + 0.5))`; the query is tokenized with the same splitter, duplicate query terms counted once. Results go through the shared `CollapseToFiles` (slice filter before the cut, D-039). Register config `B0`. No database, no model.
+- Details: `BM25` implements `Retriever`. Build an in-memory inverted index at startup over the in-slice files at the pinned tag (read from `KUBE_DIR`, same exclusion rules as walk): each file is one document tokenized with `chunk.SplitIdentifiers` (originals and parts, lowercased). Score = standard BM25 with fixed `k1=1.2`, `b=0.75` (constants, not tuned), IDF `ln(1 + (N - n + 0.5)/(n + 0.5))`; the query is tokenized with the same splitter, duplicate query terms counted once. Results go through the shared `CollapseToFiles` (slice filter before the cut, D-039). Register config `B0`. No database, no model. B0 indexes whole files, including const/var blocks that no chunk covers; record this asymmetry in Results (and in the README comparison).
 - Acceptance: `go test -count=1 ./internal/retrieve/...` passes with a hand-computed BM25 score on a 3-document fixture (tolerance 1e-9); `go run ./cmd/eval run --config B0 --split dev` writes `eval/results/B0/dev.json`; `grep -rn "k1\|0.75" internal/retrieve/bm25.go` shows constants only, no flags or config.
 - Tests: unit tests for tokenization parity with `SplitIdentifiers`, IDF, length normalization (a long file with one match scores below a short file with one match), empty query.
 - Out of scope: tuning k1/b, stemming, using any database.
@@ -186,7 +186,7 @@ Harness tasks (T01-T04) first so labeling (human, the long pole) can overlap the
 ## Risks + mitigations
 - Mining yield < 25 semantic queries: tiers and KEP fallback (max 5) are built in; if still short, stop and ask the author (do not lower the leakage rules).
 - Labeling is the longest human block and cannot be automated: keep it going in parallel with the summary run; never lower the labeling rules, and apply the Phase 1 priority list in ROADMAP.md if the sprint slips.
-- GitHub API limits: unauthenticated runs are blocked deliberately; caching makes reruns free.
+- GitHub API limits: unauthenticated runs are blocked deliberately; search is capped at 1,000 results per query (weekly windows, automatic splitting) and throttled to 20 requests per minute; caching makes reruns free.
 - Accidental label leakage from the system under test: T08-T13 self-attestation and the sampler's `grep retrieve.` check.
 
 ## Demo check

@@ -45,7 +45,7 @@ P2-S0 done (D-053 runtime, D-055 GGUF sources, D-056 model and dimension). P2-S1
 - Why: the product embedder must pass the same probe as Phase 1 and match the reference vectors.
 - Depends on: P2-S2-T03
 - Touches: `internal/runtime/embedder.go`, `internal/models/probe.go`
-- Details: `NewEmbedder(manager, modelName)` implements `embed.Embedder` using the Phase 1 registry templates for prefixes and L2 normalization; `Dim()` is the model's native dimension. After `Ensure`, `Probe` runs the Phase 1 probe (reuse `internal/embed` probe code) plus a reference check: embed 5 fixed strings and require cosine similarity >= the threshold recorded in D-055 against reference vectors committed in `internal/models/testdata/reference.json`. Probe failure deletes nothing but marks the model unusable in `meta.json` and returns an actionable error.
+- Details: `NewEmbedder(manager, modelName)` implements `embed.Embedder` using the Phase 1 registry templates for prefixes and L2 normalization; `Dim()` is the model's native dimension. After `Ensure`, `Probe` runs the Phase 1 probe (reuse `internal/embed` probe code) plus a reference check: embed 5 fixed strings and require cosine similarity >= the threshold recorded in D-055 against reference vectors in `internal/models/testdata/reference.json` (written in P2-S0-T06). Probe failure deletes nothing but marks the model unusable in `meta.json` and returns an actionable error.
 - Acceptance: guarded test with the real model: probe PASS and min cosine to reference >= D-055 threshold; unit test with the fake runtime returning NaN makes the probe fail with the NaN message; the Embedder returns unit-norm vectors of length `Dim()`.
 - Tests: unit (fake) and guarded (real).
 - Out of scope: truncation and quantization (next task).
@@ -64,9 +64,9 @@ P2-S0 done (D-053 runtime, D-055 GGUF sources, D-056 model and dimension). P2-S1
 ### P2-S2-T06 - Memory measurement scripts
 - Why: all memory claims use the agreed method (D-038, [eval-protocol.md#memory-measurement](../eval-protocol.md#memory-measurement)).
 - Depends on: none
-- Touches: `scripts/measure-mem.sh`, `scripts/measure-mem-linux.sh`
-- Details: `measure-mem.sh <command...>` on macOS runs the command and samples physical footprint (`footprint -p <pid>` or `phys_footprint`) every 1s, writing CSV and printing peak and final values. `measure-mem-linux.sh` runs the command in a cgroup v2 scope or reads `memory.peak` of the container and prints it. Both print the method name in the output header.
-- Acceptance: `shellcheck scripts/measure-mem*.sh` passes; `scripts/measure-mem.sh sleep 3` on macOS prints a header naming `physical footprint`, at least 2 samples and a peak; the Linux script is exercised in CI in P2-S9.
+- Touches: `scripts/measure-mem.sh` (method header only), `scripts/measure-mem-linux.sh`
+- Details: `scripts/measure-mem.sh` (created in S9-T02: 1 s samples of the summed physical footprint of a process tree) is reused on macOS; this task adds the output header naming the method (`physical footprint`) if missing and creates `scripts/measure-mem-linux.sh`, which runs the command in a cgroup v2 scope or reads the container's `memory.peak` and prints it with the method name `cgroup memory.peak` in the header.
+- Acceptance: `shellcheck scripts/measure-mem*.sh` passes; `scripts/measure-mem.sh out.csv -- sleep 3` on macOS prints a header naming `physical footprint`, at least 2 samples and a peak; the Linux script is exercised in CI in P2-S8-T06.
 - Tests: shellcheck plus a manual run recorded in Results.
 - Out of scope: the measurement runs (P2-S8).
 - Owner: agent
@@ -89,7 +89,7 @@ Model downloads, verifies, probes, embeds and unloads; compaction works; `doctor
 
 ## Risks + mitigations
 - Download source changes or disappears: revision-pinned URLs plus sha256; the manifest test fails if a field is missing.
-- Runtime cannot unload memory: decided in P2-S0-T03; the chosen approach meets the unload bound.
+- Runtime cannot unload memory: decided in P2-S0-T04; the chosen approach meets the unload bound.
 
 ## Demo check
 `lodestone doctor --download` shows progress, checksum OK and probe PASS; a second run is instant.

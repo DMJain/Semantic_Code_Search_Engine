@@ -35,8 +35,8 @@ P2-S2 (runtime, `doctor`) and P2-S3 (scan, languages, chunking) done.
 - Why: re-indexing a changed repo must be fast.
 - Depends on: P2-S4-T02
 - Touches: `internal/indexer/incremental.go`
-- Details: scan computes sha256 per file; unchanged files skip parse/graph/chunk; changed files replace their symbols/chunks/edges in one transaction; chunk `content_hash` (header+content) decides re-embedding, reusing stored vectors for unchanged chunks; deleted files and now-ignored files are removed with their rows. Edges from unchanged files to symbols in changed files are re-resolved by re-running the graph phase for files whose callees' file hash changed.
-- Acceptance: tests on the fixture repo: second run reports `0 files changed, 0 chunks embedded`; editing one function re-embeds exactly its chunk(s) (fake embedder call count equals the changed chunk count); deleting a file removes its rows; renaming a function updates edges from a caller file that was itself unchanged.
+- Details: scan computes sha256 per file; unchanged files skip parse/graph/chunk; changed files replace their symbols/chunks/edges in one transaction; chunk `content_hash` (header+content) decides re-embedding, reusing stored vectors for unchanged chunks; deleted files and now-ignored files are removed with their rows. After any change the graph phase re-runs for ALL files (cheap, no model), because added or removed symbols change `name_only`/`ambiguous`/NULL-callee edges of unchanged files; files whose chunk headers (callers/callees) changed are re-chunked; only chunks whose `content_hash` changed are re-embedded.
+- Acceptance: tests on the fixture repo: second run reports `0 files changed, 0 chunks embedded`; editing a function body without changing its call set re-embeds exactly its chunk(s) (fake embedder call count equals the changed chunk count); adding a call to another function re-embeds that chunk plus the chunks whose header changed (expected set computed in the test); deleting a file removes its rows; renaming a function updates edges from a caller file that was itself unchanged.
 - Tests: fixture-based unit tests with the fake embedder.
 - Out of scope: file watching.
 - Owner: agent
@@ -45,7 +45,7 @@ P2-S2 (runtime, `doctor`) and P2-S3 (scan, languages, chunking) done.
 - Why: indexing must not make the machine unusable.
 - Depends on: P2-S4-T02
 - Touches: `internal/indexer/priority_unix.go`, `internal/indexer/threads.go`
-- Details: on macOS and Linux lower the process priority (`setpriority(PRIO_PROCESS, 0, 10)`; on macOS also set `QOS_CLASS_BACKGROUND` via the supported mechanism if available, else priority only); `--threads N` (default `max(1, NumCPU/2)`) limits `GOMAXPROCS` and the runtime's thread count; `--foreground` skips the priority change.
+- Details: on macOS and Linux lower the process priority (`setpriority(PRIO_PROCESS, 0, 10)` on both OSes; no QoS call, because Go has no pure-Go API for it; document this); `--threads N` (default `max(1, NumCPU/2)`) limits `GOMAXPROCS` and the runtime's thread count; `--foreground` skips the priority change.
 - Acceptance: tests assert the chosen priority via `syscall.Getpriority` equals 10 while indexing (and 0 with `--foreground`); `--threads 2` results in the runtime fake receiving `threads=2`.
 - Tests: unit tests (build-tagged per OS where required, running on both native runners).
 - Out of scope: Windows.
@@ -85,7 +85,7 @@ P2-S2 (runtime, `doctor`) and P2-S3 (scan, languages, chunking) done.
 - Why: a bad file must never fail the run.
 - Depends on: P2-S4-T03
 - Touches: `internal/indexer/report.go`
-- Details: collect per-file errors (read, parse panic recovered, chunk, embed truncation) in `index_errors(path, phase, message)`; `index` exits 0 when only per-file errors occurred and prints the count and `lodestone status` hint; exits non-zero only on store/runtime failures. `--strict` makes any file error exit 1.
+- Details: collect per-file errors (read, parse panic recovered, chunk, embed `too_large`/`truncated`) in the `index_errors(path, phase, message)` table created in P2-S1-T07; `index` exits 0 when only per-file errors occurred and prints the count and `lodestone status` hint; exits non-zero only on store/runtime failures. `--strict` makes any file error exit 1.
 - Acceptance: running the pipeline over the robustness corpus (P2-S3-T11) exits 0 with the expected error rows; `--strict` exits 1; the rows survive a rerun and clear when the file is fixed.
 - Tests: pipeline tests over the corpus.
 - Out of scope: auto-fix.
@@ -95,8 +95,8 @@ P2-S2 (runtime, `doctor`) and P2-S3 (scan, languages, chunking) done.
 - Why: the Kubernetes parity run needs Phase 1's file set and slice (D-049) and the tool must handle a large repo.
 - Depends on: P2-S4-T03
 - Touches: `eval/phase2/k8s-parity.toml`, `internal/project/config.go`
-- Details: `config.toml` supports `ignore = [...]` globs and `[eval] slice = [prefixes]`, `[eval] exclude_tests = true`; the parity file replicates the Phase 1 exclusions (vendor, `zz_generated*`, `*.pb.go`, `testdata/`, `*_test.go`, generated clients) and the four slice prefixes. `index --config <path>` uses an explicit config file. The slice is applied at query time through the shared collapse helper (D-039), not at index time.
-- Acceptance: a test builds the file list for a mini-tree and asserts the parity config excludes exactly the Phase 1 categories; running `lodestone index --config eval/phase2/k8s-parity.toml` on the Kubernetes checkout completes without aborting (the manual run is recorded in Results with file counts that equal Phase 1's walk counts for non-slice-filtered files).
+- Details: `config.toml` supports `ignore = [...]` globs and `[eval] slice = [prefixes]`, `[eval] exclude_tests = true`, `[eval] languages = ["go"]` (only `.go` files are indexed, as in Phase 1) and the Phase 1 build constraint (linux/amd64, D-058); the parity file replicates the Phase 1 exclusions (vendor, `zz_generated*`, `*.pb.go`, `testdata/`, `*_test.go`, generated clients) and the four slice prefixes. `index --config <path>` uses an explicit config file. The slice is applied at query time through `VectorQuery.PathPrefixes` (inside the vector search) and the shared collapse helper (D-039), not at index time.
+- Acceptance: a test builds the file list for a mini-tree and asserts the parity config excludes exactly the Phase 1 categories; running `lodestone index --config eval/phase2/k8s-parity.toml` on the Kubernetes checkout completes without aborting (the manual run is recorded in Results and the number of indexed files under the four slice prefixes equals `select count(*) from files where in_slice` in the Phase 1 database).
 - Tests: config parsing and exclusion unit tests.
 - Out of scope: the eval run itself (P2-S8).
 - Owner: agent

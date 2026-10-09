@@ -11,12 +11,12 @@ S4 done (harness, DEV labels, TEST frozen). Function-level summary run finished 
 
 ## Tasks
 
-### S5-T01 - Migration 00006: packages and summary uniqueness
-- Why: package summaries need a target ID; summaries must be unique per version.
+### S5-T01 - Migration 00006: packages
+- Why: package summaries need a target ID (summary uniqueness already exists since 00003).
 - Depends on: none
-- Touches: `internal/store/migrations/00006_packages.sql`
-- Details: `CREATE TABLE packages (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, import_path text NOT NULL UNIQUE, in_slice boolean NOT NULL DEFAULT false); INSERT INTO packages (import_path, in_slice) SELECT package, bool_or(in_slice) FROM files GROUP BY package; CREATE UNIQUE INDEX summaries_uniq ON summaries (level, target_id, prompt_version);` (dedupe any existing duplicate function rows first inside the migration, keeping the latest `done`). Down reverses. `walk` must keep `packages` in sync (add to walk's transaction).
-- Acceptance: `select count(*) from packages where in_slice` > 0; rerunning `walk` leaves counts unchanged; migrate down/up works.
+- Touches: `internal/store/migrations/00006_packages.sql`, `internal/walk/`, `cmd/indexer/walk.go`
+- Details: `CREATE TABLE packages (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, import_path text NOT NULL UNIQUE, in_slice boolean NOT NULL DEFAULT false); INSERT INTO packages (import_path, in_slice) SELECT package, bool_or(in_slice) FROM files GROUP BY package;` Down drops the table. `walk` keeps `packages` in sync inside its transaction.
+- Acceptance: `select count(*) from packages where in_slice` > 0; rerunning `walk` leaves counts unchanged; `make migrate-down migrate-up` exits 0 and `\d packages` is unchanged.
 - Tests: migration integration test; walk test asserts packages sync.
 - Out of scope: summaries.
 - Owner: agent
@@ -25,7 +25,7 @@ S4 done (harness, DEV labels, TEST frozen). Function-level summary run finished 
 - Why: file summaries depend on complete function summaries.
 - Depends on: none
 - Touches: this file (Results)
-- Details: resume the run if needed; `summarize --level function --retry-failed` once; record counts by status and reasons (`truncated` count). Read 30 random function summaries (seed 3) for obvious failures (empty, code dump, off-topic); if > 10% bad, stop and revise `fn-v1` -> `fn-v2` (new `prompt_version`, rerun is a new decision to be flagged to the author, since it costs another overnight run).
+- Details: resume the run if needed; `summarize --level function --retry-failed` once; record counts by status and reasons (`truncated` count). Read 30 random function summaries (seed 3; a second look after the S1-T14 gate, now on the full run) for obvious failures (empty, code dump, off-topic); if > 10% bad, stop and revise `fn-v1` -> `fn-v2` (new `prompt_version`, rerun is a new decision to be flagged to the author, since it costs another overnight run).
 - Acceptance: `select status,count(*) from summaries where level='function' group by 1` shows 0 pending; failed < 2% of eligible; Results has counts and the 30-sample verdicts.
 - Tests: none.
 - Out of scope: new prompts unless the 10% threshold trips.
@@ -65,8 +65,8 @@ S4 done (harness, DEV labels, TEST frozen). Function-level summary run finished 
 - Why: coarse-to-fine retrieval searches summary vectors.
 - Depends on: T05
 - Touches: `cmd/indexer/embed.go`
-- Details: add target kinds `summary_function`, `summary_file`, `summary_package` to `embed --kinds`. Text = summary text; title = `<file path> <qualified symbol name>` for functions, file path for files, package import path for packages (per [#stage-embed](../architecture.md#stage-embed)). `input_hash` = summary `input_hash`. Default model, slice only. Build partial HNSW indexes per `(model, kind)` with `indexer vindex` for the three kinds (small kinds like packages may skip the index; the command logs `seq scan is cheaper` for tables under 1000 rows and skips).
-- Acceptance: `select target_kind,count(*) from embeddings where model='qwen3-embedding:0.6b' group by 1` shows counts equal to the `done` summary rows per level; rerun embeds 0; `EXPLAIN` uses the HNSW index for `summary_function`.
+- Details: add target kinds `summary_function`, `summary_file`, `summary_package` to `embed --kinds`. Text = summary text; title = `<file path> <qualified symbol name>` for functions, file path for files, package import path for packages (per [#stage-embed](../architecture.md#stage-embed)). `input_hash` = summary `input_hash`; `embeddings.target_id` = `summaries.id`. Default model, slice only. Build partial HNSW indexes per `(model, kind)` with `indexer vindex` for the three kinds (small kinds like packages may skip the index; the command logs `seq scan is cheaper` for tables under 1000 rows and skips).
+- Acceptance: `select target_kind,count(*) from embeddings where model='qwen3-embedding:0.6b' group by 1` shows counts equal to the `done` summary rows per level minus the `embed_failures` rows of that kind; rerun embeds 0; `EXPLAIN` uses the HNSW index for `summary_function`.
 - Tests: extend the embed unit tests for new kinds and title composition.
 - Out of scope: other models (S8).
 - Owner: agent
@@ -74,7 +74,7 @@ S4 done (harness, DEV labels, TEST frozen). Function-level summary run finished 
 ### S5-T07 - Coarse-to-fine retriever (A2)
 - Why: the core contribution ([#semantic-retriever](../architecture.md#semantic-retriever)).
 - Depends on: T06
-- Touches: `internal/retrieve/coarse.go`
+- Touches: `internal/retrieve/coarse.go`, `cmd/indexer/search.go`, `internal/evalconfig/`
 - Details: `Coarse{Weights{Direct, Package, Func}}.Retrieve`: embed query once; top-k_p = 5 package summaries, top-k_f = 30 file summaries, top-k_fn = 50 function summaries and top-k_c = 50 `chunk_header` chunks (each a nearest-neighbor query on its own `(model, kind)` index, see [#vector-indexes](../architecture.md#vector-indexes)). Per file: `score = Wd*max(file_sim, best_chunk_sim) + Wp*sim(pkg of file) + Wf*max(function_sim in file)` with missing components 0; `Evidence` lists the contributing hits with levels. Weights from config, default `0.5/0.2/0.3`. Candidate files = union of all hit files, ranked by score, collapse via the shared helper (slice filter before dedupe and cut, D-039), limit 10.
 - Acceptance: unit test with fixture similarities verifies the exact weighted score and ranking; `indexer search --config A2 "<query>"` returns files with evidence from at least two levels for some query; wiring: `evalconfig` registers `A2`.
 - Tests: unit tests for score combination (each component alone, all missing), integration test (guarded) on fixture vectors.

@@ -38,7 +38,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Why: reproducibility and cost ([eval-protocol.md#reproducibility](../eval-protocol.md#reproducibility)).
 - Depends on: T02
 - Touches: `internal/llm/cache.go`, `internal/llm/fallback.go`, `cmd/eval/cacheexport.go`
-- Details: `Cached(inner, store, promptVersion)`: key `prompt_hash = sha256(promptVersion | system | messages | temperature | max_tokens)`, `model` from the response model name; hit returns stored response with `CacheHit=true` and zero latency; miss calls inner and stores. `WithFallback(primary, ollama)`: on `RateLimitError` after retries, 5xx, or timeout use the Ollama LLM and mark `Model` as the Ollama model (so cache entries and result JSON show which model answered). `eval cache-export --out eval/results/llm_cache.jsonl.gz` dumps `llm_cache` gzipped JSONL. Prompt version is a required argument; no default.
+- Details: `Cached(inner, store, promptVersion)`: key `prompt_hash = sha256(promptVersion | system | messages | temperature | max_tokens)`, `model` = the configured model name of `inner` (known before the call); hit returns stored response with `CacheHit=true` and zero latency; miss calls inner and stores. `WithFallback(primary, ollama)`: on `RateLimitError` after retries, 5xx, or timeout use the Ollama LLM and mark `Model` as the Ollama model (so cache entries and result JSON show which model answered). `eval cache-export --out eval/results/llm_cache.jsonl.gz` dumps `llm_cache` gzipped JSONL. Prompt version is a required argument; no default.
 - Acceptance: second identical call is a hit (unit test counts inner calls = 1); changing `promptVersion` misses; fallback test returns the Ollama response and model name when the primary returns 429 x4; `eval cache-export` writes a gz file whose line count equals `select count(*) from llm_cache`.
 - Tests: unit tests with in-memory store fake, httptest for fallback; guarded integration test with Postgres.
 - Out of scope: wiring into server (T10).
@@ -49,7 +49,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Depends on: none
 - Touches: `internal/retrieve/lexical.go`
 - Details: for query `q`: (1) exact match on `symbols.name` and `qualified_name` (case-sensitive) score 1.0; (2) trigram `similarity(name, q)` over `symbols.name`/`qualified_name` with `%` operator, threshold 0.3, score = similarity * 0.8; (3) FTS: `chunks.search_tsv @@ websearch_to_tsquery('simple', <SplitIdentifiers(q) joined>)` ordered by `ts_rank`, score normalized by max in result set * 0.6. Restrict to in-slice for evaluation (config flag `SliceOnly`, default true in eval; the server flag is on). Hits collapse to files via the shared helper; `Evidence` carries symbol/chunk and line range.
-- Acceptance: with the real index, `where is schedulePod defined` returns the defining file first; `pod backoff` returns a file containing `podBackoff` identifiers in the top 5 (verified once manually, recorded in Results); unit tests pass.
+- Acceptance: with the real index, `where is schedulePod defined` returns the defining file first; a fixture test shows `pod backoff` returns the fixture file containing `podBackoff` in the top 5, and on the real index the top 5 contains at least one file whose `search_tsv` matches both `pod` and `backoff` (SQL check recorded in Results); unit tests pass.
 - Tests: guarded integration test with 20-symbol fixture (exact, trigram typo `schedulPod`, split fragment); unit test for score blending.
 - Out of scope: ranking tuning.
 - Owner: agent
@@ -67,9 +67,9 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 ### S6-T06 - Rule-based router
 - Why: cheap, deterministic routing first ([#router](../architecture.md#router)).
 - Depends on: none
-- Touches: `internal/retrieve/router_rules.go`
+- Touches: `internal/retrieve/router_rules.go`, `internal/retrieve/retrieve.go` (`RouteDecision`)
 - Details: `RouteDecision` becomes `{Route, Retrievers[], Symbols[], Confidence float64, Reason string, ViaLLM bool}`. Rules, in order: backticked identifier(s) -> symbols; `who calls|callers of|what calls|callees of|what does <X> call` -> structural conf 0.9; `where is <X> defined|find <X>|definition of` or the whole query being a single identifier-looking token -> lexical conf 0.9; query containing a backticked identifier but no structural phrase -> lexical conf 0.7; natural-language question with >= 6 words and no identifiers -> semantic conf 0.7; else conf 0.4. Table of rules lives in one slice of `Rule{Name, Match, Route, Conf}`; `Reason` names the rule.
-- Acceptance: golden table test with >= 30 query strings (including all 7 DEV structural/lexical queries once labeled, copied as fixtures) passes; decision for "who calls `schedulePod`" = structural, conf >= 0.9, symbols=[schedulePod].
+- Acceptance: golden table test with >= 30 query strings, none copied from DEV (DEV strings are added only after S6-T12 as regression rows), passes; decision for "who calls `schedulePod`" = structural, conf >= 0.9, symbols=[schedulePod].
 - Tests: golden table.
 - Out of scope: LLM router (T07), threshold tuning (T12).
 - Owner: agent
@@ -78,7 +78,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Why: handle low-confidence queries.
 - Depends on: T03, T06
 - Touches: `internal/retrieve/router_llm.go`, `internal/retrieve/router.go`
-- Details: `prompt_version = "router-v1"`; system prompt: define the three routes with one example each; ask for JSON only `{"route":"...","symbols":["..."],"confidence":0.0-1.0,"reason":"..."}`; temperature 0, `max_tokens` 150. Parse strictly; one repair retry on invalid JSON, then fall back to fan-out. Composite `Router`: rules -> if `Confidence < threshold` (config `ROUTER_THRESHOLD`, default 0.6) call the LLM router; if the LLM's confidence is also < threshold, `Retrievers = {lexical, structural, semantic}` (fan-out) with `Reason` saying so. LLM failure (any error after fallback) -> fan-out. Config `ROUTER_LLM=off` selects rules-only mode (used by A3n): below the threshold the decision goes straight to fan-out and the LLM is never constructed or called.
+- Details: `prompt_version = "router-v1"`; system prompt: define the three routes with one example each; ask for JSON only `{"route":"...","symbols":["..."],"confidence":0.0-1.0,"reason":"..."}`; temperature 0, `max_tokens` 150. Parse strictly; one repair retry on invalid JSON, then fall back to fan-out. Composite `Router`: rules -> if `Confidence < threshold` (config `ROUTER_THRESHOLD`, default 0.5; rule confidences are 0.4, 0.7 and 0.9) call the LLM router; if the LLM's confidence is also < threshold, `Retrievers = {lexical, structural, semantic}` (fan-out) with `Reason` saying so. LLM failure (any error after fallback) -> fan-out. Config `ROUTER_LLM=off` selects rules-only mode (used by A3n): below the threshold the decision goes straight to fan-out and the LLM is never constructed or called.
 - Acceptance: unit tests with a fake LLM: high-confidence rule never calls the LLM; low-confidence calls it once (cache hit on second identical query); invalid JSON twice -> fan-out; with `ROUTER_LLM=off` a low-confidence query fans out and the fake LLM records 0 calls; guarded live test routes "how does the kubelet decide to evict pods under memory pressure" to semantic.
 - Tests: fake-LLM unit tests for each branch.
 - Out of scope: threshold tuning (T12).
@@ -108,7 +108,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Why: query endpoints ([#query-service](../architecture.md#query-service)).
 - Depends on: T09
 - Touches: `cmd/server/`
-- Details: `POST /search {"query": "...", "config": "A3"(default), "limit": 10}` -> `{"trace_id", "route", "results":[{file,score,evidence}]}`; wires the stack: Ollama embedder, Groq via `RateLimited` -> `Cached` -> `WithFallback`, retrievers, router, recorder. `GET /trace/{id}` returns the raw JSON payload (HTML view is S7). Validation: empty query -> 400; unknown config -> 400. `/healthz` unchanged but adds Groq as an optional (non-fatal) check.
+- Details: `POST /search {"query": "...", "config": "A3"(default), "limit": 10}` -> `{"trace_id", "route", "results":[{file,score,evidence}]}`; wires the stack: Ollama embedder, the LLM stack `WithFallback(Cached(RateLimited(Groq), GROQ_MODEL), Cached(Ollama, OLLAMA model))`, retrievers, router, recorder. `GET /trace/{id}` returns the raw JSON payload (HTML view is S7). Validation: empty query -> 400; unknown config -> 400. `/healthz` unchanged but adds Groq as an optional (non-fatal) check.
 - Acceptance: with the server running, `curl -s -XPOST localhost:8080/search -d '{"query":"who calls `schedulePod`"}'` returns route `structural`, <= 10 results and a `trace_id`; `curl localhost:8080/trace/<id>` returns the payload; 400 cases tested; `/healthz` still 200 with Groq absent.
 - Tests: handler tests with fakes for every dependency.
 - Out of scope: `/ask`, HTML.
@@ -128,7 +128,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Why: D-020 limits tuning to DEV, coarse grid.
 - Depends on: T11
 - Touches: `eval/results/{A3,A3n,A4}/dev.json`, `eval/results/tuning/s6-threshold.json`, `docs/plan/decisions.md` (D-020)
-- Details: grid for `ROUTER_THRESHOLD` in {0.5, 0.6, 0.7, 0.8}, run separately for A3 and for A3n (two parameter sets, each <= 12 combinations), each row logged; choose per config by DEV overall nDCG@10 (ties: higher rule-routed share). Record both thresholds in D-020. Run A3, A3n and A4 on DEV, `eval compare` against A0 and A2, `eval report`. Re-check ANN overlap is still >= 95% (unchanged index; one command).
+- Details: grid for `ROUTER_THRESHOLD` in {0.3, 0.5, 0.8, 0.95} (each gives a different behavior for the rule confidences 0.4, 0.7, 0.9: none sent to the LLM, only the 0.4 rules, the 0.4 and 0.7 rules, all), run separately for A3 and for A3n (two parameter sets, each <= 12 combinations), each row logged; choose per config by DEV overall nDCG@10 (ties: higher rule-routed share). Record both thresholds in D-020. Run A3, A3n and A4 on DEV, `eval compare` against A0 and A2, `eval report`. Re-check ANN overlap is still >= 95% (unchanged index; one command).
 - Acceptance: tuning JSON rows <= 12; D-020 has the threshold; `eval/results/A3/dev.json`, `A3n/dev.json`, `A4/dev.json` exist; report shows A0..A4, A3n and B0 with CIs; Groq model ID recorded in the JSON.
 - Tests: none.
 - Out of scope: TEST run; any other tuning.
@@ -141,7 +141,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Groq model ID, free-tier limits (D-007); tuning grid JSON.
 
 ## Exit criteria / Definition of Done
-`/search` and `/trace/{id}` work end to end; all LLM calls go through limiter -> cache -> fallback; A3/A3n/A4 DEV recorded; D-007 and D-020 filled; ROADMAP updated.
+`/search` and `/trace/{id}` work end to end; all LLM calls go through the stack fallback(cache(limiter(Groq))); A3/A3n/A4 DEV recorded; D-007 and D-020 filled; ROADMAP updated.
 
 ## Risks + mitigations
 - Groq rate limits during DEV runs: cache makes reruns free; fallback to Ollama marks the model in results (a run containing fallback answers is flagged and rerun).

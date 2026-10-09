@@ -13,9 +13,10 @@ Sprint plan for the Kubernetes semantic code search engine (Phase 1) and the ins
 - Each fact lives in one file; other files link by path and heading.
 - Glossary and decisions go to `glossary.md` and `decisions.md` (not `CONTEXT.md` or `docs/adr/`).
 - New schema changes are new migrations; never edit an applied one.
-- TEST queries are frozen after S4; every configuration runs on TEST exactly once.
+- TEST rules (freeze after S4, one TEST run per configuration): [eval-protocol.md#freeze](eval-protocol.md#freeze).
 - Each task is one ticket, implemented in one fresh agent session, producing one reviewable diff. Split anything bigger.
 - No time estimates anywhere: not in plans, specs or tickets.
+- Measured throughput (e.g. functions per hour reported by a run) is allowed; time estimates are not.
 - Tasks marked `Owner: human` (labeling, grading, recording, installs, releases) are done by the author.
 
 ## Per-sprint workflow
@@ -30,4 +31,4 @@ Sprint plan for the Kubernetes semantic code search engine (Phase 1) and the ins
 Only `ROADMAP.md` + the one sprint file + one ticket, plus the sections of `architecture.md`, `v2-architecture.md` or `eval-protocol.md` that the sprint file links to. Decision IDs are looked up in `decisions.md` on demand.
 
 ## Gates
-S10 ends Phase 1 and P2-S10 ends Phase 2. At each gate the agent writes the handoff document, prints the stop message, and does nothing else. Phase 2 starts only after the author's explicit approval, recorded in `decisions.md` (D-046); Phase 2 is done only after D-047.
+S10 ends Phase 1 and P2-S10 ends Phase 2. At each gate the agent writes the handoff document, prints the stop message, and does nothing else. Phase 2 starts only after the author's explicit approval, recorded in `decisions.md` (D-046); Phase 2 is done only after D-047. A ticket closes only with CI green.

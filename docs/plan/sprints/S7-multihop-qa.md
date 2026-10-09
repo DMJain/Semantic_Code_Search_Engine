@@ -35,7 +35,7 @@ S6 done (A3 pipeline, LLM client, traces, `/search`).
 - Why: the loop ([#qa-loop](../architecture.md#qa-loop)).
 - Depends on: T02, S6-T03
 - Touches: `internal/qa/loop.go`, `internal/qa/prompts.go`
-- Details: `prompt_version = "qa-hop-v1"`. System: "You answer questions about the Kubernetes codebase using only the evidence. Decide whether you can answer now or must fetch more code." User: question, compressed evidence, numbered candidate list. Response JSON: `{"action":"fetch|answer","symbols":["<candidate numbers or names>"],"reason":"..."}`. Validate: `symbols` must be a subset of the candidates (invalid names dropped; if all dropped treat as no new evidence); one repair retry on invalid JSON. Fetch = load the symbol's chunk(s) into the evidence set and mark visited. Budget: max 3 hops; token cap on the sum of prompt tokens (config `QA_TOKEN_CAP`, default 12000). Stop when action=answer, hop cap reached, a hop adds no new evidence, or the token cap would be exceeded; then the answer step ([T04](#s7-t04---answer-prompt-shared-by-both-systems)) runs. Initial evidence = A3 pipeline top-5 files' best chunks. Each hop appends a `hop` trace event with action, symbols, reason and evidence delta.
+- Details: `prompt_version = "qa-hop-v1"`. System: "You answer questions about the Kubernetes codebase using only the evidence. Decide whether you can answer now or must fetch more code." User: question, compressed evidence, numbered candidate list. Temperature 0, `max_tokens` 200. Response JSON: `{"action":"fetch|answer","symbols":["<candidate numbers or names>"],"reason":"..."}`. Validate: `symbols` must be a subset of the candidates (invalid names dropped; if all dropped treat as no new evidence); one repair retry on invalid JSON. Fetch = load the symbol's chunk(s) into the evidence set and mark visited. Budget: max 3 hops; token cap on the sum of prompt tokens (config `QA_TOKEN_CAP`, default 12000). Stop when action=answer, hop cap reached, a hop adds no new evidence, or the token cap would be exceeded; then the answer step ([T04](#s7-t04---answer-prompt-shared-by-both-systems)) runs. Initial evidence = A3 pipeline top-5 files' best chunks. Each hop appends a `hop` trace event with action, symbols, reason and evidence delta.
 - Acceptance: scripted fake-LLM tests: answer at hop 0 -> 0 fetches; fetch then answer -> 1 hop; fetch 4 times -> stops at 3; a fetch of an already-visited symbol -> stop reason `no new evidence`; invalid JSON twice -> goes to answer step with a `error` trace event.
 - Tests: scripted fake LLM covering each stop reason.
 - Out of scope: answer prompt, citations.
@@ -45,7 +45,7 @@ S6 done (A3 pipeline, LLM client, traces, `/search`).
 - Why: identical constraints make the comparison fair (D-018).
 - Depends on: T01
 - Touches: `internal/qa/answer.go`
-- Details: `prompt_version = "qa-answer-v1"`; one function `Answer(ctx, llm, question, evidence) (text, citations)` used by BOTH `/ask` and the single-shot baseline. Constraints in the system prompt: use only evidence; cite every claim as `[path:line]` with a single line number inside an evidence item; at most 200 words; if the evidence is insufficient say so. Temperature 0, `max_tokens` 400.
+- Details: `prompt_version = "qa-answer-v1"`; one function `Answer(ctx, llm, question, evidence) (text, citations)` used by BOTH `/ask` and the single-shot baseline. Constraints in the system prompt: use only evidence; cite every claim as `[path:line]` with a single line number inside an evidence item; at most 200 words; if the evidence is insufficient say so. Temperature 0, `max_tokens` 400. Both systems compress their evidence with the same constant `AnswerEvidenceBudget` (default 6000 estimated tokens) before calling `Answer`.
 - Acceptance: golden test of the rendered prompt; a test asserts that the baseline and `/ask` call the same function (the single `Answer` symbol, checked by a compile-level shared-use test).
 - Tests: golden prompt; fake-LLM test.
 - Out of scope: citation validation.
@@ -91,35 +91,35 @@ S6 done (A3 pipeline, LLM client, traces, `/search`).
 - Out of scope: styling polish (S8 GIF task).
 - Owner: agent
 
-### S7-T09 - Q&A grading rubric (human) written before any answers
+### S7-T09 - [human] Q&A grading rubric, written before any answers
 - Why: the rubric must precede the answers it grades ([#qa-evaluation](../eval-protocol.md#qa-evaluation)).
 - Depends on: none
 - Touches: `eval/qa/rubric.md` (new, committed)
 - Details: write the 0/1/2 rubric: 2 = correct and complete with a citation that supports the main claim; 1 = partially correct or correct but missing/weak citations; 0 = wrong, hallucinated, or "cannot answer" when evidence existed. Include 3 worked examples written from KEP/docs knowledge, not from system outputs. Commit before T11 generates any answers (the commit hash is referenced in the Results).
-- Acceptance: file exists, committed; its commit predates the first generated answers file (`git log` order checked in T10 Results).
+- Acceptance: file exists, committed; its commit predates the first generated answers file (`git log` order checked in T11 Results).
 - Tests: none.
 - Out of scope: grading.
-- Owner: agent
+- Owner: human
 
 ### S7-T10 - Q&A run and blind-sheet tooling
 - Why: grading must be blind and reproducible ([#qa-evaluation](../eval-protocol.md#qa-evaluation)).
 - Depends on: T06, T09
 - Touches: `cmd/eval/qa.go`
-- Details: `eval qa-run --split dev|test [--final]` runs both systems on the 15 TEST semantic queries (or DEV semantic queries for `--split dev`) and writes `eval/results/qa/<split>/answers.json` (per query per system: answer, valid/removed citations, hops, LLM calls, tokens, trace id). `eval qa-sheet --seed 77` writes `eval/qa/<split>/sheet.md` containing for each query two anonymous answers labeled `A`/`B` in seeded random order showing ONLY answer text and citations (no hops, traces, tokens, system names) and a `key.json` (mapping, stored apart and gitignored until grading ends). `eval qa-grade --in grades.csv` joins grades (0/1/2 per answer) with the key and writes `eval/results/qa/<split>/summary.json`: mean grade per system, citation precision per system, hops (multihop), tokens and LLM calls per answer per system, grade-vs-cost table. `--split test` requires `--final` and refuses a rerun.
-- Acceptance: sheet contains no occurrence of `multihop`, `single`, `hops`, `trace`, or token counts (`grep -ciE` returns 0); same seed gives the same A/B assignment; `qa-grade` on a fixture CSV yields hand-computed means; `--split test` without `--final` exits non-zero.
+- Details: `eval qa-run --split dev|test [--final]` runs both systems on the 15 TEST semantic queries (or DEV semantic queries for `--split dev`) and writes `eval/results/qa/<split>/answers.json` (per query per system: answer, valid/removed citations, hops, LLM calls, tokens, trace id). `eval qa-sheet --seed 77` writes `eval/qa/<split>/sheet.md` containing for each query two anonymous answers labeled `A`/`B` in seeded random order showing ONLY answer text and citations (no hops, traces, tokens, system names) and a `key.json` (mapping, stored apart and gitignored until grading ends). `eval qa-grade --in grades.csv` joins grades (0/1/2 per answer) with the key and writes `eval/results/qa/<split>/summary.json`: mean grade per system, citation precision per system, hops (multihop), tokens and LLM calls per answer per system, grade-vs-cost table. `--split test` requires `--final`, verifies the TEST hash (`eval freeze --verify`) first and refuses a rerun of a completed query/system pair. The 15 TEST queries are the first 15 semantic ids after a seeded shuffle (seed 77), recorded in `answers.json._meta`. `--final` runs are resumable per (query, system), idempotent, and fail closed: no Ollama fallback; on Groq quota exhaustion the run waits for the reset and continues.
+- Acceptance: sheet contains no occurrence of `multihop`, `single`, `hops`, `trace`, or token counts (`grep -ciE` returns 0); same seed gives the same A/B assignment; `qa-grade` on a fixture CSV yields hand-computed means; `--split test` without `--final` exits non-zero; a TEST run interrupted after 3 answers and restarted repeats none of them and never calls the fallback LLM (fake-LLM test); `--final` with a modified TEST file is refused.
 - Tests: unit tests for shuffling determinism, the leak grep as a test over the rendered sheet, grade aggregation.
 - Out of scope: the TEST run (S8).
 - Owner: agent
 
-### S7-T11 - DEV dry run of Q&A grading (human)
+### S7-T11 - [human] DEV dry run of Q&A grading
 - Why: validates tooling and rubric on DEV only (TEST is untouched).
 - Depends on: T08, T10
 - Touches: `eval/results/qa/dev/`
-- Details: run `qa-run --split dev` (8 semantic DEV queries, 16 answers), generate the sheet, grade 6-8 answers, run `qa-grade`, and note rubric ambiguities; fix the rubric only by appending clarifications (dated), never rewriting grades. Record that this was DEV and not reported as a result.
-- Acceptance: `summary.json` for dev exists; rubric clarifications (if any) committed with a date.
+- Details: run `qa-run --split dev` (8 semantic DEV queries, 16 answers), generate the sheet, grade 6-8 answers, run `qa-grade`, and note rubric ambiguities; fix the rubric only by appending clarifications (dated), never rewriting grades. Record that this was DEV and not reported as a result. Also record tokens and LLM calls per answer for both systems and project the total for the 30 TEST answers against the D-007 free-tier limits (days needed); this is the go/no-go input for S8-T07.
+- Acceptance: `summary.json` for dev exists; rubric clarifications (if any) committed with a date; Results holds the projected token total and days needed for the TEST Q&A run.
 - Tests: none.
 - Out of scope: TEST answers.
-- Owner: agent
+- Owner: human
 
 ## Measurements to record
 - DEV dry-run Q&A summary (tooling check only, not a reported result); latency per `/ask` mode, LLM calls and tokens per answer for both modes ([eval-protocol.md#system-metrics](../eval-protocol.md#system-metrics)).
@@ -130,7 +130,7 @@ S6 done (A3 pipeline, LLM client, traces, `/search`).
 
 ## Risks + mitigations
 - Hop LLM returns invalid JSON often: one repair retry plus answer-step fallback; counted in system metrics.
-- Groq quota during runs: cache and fallback; fallback answers are flagged and rerun.
+- Groq quota during runs: cache; DEV runs may fall back and are flagged; the TEST run fails closed and resumes after the quota resets (S7-T10).
 - UI time sink: pages are plain templates; polish is a cut-list item.
 
 ## Demo check

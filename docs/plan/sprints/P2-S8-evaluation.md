@@ -18,8 +18,8 @@ Harness and DEV decisions (T01-T03) before any TEST run; resources (T04-T06); sm
 - Why: Phase 2 results must use the same harness, metrics and guards as Phase 1.
 - Depends on: none
 - Touches: `cmd/eval/engine_lodestone.go`, `internal/evalconfig/`
-- Details: register configs `P2-float` (float32 vectors at the model's native dimension) and `P2-compact` (D-056 dimension, int8). Each runs `Engine.Search` from `internal/engine` on a lodestone index selected by `--index <path>` and applies the slice filter through the shared collapse helper before dedupe and cut (D-039). Result JSON carries the same fields as Phase 1 plus `engine: lodestone`, `lodestone_version`, `model`, `dim`, `vector_format`. `--split test` still requires `--final` and the TEST hash check (D-037).
-- Acceptance: `go run ./cmd/eval run --config P2-compact --index <path> --split dev` writes `eval/results/P2-compact/dev.json` with 15 per-query rows; a unit test shows the slice filter runs before the cut (fixture: top-10 raw hits all outside the slice, 2 inside); `--split test` without `--final` exits non-zero.
+- Details: register configs `P2-float` (float32 vectors at the model's native dimension) and `P2-compact` (D-056 dimension, int8). Each runs `Engine.Search` from `internal/engine` on a lodestone index selected by `--index <path>` and passes the slice prefixes as `VectorQuery.PathPrefixes` and applies the slice filter through the shared collapse helper before dedupe and cut (D-039). Result JSON carries the same fields as Phase 1 plus `engine: lodestone`, `lodestone_version`, `model`, `dim`, `vector_format`. `--split test` still requires `--final` and the TEST hash check (D-037).
+- Acceptance: `go run ./cmd/eval run --config P2-compact --index <path> --split dev` writes `eval/results/P2-compact/dev.json` with 15 per-query rows; a unit test shows the slice filter runs before the cut (fixture: top-10 raw hits all outside the slice, 2 inside); a store-level test shows that when the 200 nearest chunks are all outside the slice, `P2-compact` still returns 10 in-slice files because `PathPrefixes` is applied inside the vector search; `--split test` without `--final` exits non-zero.
 - Tests: unit tests with a fake engine; the filter-before-cut test.
 - Out of scope: running on TEST.
 - Owner: agent
@@ -68,7 +68,7 @@ Harness and DEV decisions (T01-T03) before any TEST run; resources (T04-T06); sm
 - Why: show default mode does not exceed a memory cap on Linux (D-038).
 - Depends on: P2-S8-T04
 - Touches: `.github/workflows/ci.yml`, `scripts/measure-mem-linux.sh`
-- Details: a Linux amd64 job builds `lodestone`, runs `index` and 5 `search` queries on `testdata/fixture-repo` (with the real embedding model cached via the Actions cache or the fake embedder if the model download is too large for CI, recorded in the job comment) inside a container with `--memory=2g`, and prints cgroup `memory.peak`. The job fails if the container is OOM-killed or the peak exceeds 2GB.
+- Details: a Linux amd64 job builds `lodestone`, runs `index` and 5 `search` queries on `testdata/fixture-repo` (with the real embedding model cached via the Actions cache or the fake embedder if the model download is too large for CI, recorded in the job comment) inside a container with `--memory=2g`, and prints cgroup `memory.peak`. The job fails if the container is OOM-killed or the peak exceeds 2GB. The job output and `resources.json` record `embedder: real|fake`; a README claim based on a fake-embedder run says so, and the real-model run is repeated once locally in a `--memory=2g` container.
 - Acceptance: the CI run shows the `memory.peak` value; a deliberately lowered cap (`--memory=20m`) in a local run makes the job fail (recorded in Results).
 - Tests: the CI job.
 - Out of scope: macOS CI memory checks.

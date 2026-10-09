@@ -26,8 +26,8 @@ Repo at commit `59a5039` (clean, `go build ./...` passes). Docker running. Ollam
 - Why: audit finding 3; migrations were only observed as no-ops on an existing database.
 - Depends on: S0-T01
 - Touches: `Makefile` (new `reset-db` target), `internal/store/migrate_integration_test.go`
-- Details: add `reset-db: docker compose down -v && docker compose up -d --wait && go run ./cmd/indexer migrate`. Run it. The integration test also runs goose Up, Down, Up once in a throwaway database.
-- Acceptance: `make reset-db` exits 0; `psql "$DATABASE_URL" -c '\dt'` lists files, symbols, chunks, edges, summaries, embeddings, llm_cache, traces and `goose_db_version`; `\dx` shows `vector` and `pg_trgm`.
+- Details: add `reset-db: docker compose down -v && docker compose up -d --wait && go run ./cmd/indexer migrate`. Add `migrate-down` (`go run ./cmd/indexer migrate down`, one step; implement the down mode if the command lacks it). Run it. The integration test also runs goose Up, Down, Up once in a throwaway database.
+- Acceptance: `make reset-db` exits 0; `make migrate-down migrate-up` exits 0 and `\dt` is unchanged; `psql "$DATABASE_URL" -c '\dt'` lists files, symbols, chunks, edges, summaries, embeddings, llm_cache, traces and `goose_db_version`; `\dx` shows `vector` and `pg_trgm`.
 - Tests: the integration test covers Up/Down/Up when `TEST_DATABASE_URL` is set.
 - Out of scope: new schema (S0-T03).
 - Owner: agent
@@ -57,7 +57,7 @@ Repo at commit `59a5039` (clean, `go build ./...` passes). Docker running. Ollam
 - Depends on: S0-T01
 - Touches: `internal/embed/embed.go`, `internal/embed/ollama_test.go`, `.env.example`, `cmd/indexer/doctor.go`, `docs/plan/decisions.md` (D-003 outcome)
 - Details: delete the registry entry of the third (provisional, dropped) embedding model and every mention of it (tests, `.env.example` comment, doctor text); only `qwen3-embedding:0.6b` and `nomic-embed-text` remain. For `qwen3-embedding:0.6b` and `nomic-embed-text` read the official model card (Hugging Face) and the Ollama library page. Record in D-003: card URL, exact query prefix, exact document prefix, native dim, MRL support yes/no, maximum context. Fix any mismatch in the registry and add one render test per model asserting the exact rendered strings.
-- Acceptance: `go test -count=1 ./internal/embed/...` passes with one render test per registry model; a unit test asserts `len(embed.KnownModels()) == 2` and lists exactly `nomic-embed-text` and `qwen3-embedding:0.6b`; D-003 holds URL, both prefixes, dim, MRL and context for both models.
+- Acceptance: `go test -count=1 ./internal/embed/...` passes with one render test per registry model; a unit test asserts `len(embed.KnownModels()) == 2` and lists exactly `nomic-embed-text` and `qwen3-embedding:0.6b`; D-003 holds URL, both prefixes, dim, MRL, context and the embed `num_ctx` (rule in [#ollama-requests](../architecture.md#ollama-requests)) for both models; `! grep -rniI 'g[e]mma' . --exclude-dir=.git --exclude-dir=plan` exits 0 (no leftover mention in `.env.example`, tests or doctor text).
 - Tests: table-driven render tests with golden strings copied from the cards.
 - Out of scope: the live probe (S0-T07).
 - Owner: agent
@@ -76,9 +76,9 @@ Repo at commit `59a5039` (clean, `go build ./...` passes). Docker running. Ollam
 - Why: audit item "run the probe against a live Ollama for each model".
 - Depends on: S0-T05, S0-T06
 - Touches: `cmd/indexer/doctor.go`, `internal/embed/`
-- Details: add `indexer doctor --probe-all`: for each model in `embed.KnownModels()` that is pulled, run the probe (no NaN/Inf, `len == Dim()`, L2 norm in [NormMin, NormMax]) on 3 fixed strings and print `model dim norm PASS|FAIL`. Models not pulled print `SKIP (not pulled)` with the pull command. A dimension different from the registry value fails and prints both numbers. Record the table in Results.
-- Acceptance: with Ollama running and both models pulled, `go run ./cmd/indexer doctor --probe-all` exits 0 and prints PASS twice; after `ollama rm nomic-embed-text` that model prints SKIP and the exit code is still 0, unless it is the configured `OLLAMA_EMBED_MODEL` (then non-zero).
-- Tests: unit tests with `httptest.Server`: wrong-dim vector (FAIL), NaN vector (FAIL), good vector (PASS). The live run is guarded by `OLLAMA_URL`.
+- Details: add `indexer doctor --probe-all`: for each model in `embed.KnownModels()` that is pulled, run the probe (no NaN/Inf, `len == Dim()`, L2 norm in [NormMin, NormMax]) on 3 fixed strings and print `model dim norm PASS|FAIL`. Models not pulled print `SKIP (not pulled)` with the pull command. A dimension different from the registry value fails and prints both numbers. Record the table in Results. Also add `indexer doctor --ollama-checks`, which (a) sends one identical 7B generation request twice and prints both `prompt_eval_count` values (prompt-cache effect, see D-015), and (b) sends an input longer than `num_ctx` to each embedding model with `truncate:false` and prints whether an error is returned.
+- Acceptance: with Ollama running and both models pulled, `go run ./cmd/indexer doctor --probe-all` exits 0 and prints PASS twice; after `ollama rm nomic-embed-text` that model prints SKIP and the exit code is still 0, unless it is the configured `OLLAMA_EMBED_MODEL` (then non-zero); `doctor --ollama-checks` exits 0 and prints `gen_count_1`, `gen_count_2` and `embed_oversized: error` per model; the values are recorded in Results and, if the second generation count is lower, D-015 notes the cache effect.
+- Tests: unit tests with `httptest.Server` (also for `--ollama-checks`: error on oversized embed input, two counts printed): wrong-dim vector (FAIL), NaN vector (FAIL), good vector (PASS). The live run is guarded by `OLLAMA_URL`.
 - Out of scope: embedding quality comparison (S8).
 - Owner: agent
 
@@ -95,9 +95,9 @@ Repo at commit `59a5039` (clean, `go build ./...` passes). Docker running. Ollam
 ### S0-T09 - Docs housekeeping
 - Why: audit finding 5, D-017, and stale placeholders that create two sources of truth.
 - Depends on: none
-- Touches: `docs/agents/domain.md`, `docs/architecture.md` (delete), `eval/queries.jsonl` (delete), `README.md` (links only)
-- Details: (1) check that `AGENTS.md` and `CLAUDE.md` contain no `@path` imports and that `docs/agents/*` appears only as plain links; record the result in D-017. (2) In `docs/agents/domain.md` replace `CONTEXT.md` with `docs/plan/glossary.md` and `docs/adr/` with `docs/plan/decisions.md`. (3) Delete `docs/architecture.md` and `eval/queries.jsonl`. (4) Fix any link in `README.md` that pointed at them. `docs/agents/issue-tracker.md` stays unchanged (D-032).
-- Acceptance: `grep -rn "@" AGENTS.md CLAUDE.md | grep -v "@latest"` shows no import lines; `grep -rn "CONTEXT.md\|docs/adr" docs/agents/` returns nothing; `test ! -e docs/architecture.md && test ! -e eval/queries.jsonl`; `grep -rn "docs/architecture.md\|queries.jsonl" --include=*.md --include=*.go --include=Makefile .` returns nothing outside `docs/plan/`.
+- Touches: `AGENTS.md` (one line), `docs/agents/domain.md`, `docs/architecture.md` (delete), `eval/queries.jsonl` (delete), `README.md` (links only)
+- Details: (1) check that `AGENTS.md` and `CLAUDE.md` contain no `@path` imports and that `docs/agents/*` appears only as plain links; record the result in D-017. (1b) In `AGENTS.md` replace the "Domain docs" line with: `Domain docs: glossary `docs/plan/glossary.md`, decisions `docs/plan/decisions.md`. See `docs/agents/domain.md`.` (2) In `docs/agents/domain.md` replace `CONTEXT.md` with `docs/plan/glossary.md` and `docs/adr/` with `docs/plan/decisions.md`. (3) Delete `docs/architecture.md` and `eval/queries.jsonl`. (4) Fix any link in `README.md` that pointed at them. `docs/agents/issue-tracker.md` stays unchanged (D-032).
+- Acceptance: `grep -rn "@" AGENTS.md CLAUDE.md | grep -v "@latest"` shows no import lines; `grep -rn "CONTEXT.md\|docs/adr" docs/agents/` returns nothing; `test ! -e docs/architecture.md && test ! -e eval/queries.jsonl`; `grep -rn "docs/architecture.md\|queries.jsonl" --include=*.md --include=*.go --include=Makefile --exclude-dir=plan --exclude-dir=.scratch --exclude-dir=.git .` returns nothing; `grep -n "CONTEXT.md\|docs/adr" AGENTS.md` returns nothing.
 - Tests: none.
 - Out of scope: the final README (S8).
 - Owner: agent

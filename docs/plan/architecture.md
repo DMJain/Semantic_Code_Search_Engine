@@ -6,7 +6,7 @@ Decisions and rationale: `docs/plan/decisions.md` (IDs `D-nnn`). Term definition
 ## Corpus and slice
 
 - Corpus: `kubernetes/kubernetes`, shallow clone at one pinned tag (D-006). The clone keeps `vendor/` on disk (needed by `callgraph-gt`); indexes never include it.
-- Excluded from ALL indexes: `vendor/`, `zz_generated*`, `*.pb.go`, `testdata/`, `*_test.go`, generated client code under client-go (generated clientsets, listers, informers, applyconfigurations). Only `.go` files are indexed. Extra rule: a file whose first 10 lines contain `Code generated` and `DO NOT EDIT` is excluded.
+- Excluded from ALL indexes: `vendor/`, `zz_generated*`, `*.pb.go`, `testdata/`, `*_test.go`, generated client code under client-go (generated clientsets, listers, informers, applyconfigurations). Only `.go` files are indexed. Extra rule: a file whose first 10 lines contain `Code generated` and `DO NOT EDIT` is excluded. Build context: only files selected by `go/build.Context{GOOS:"linux", GOARCH:"amd64", CgoEnabled:false}.MatchFile` are indexed (rule `build_constraint`); `callgraph-gt` loads packages with the identical context ([#stage-callgraph-gt](#stage-callgraph-gt)).
 - Slice = `pkg/scheduler`, `pkg/kubelet`, `pkg/controller`, `staging/src/k8s.io/client-go` (non-generated). Final size is set in S1 and never changes (D-005). `files.in_slice` marks it.
 - Chunks, `search_tsv` and edges cover the whole filtered repo (no GPU needed). Vectors (raw chunks, header chunks, summaries) exist for the slice only (D-029). Baseline and system are always evaluated on the slice.
 
@@ -20,18 +20,18 @@ Already in the repo (provisional structs, sprints may extend): `embed.Embedder` 
 
 ## Result contract
 
-Every `Retriever` returns `[]Result{File, Score, Evidence[]}` ranked by file. Chunk, symbol and summary hits collapse to files by max score; `Evidence` keeps the underlying hits (kind, id, score, line range) for traces and Q&A. One helper in `internal/retrieve` does the collapse: it filters to the slice FIRST, then de-duplicates files, then cuts to top-k (D-039); no retriever reimplements it. Metrics rules: `docs/plan/eval-protocol.md#retrieval-metrics`.
+Every `Retriever` returns `[]Result{File, Score, Source, Evidence[]}` ranked by file (`Source` = the retriever kind). Chunk, symbol and summary hits collapse to files by max score; `Evidence` keeps the underlying hits (kind, id, score, line range from `chunks.start_line/end_line`) for traces and Q&A. One helper in `internal/retrieve` does the collapse: it filters to the slice FIRST, then de-duplicates files, then cuts to top-k (D-039); no retriever reimplements it. Metrics rules: `docs/plan/eval-protocol.md#retrieval-metrics`.
 
 ## Data model
 
 Initial schema is `internal/store/migrations/00001_init.sql` (never edited). Later changes are new migrations, listed by the sprint that adds them:
 - 00002 (S0): `chunks.search_tsv` becomes a regular `tsvector NOT NULL DEFAULT ''` column populated from Go; GIN index recreated.
-- 00003 (S1): `symbols.raw_calls text[]`, `files.parsed_sha text`, `summaries.reason text`.
+- 00003 (S1): `symbols.raw_calls text[]`, `files.parsed_sha text`, `summaries.reason text`, unique index `summaries_uniq (level, target_id, prompt_version)`.
 - 00004 (S2): `edges.call_line int`, `edges.call_kind text`, `files.graphed_sha text`, unique edge index.
-- 00005 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`.
-- 00006 (S5): `packages` table, unique `(level, target_id, prompt_version)`.
+- 00005 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`, `chunks.start_line int NOT NULL`, `chunks.end_line int NOT NULL`, table `embed_failures(target_kind, target_id, model, reason, created_at, primary key (target_kind, target_id, model))` (per part; a grouped chunk lives in one file and stores the span of both declarations).
+- 00006 (S5): `packages` table.
 - 00007 (S9): summaries unique index also includes `model`, so 7B and 3B summary sets coexist.
-`embeddings.target_kind` values: `chunk_raw`, `chunk_header`, `summary_function`, `summary_file`, `summary_package`.
+`embeddings.target_kind` values: `chunk_raw`, `chunk_header`, `summary_function`, `summary_file`, `summary_package`. `embeddings.target_id` is `chunks.id` for the chunk kinds and `summaries.id` for the summary kinds.
 
 ## Resumability
 
@@ -39,7 +39,10 @@ Every stage reads/writes Postgres, is idempotent, and resumes after a crash thro
 
 ## Ollama requests
 
-Every Ollama request (summarize and embed) passes an explicit `num_ctx` from per-model config. After each response the caller compares `prompt_eval_count` with the expected input size (estimated tokens, see [#token-estimate](#token-estimate)); a mismatch marks the row `status='failed'` with reason `truncated` instead of saving a result.
+Every Ollama request (summarize and embed) passes an explicit `num_ctx` from per-model config. Two layers guard against silent truncation.
+
+1. Pre-send, deterministic: if the estimated tokens of the whole request ([#token-estimate](#token-estimate)) exceed 0.8 x `num_ctx`, the request is not sent. A summary row is marked `status='failed'` with reason `too_large`; an embed item is not stored and is recorded in `embed_failures` with the same reason (skipped on later runs unless `--retry-failed`). Embedding `num_ctx` is set per model so that the largest chunk (1500 estimated tokens plus header, title and prefix, at most 2000) is under 0.8 x `num_ctx`: 4096 unless the model card maximum is lower (then lower the chunk limit and record it in D-003).
+2. Post-send: embed requests set `truncate:false` and an input-too-long error is recorded in `embed_failures` as `truncated`; a generation response with `prompt_eval_count >= num_ctx - num_predict` marks the row `status='failed'`, reason `truncated`. `prompt_eval_count` is NOT compared with the estimate: Ollama's prompt cache can lower it for a repeated prefix, so that comparison gives false failures. S0-T07 sends one request twice and records both counts to confirm. `/api/embed` returns one aggregate `prompt_eval_count` per request, so embed items are sent one per request whenever the pre-send check flags any item in a batch.
 
 ## Token estimate
 
@@ -47,11 +50,11 @@ Every Ollama request (summarize and embed) passes an explicit `num_ctx` from per
 
 ## Stage: walk
 
-Apply exclusions ([#corpus-and-slice](#corpus-and-slice)), upsert `files(path, package, sha, loc, in_slice)`, delete rows for vanished files, skip unchanged sha. `package` is the Go import path derived from directory (`k8s.io/kubernetes/pkg/scheduler`, staging paths map to `k8s.io/client-go/...`). Prints counts by slice/non-slice, LOC, excluded counts per rule.
+Apply exclusions ([#corpus-and-slice](#corpus-and-slice)), upsert `files(path, package, sha, loc, in_slice)`, delete rows for vanished files, skip unchanged sha. `package` is the Go import path derived from directory (`k8s.io/kubernetes/pkg/scheduler`, staging paths map to `k8s.io/client-go/...`). Files rejected by the build context ([#corpus-and-slice](#corpus-and-slice)) are counted under `build_constraint`. Prints counts by slice/non-slice, LOC, excluded counts per rule.
 
 ## Stage: parse
 
-tree-sitter extraction of functions, methods (with receiver), structs, interfaces into `symbols`: `qualified_name` like `k8s.io/kubernetes/pkg/scheduler.(*Scheduler).schedulePod`, line range, signature, doc comment, and `raw_calls` (raw call-expression text such as `sched.cache.AssumePod`, deduplicated, source order). `raw_calls` is used for summarization input only (D-019).
+tree-sitter extraction of functions, methods (with receiver), structs, interfaces into `symbols`: `qualified_name` like `k8s.io/kubernetes/pkg/scheduler.(*Scheduler).schedulePod`, line range, signature, doc comment, and `raw_calls` (raw call-expression text such as `sched.cache.AssumePod`, deduplicated, source order). `raw_calls` is used for summarization input only (D-019). `qualified_name` is globally unique: duplicates within a package (for example several `init` functions, or same-named functions in different files) get the suffix `#<n>`, numbered from the second occurrence by `(path, start_line)` over the whole package before insert.
 
 ## Stage: graph
 
@@ -59,11 +62,11 @@ Re-parses each file with tree-sitter (D-019) and resolves call expressions to `e
 
 ## Stage: callgraph-gt
 
-Separate command `cmd/callgraph-gt`. Type-checked VTA call graph (D-011) of the SLICE via `go/packages`, stored as `edges(source='gopackages')` with `call_kind` from SSA call mode. Evaluation only; never read by the server. The working invocation (env, flags) is recorded in D-025.
+Separate command `cmd/callgraph-gt`. Type-checked VTA call graph (D-011) of the SLICE via `go/packages` under the build context of [#corpus-and-slice](#corpus-and-slice) (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=vendor`); the set of slice `.go` files that `walk` marks equals the set `go/packages` loads for the slice (checked in S2), stored as `edges(source='gopackages')` with `call_kind` from SSA call mode. Evaluation only; never read by the server. The working invocation (env, flags) is recorded in D-025.
 
 ## Stage: chunk
 
-One chunk per function/method; chunks over 1500 estimated tokens split at top-level statement boundaries and every part keeps the signature; small related decls grouped (struct + its `NewX` constructor); top-level const/var blocks are not chunked in v1 (limitation). Each chunk gets a context header: package, file, signature, top 5 callees, top 5 callers (treesitter edges; exact before name_only, ambiguous excluded, ties by name). `search_tsv` is built in Go from header+content with identifiers split (camelCase and snake_case into parts, original kept), lowercased; the same splitter is applied to lexical queries.
+One chunk per function/method; chunks over 1500 estimated tokens split at top-level statement boundaries and every part keeps the signature; small related decls grouped (struct + its `NewX` constructor, only when both are in the same file); top-level const/var blocks are not chunked in v1 (limitation). Each chunk stores `start_line` and `end_line`. Each chunk gets a context header: package, file, signature, top 5 callees, top 5 callers (treesitter edges; exact before name_only, ambiguous excluded, ties by name). `search_tsv` is built in Go from header+content with identifiers split (camelCase and snake_case into parts, original kept), lowercased; the same splitter is applied to lexical queries.
 
 ## Stage: summarize
 
@@ -79,7 +82,7 @@ Raw chunks and summaries via `Embedder.EmbedDocuments`, title = file path + qual
 
 ## Vector indexes
 
-Vectors are stored full-dimension in `embeddings.vec` (untyped). Per `(model, target_kind)` partial HNSW indexes with an expression cast, e.g. `USING hnsw ((vec::vector(1024)) vector_cosine_ops) WHERE model='qwen3-embedding:0.6b' AND target_kind='chunk_header'`. MRL-capable models also get truncated expression indexes via `l2_normalize(subvector(vec, 1, 256))`, with no re-embedding. Because every indexed vector is in the slice, no SQL post-filter is needed; the shared collapse helper still applies the slice filter before dedupe and cut (D-039). Quality gate: `docs/plan/eval-protocol.md#ann-overlap`.
+Vectors are stored full-dimension in `embeddings.vec` (untyped). Per `(model, target_kind)` partial HNSW indexes with an expression cast, e.g. `USING hnsw ((vec::vector(1024)) vector_cosine_ops) WHERE model='qwen3-embedding:0.6b' AND target_kind='chunk_header'`. MRL-capable models also get truncated expression indexes via `l2_normalize(subvector(vec, 1, 256))`, with no re-embedding. Because every indexed vector is in the slice, no SQL post-filter is needed; the shared collapse helper still applies the slice filter before dedupe and cut (D-039). Query rules: the model and kind literals are inlined into the SQL after validation against `embed.KnownModels()` and the kinds enum (or `plan_cache_mode=force_custom_plan` is set), because a generic prepared plan cannot match a partial-index predicate; `hnsw.ef_search` is set to at least the query `LIMIT`, because HNSW returns at most `ef_search` rows. Quality gate: `docs/plan/eval-protocol.md#ann-overlap`.
 
 ## Query service
 
@@ -115,7 +118,7 @@ Groq primary, Ollama fallback; token-bucket rate limiter matched to Groq limits;
 
 ## Q&A loop
 
-`/ask` state = question, evidence set, visited symbols, budget (max 3 hops + token cap). Each hop the LLM sees the question, compressed evidence and a CONSTRAINED candidate list taken from graph edges of current evidence, and returns `{action: fetch|answer, symbols[], reason}`. Stops on answer, hop cap, or a hop that adds no new evidence. Final `file:line` citations are validated against the evidence set; invalid ones are removed. The single-shot baseline (top-10 from the A3 pipeline + one answer call) shares the identical answer prompt constraints (citation format, max length).
+`/ask` state = question, evidence set, visited symbols, budget (max 3 hops + token cap). Each hop the LLM sees the question, compressed evidence and a CONSTRAINED candidate list taken from graph edges of current evidence, and returns `{action: fetch|answer, symbols[], reason}`. Stops on answer, hop cap, or a hop that adds no new evidence. Hop and answer calls use temperature 0. Final `file:line` citations are validated against the evidence set; invalid ones are removed. The single-shot baseline (top-10 from the A3 pipeline + one answer call) shares the identical answer prompt constraints (citation format, max length).
 
 ## Trace
 

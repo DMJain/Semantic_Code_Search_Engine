@@ -17,7 +17,8 @@
 - **Ground-truth graph (GT)**: VTA call graph from `go/packages` over the slice, `edges.source='gopackages'`; evaluation only.
 - **DEV / TEST**: 15 queries used for all tuning / 35 queries frozen by hash, each configuration run once.
 - **Primary / secondary label**: relevance grade 2 / 1.
-- **Frozen**: TEST file committed with its sha256 recorded in decisions.md.
+- **Frozen**: TEST file committed with its sha256 in `eval/queries.test.sha256` (D-010).
+- **Build context**: `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`, identical in `walk` and `callgraph-gt` (D-058).
 - **B0**: BM25 keyword baseline. **A0..A4, A3n, A2-3B, E1, E2, M1**: configurations in [eval-protocol.md#configurations](eval-protocol.md#configurations).
 - **ANN overlap@10**: agreement between HNSW and exact search top-10 ([eval-protocol.md#ann-overlap](eval-protocol.md#ann-overlap)).
 - **MRL**: Matryoshka representation learning; vectors can be truncated and re-normalized.

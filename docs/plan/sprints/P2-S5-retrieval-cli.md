@@ -15,7 +15,7 @@ P2-S4 done (an index exists for the fixture repo and Kubernetes with the parity 
 - Why: Phase 2 default mode is the A3n semantics (D-031).
 - Depends on: none
 - Touches: `internal/engine/engine.go`
-- Details: `engine.New(store, embedderProvider, cfg)` builds lexical, structural and flat-header semantic retrievers from `internal/retrieve` (unchanged code, calling the Store), the rules-only router (`ROUTER_LLM=off` behavior), RRF k=60 and the shared collapse helper. The embedder is requested lazily from the provider only when the semantic retriever runs. `Engine.Search(ctx, SearchRequest{Query, Limit, Scope}) (SearchResponse, error)` returns route, reason, results with evidence, and per-retriever timings.
+- Details: `engine.New(store, embedderProvider, cfg)` builds lexical, structural and flat-header semantic retrievers from `internal/retrieve` (unchanged code, calling the Store), the rules-only router (`ROUTER_LLM=off` behavior) with the A3n threshold recorded in D-020, RRF k=60 and the shared collapse helper. The embedder is requested lazily from the provider only when the semantic retriever runs. `Engine.Search(ctx, SearchRequest{Query, Limit, Scope}) (SearchResponse, error)` returns route, reason, results with evidence, and per-retriever timings.
 - Acceptance: tests with a fake embedder provider: a lexical-routed query (`where is `Foo` defined`) never calls the provider (spy count 0); a semantic query calls it once; the fixture e2e config for A3n gives the same ranked files through `Engine.Search` on the SQLite store as the Postgres golden.
 - Tests: unit tests with spies; the fixture comparison.
 - Out of scope: CLI.
@@ -65,7 +65,7 @@ P2-S4 done (an index exists for the fixture repo and Kubernetes with the parity 
 - Why: CLI and MCP must return the same evidence.
 - Depends on: P2-S5-T02
 - Touches: `internal/engine/evidence.go`
-- Details: `Evidence{File, StartLine, EndLine, Snippet, Score, Source, Resolution}` with `Snippet` = up to 12 lines around the best-matching lines, whitespace-trimmed, with `...` markers; `MaxSnippetBytes = 1200`. Output size cap per response: 40 results and `MaxResponseBytes = 24000` with a `truncated: true` field and the count omitted.
+- Details: `Evidence{File, StartLine, EndLine, Snippet, Score, Source, Resolution}` embedding or aliasing the Phase 1 `retrieve.Evidence` (no second evidence type) with `Snippet` = up to 12 lines around the best-matching lines, whitespace-trimmed, with `...` markers; `MaxSnippetBytes = 1200`. Output size cap per response: 40 results and `MaxResponseBytes = 24000` with a `truncated: true` field and the count omitted.
 - Acceptance: unit tests: snippet never exceeds the byte cap; a response with 100 large results is truncated with the flag and still valid JSON; the CLI `--json` and the engine output are byte-identical for the same query.
 - Tests: unit and golden.
 - Out of scope: MCP transport.

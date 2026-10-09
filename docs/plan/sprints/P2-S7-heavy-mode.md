@@ -76,7 +76,7 @@ P2-S2 (runtime, manager), P2-S5 (engine, focus), P2-S6 (MCP) done. D-036 names t
 - Depends on: P2-S7-T03
 - Touches: `internal/indexer/summaries.go`, `internal/retrieve/coarse.go` (Store-based)
 - Details: `lodestone index --summaries [--yes]` runs after the normal phases: function summaries for functions with body of at least 3 lines (prompt `fn-v1`), then file and package levels (`file-v1`, `pkg-v1`) with the same input hashing, `num_ctx` check and truncation failure as Phase 1, using the D-036 model through the manager (embedder unloaded first), then embeds the summaries (embedder reloaded after the chat model unloads). The coarse-to-fine retriever from Phase 1 runs on the SQLite store when summary rows exist, with the weights recorded in D-020. Resumable by `input_hash`.
-- Acceptance: on the fixture repo with a fake LLM: summaries are created once and a rerun makes 0 LLM calls; load order from the fake runtime is embedder, chat, embedder with no overlap; retrieval on the fixture uses the coarse retriever only when summaries exist (spy).
+- Acceptance: on the fixture repo with a fake LLM: summaries are created once and a rerun makes 0 LLM calls; load order from the fake runtime is embedder, chat, embedder with no overlap; retrieval on the fixture uses the coarse retriever only when summaries exist (spy); `go test -count=1 ./internal/e2e/...` passes with the goldens unchanged.
 - Tests: fake-runtime and fake-LLM tests.
 - Out of scope: evaluating quality (S9 already did on Phase 1).
 - Owner: agent

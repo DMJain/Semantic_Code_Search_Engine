@@ -95,8 +95,8 @@ P2-S1 to P2-S8 done. The repository is public (D-044) and `gh repo view --json v
 - Why: outward-facing actions need the author.
 - Depends on: P2-S9-T02, P2-S9-T04
 - Touches: GitHub settings (outside the repo), this file (Results)
-- Details: confirm the main repository is public and will stay public (D-044); create the public `homebrew-lodestone` repository and add the deploy credential the workflow needs; review the release workflow; push the first `v0.1.0` tag yourself. Record the release URL.
-- Acceptance: `gh repo view <owner>/<repo> --json visibility` prints `PUBLIC`; the release page lists three archives and `checksums.txt`; `brew install <owner>/lodestone/lodestone` works on your Mac and `lodestone --version` prints `0.1.0`.
+- Details: confirm the main repository is public and will stay public (D-044); create the public `homebrew-lodestone` repository and add the deploy credential the workflow needs; review the release workflow; check the name `lodestone` for collisions (`gh search repos lodestone`, `go list -m github.com/<owner>/lodestone@latest`, `brew search lodestone`) and record the outcome in D-034; push the first `v0.1.0` tag yourself. Record the release URL.
+- Acceptance: D-034 holds the collision-check outcome; `gh repo view <owner>/<repo> --json visibility` prints `PUBLIC`; the release page lists three archives and `checksums.txt`; `brew install <owner>/lodestone/lodestone` works on your Mac and `lodestone --version` prints `0.1.0`.
 - Tests: none.
 - Out of scope: announcing the project.
 - Owner: human
