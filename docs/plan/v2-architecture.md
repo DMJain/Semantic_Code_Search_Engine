@@ -1,0 +1,83 @@
+# Phase 2 architecture (canonical): `lodestone`
+
+Phase 2 starts only after Phase 1 is approved (D-046). Same repository; new binary `cmd/lodestone`; Phase 1 internal packages are reused where possible. This file is not linked from any auto-loaded file. Decisions are `D-nnn` in `decisions.md`; Phase 1 design is `architecture.md`.
+
+## Goals and non-goals
+
+Goals: one-command install; nothing else to set up (no Docker, no Ollama, no Python, no API keys, no sign-up); works on any repository; free for users and for the author. Non-goals: Windows (D-035), hosted service, Groq or any cloud LLM, a bundled tiny chat model, languages beyond the tiers below having a call graph.
+
+## Commands
+
+`lodestone index` (index the repo at or above the current directory), `search`, `find`, `callers`, `callees`, `chat`, `mcp` (stdio MCP server), `connect` (writes MCP config for Claude Code / Cursor after showing the exact change and asking for confirmation), `status`, `doctor`, `uninstall`. Human output by default, `--json` (versioned schema) for scripts.
+
+## Repo layout of the tool
+
+Index stored in `.lodestone/` at the repo root: `index.db` (SQLite), `lock`, `config.toml`, `meta.json` (schema and model versions). The tool offers to add `.lodestone/` to `.gitignore` and asks first. Caches live in `os.UserCacheDir()/lodestone/` (models, downloads).
+
+## Repo filters
+
+Respect `.gitignore` (root and nested). Skip: binaries (NUL byte in the first 8KB), files over 1MB, lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`, `poetry.lock`, `Pipfile.lock`, `Gemfile.lock`, `composer.lock`), minified files (name contains `.min.` or average line length over 500). Generated files by header markers in the first 20 lines (`Code generated ... DO NOT EDIT`, `@generated`, `auto-generated`). Default excludes: `vendor/`, `node_modules/`, `third_party/`. Test files are indexed and flagged `is_test` (D-049). `.lodestone/config.toml` holds extra ignore globs and an optional `[eval]` slice scope used only by the parity run.
+
+## Languages
+
+Tier 1 (symbols + heuristic call graph): Go (Phase 1 parser), TypeScript/JavaScript, Python, Java. Every other text language: fallback chunking (tree-sitter node chunks if a grammar is registered, else line windows of 60 lines with 10 overlap); lexical and semantic search only, no graph. Any repository must index without errors: a file-level failure is recorded in the index report and never aborts the run.
+
+## Store interface
+
+`internal/store` defines `Store` with two implementations: Postgres (Phase 1 benchmark path, in `internal/store/pg`) and SQLite (tool, in `internal/store/sqlite`). Methods are expressed in domain terms (upsert files/symbols/chunks/edges, `Callers(symbol, depth)`, `Callees`, `SearchLexical`, `NearestChunks(model, kind, vec, k)`, focus-stack and trace persistence). Retriever logic is shared and calls the interface; SQL specifics live only in the stores. A shared `storetest` conformance suite runs against both.
+
+## SQLite schema
+
+Single `index.db`: `files`, `symbols`, `chunks`, `edges`, `embeddings`, `focus`, `traces`, `meta`, plus an FTS5 virtual table over pre-split identifier tokens (the same `SplitIdentifiers` as Phase 1, applied in Go before insert and on the query). Graph traversal uses recursive CTEs with the same resolution/hop ranking semantics as Phase 1 ([architecture.md#structural-retriever](architecture.md#structural-retriever)). Driver and vector approach: D-052.
+
+## Compact vectors
+
+Embeddings are MRL-truncated (dimension per D-056) and quantized to int8 with a per-vector scale; stored as BLOBs and streamed from disk. Search is brute force over the compact vectors (dot product with scale) unless P2-S8 measurements show an ANN index is needed. A float32 mode exists for the compactness ablation only.
+
+## Inference runtime
+
+A managed local runtime from the llama.cpp family runs GGUF models; in-process or subprocess per D-053. The runtime exposes `embed.Embedder` and `llm.LLM` so Phase 1 interfaces are reused. Exactly one model is loaded at any time (a process-wide lock); the model loads lazily on first use and unloads after an idle timeout. Indexing runs in phases (parse, graph, chunk, then embed) so the embedder is the only model loaded while embedding.
+
+## Model manager
+
+Models are listed in a manifest compiled into the binary: name, fixed revision-pinned URL, size, sha256, license, prompt templates (reused from the Phase 1 registry). First use downloads with resume, verifies the checksum, writes atomically into the cache dir, then runs the embedding probe (no NaN/Inf, length == dim, L2 norm ~1) and a reference-vector check. Offline or checksum failure gives an actionable error and leaves no partial file in use. Model choice per D-056, GGUF sources per D-055.
+
+## Indexing
+
+Default indexing produces structure, graph and embeddings only. Incremental: file content hashes decide re-parse; chunk hashes decide re-embed; deleted files are removed. Runs in the background style: low OS priority, limited threads (`--threads`), progress on stderr (TTY bar or line logs, `--json-progress`), SIGINT-safe and resumable. `index --summaries` is opt-in ([#heavy-mode](#heavy-mode)).
+
+## Retrieval
+
+Lexical (exact + trigram-like fuzzy via FTS5/identifier match), structural (callers/callees), semantic (flat header chunks) fused by RRF k=60 behind a rules-only router; below the confidence threshold the query fans out to all three (config A3n semantics, D-031). Every retriever returns `Result{file, score, evidence[]}` and uses the shared collapse helper, which filters to the eval slice BEFORE dedupe and the top-10 cut (D-039). The embedder loads only when the semantic retriever runs.
+
+## Focus stack
+
+Follow-ups without an LLM use a session focus stack in SQLite (recent symbols and files, newest first). Deterministic rules resolve "it/that/this" to the top symbol, "the second one" to the second result of the last result list, "show more" to the next page of the last query, "go back" to pop one level. Rules are unit-tested with a table of utterances and stack states.
+
+## MCP tools
+
+`search_code(query)`, `find_symbol(name)`, `callers(symbol)`, `callees(symbol)`; `ask(question)` only when an LLM is available. Tools return evidence (file, line range, snippet, score, resolution flag) and never LLM-written summaries. Output size is capped and truncation is marked. The server holds no model until a semantic query arrives.
+
+## Connect
+
+`connect` detects Claude Code and Cursor config locations, prints the exact diff it would apply, asks for confirmation, backs up the file, and is idempotent. `--dry-run` and `--yes` exist; `disconnect` reverses it.
+
+## Heavy mode
+
+Opt-in. If Ollama is detected (HTTP probe), full chat turns on automatically: query rewriting from history plus evidence reuse across turns, reusing the Phase 1 Q&A loop and citation validation. Without Ollama, `index --summaries` or `chat` offers (and with `--yes` performs) a download of the larger GGUF model chosen by D-036 into the managed runtime. No tiny bundled chat model. No Groq.
+
+## Memory discipline
+
+Heavy mode uses 4-bit (Q4_K_M) weights, `num_ctx` sized to the prompt, a quantized KV cache, and unloads when idle. Never two models loaded at once: the embedder unloads before the chat model loads and vice versa.
+
+## Resource targets
+
+Provisional, verified in P2-S8, measured per [eval-protocol.md#memory-measurement](eval-protocol.md#memory-measurement): idle MCP server with no model loaded under 50MB; search-mode peak under 700MB; default mode usable on an 8GB machine (an inference from measurements, D-038); heavy-mode peak documented per model.
+
+## Distribution
+
+macOS arm64 first class, Linux amd64/arm64. Native CI runners per platform, no cgo cross-compiling (D-048). Homebrew tap, install script (checksum-verified) and `go install` where possible. The repository stays public so free hosted arm64 runners work (D-044). `uninstall` removes caches.
+
+## Phase 1 protection
+
+Phase 1's Postgres path and eval must keep working. CI runs the Postgres integration tests, a fixture end-to-end (toy repo, labeled fixture queries, fake embedder, golden JSON for A1, A3n and B0) and `eval freeze --verify` (D-040).
