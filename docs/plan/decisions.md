@@ -155,6 +155,9 @@ The plan was rewritten from the new brief; deletions are listed below.
 
 ## D-059 Ignore-file library (PENDING P2-S3-T02)
 
+## D-061 S0 process: one branch, one commit per ticket, draft PR for CI (2026-10-10)
+Work happens on branch `s0-setup-verification`. One commit per ticket. Agents push only when CI proof is needed and after showing the owner the workflow triggers and GitHub auth status; a draft pull request triggers CI. The owner reviews and merges; agents never push to or merge into `main`.
+
 ## Deleted decisions
 - D-013 (ANN recipe with iterative scan, exact re-sort and slice post-filter): superseded by D-029 (slice-only embeddings, no post-filter in SQL). The ANN overlap gate itself is kept in D-027.
 - D-016 (embedding variants with whole-repo header vectors): superseded by D-029.
