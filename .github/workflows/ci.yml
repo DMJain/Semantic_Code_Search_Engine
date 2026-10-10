@@ -10,14 +10,40 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: codesearch
+          POSTGRES_PASSWORD: codesearch
+          POSTGRES_DB: codesearch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codesearch -d codesearch"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://codesearch:codesearch@localhost:5432/codesearch?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      # TEST_DATABASE_URL is unset, so the Postgres integration test skips.
-      - run: go test ./...
+      - run: go test -count=1 ./...
+      # The store tests need Postgres; run them verbosely and fail the job if
+      # any of them reports --- SKIP instead of running.
+      - name: Store tests must run, not skip
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v ./internal/store/... | tee store-test.log
+          if grep -q -- '--- SKIP' store-test.log; then
+            echo "ERROR: a store test was skipped; tests must run, not skip"
+            exit 1
+          fi
 
   lint:
     runs-on: ubuntu-latest
