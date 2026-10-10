@@ -3,64 +3,140 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
 
-func TestTemplates(t *testing.T) {
+func TestKnownModels(t *testing.T) {
+	got := KnownModels()
+	want := []string{"nomic-embed-text", "qwen3-embedding:0.6b"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("KnownModels() = %v, want %v (registry must hold exactly two models)", got, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(KnownModels()) = %d, want 2", len(got))
+	}
+}
+
+// TestRequestBodies drives the PUBLIC embedder against a fake Ollama and
+// asserts the exact request body bytes (whitespace and newlines included).
+// The document rule: a non-empty title is prepended as its own line.
+func TestRequestBodies(t *testing.T) {
+	const titled = "pkg/kubelet/kubelet.go (*Kubelet).evictPod"
 	tests := []struct {
+		name      string
 		model     string
+		dim       int
 		query     string
+		hasQuery  bool
 		doc       Document
-		wantQuery string
-		wantDoc   string
+		hasDoc    bool
+		wantInput string
 	}{
 		{
-			model:     "embeddinggemma-2:270m",
+			name: "qwen3 query", model: "qwen3-embedding:0.6b", dim: 1024,
 			query:     "pod eviction",
-			doc:       Document{Title: "evictPod", Text: "func evictPod()"},
-			wantQuery: "task: code retrieval | query: pod eviction",
-			wantDoc:   "title: evictPod | text: func evictPod()",
+			hasQuery:  true,
+			wantInput: "Instruct: Given a search query, retrieve relevant code\nQuery:pod eviction",
 		},
 		{
-			model:     "embeddinggemma-2:270m",
-			query:     "q",
-			doc:       Document{Text: "body"},
-			wantQuery: "task: code retrieval | query: q",
-			wantDoc:   "title: none | text: body",
-		},
-		{
-			model:     "qwen3-embedding:0.6b",
-			query:     "pod eviction",
-			doc:       Document{Title: "ignored", Text: "func evictPod()"},
-			wantQuery: "Instruct: Given a search query, retrieve relevant code\nQuery: pod eviction",
-			wantDoc:   "func evictPod()",
-		},
-		{
-			model:     "nomic-embed-text",
-			query:     "pod eviction",
+			name: "qwen3 document without title", model: "qwen3-embedding:0.6b", dim: 1024,
 			doc:       Document{Text: "func evictPod()"},
-			wantQuery: "search_query: pod eviction",
-			wantDoc:   "search_document: func evictPod()",
+			hasDoc:    true,
+			wantInput: "func evictPod()",
+		},
+		{
+			name: "qwen3 document with title", model: "qwen3-embedding:0.6b", dim: 1024,
+			doc:       Document{Title: titled, Text: "func evictPod()"},
+			hasDoc:    true,
+			wantInput: titled + "\nfunc evictPod()",
+		},
+		{
+			name: "nomic query", model: "nomic-embed-text", dim: 768,
+			query:     "pod eviction",
+			hasQuery:  true,
+			wantInput: "search_query: pod eviction",
+		},
+		{
+			name: "nomic document without title", model: "nomic-embed-text", dim: 768,
+			doc:       Document{Text: "func evictPod()"},
+			hasDoc:    true,
+			wantInput: "search_document: func evictPod()",
+		},
+		{
+			name: "nomic document with title", model: "nomic-embed-text", dim: 768,
+			doc:       Document{Title: titled, Text: "func evictPod()"},
+			hasDoc:    true,
+			wantInput: "search_document: " + titled + "\nfunc evictPod()",
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.model+"/"+tt.query, func(t *testing.T) {
-			spec, err := lookup(tt.model)
+		t.Run(tt.name, func(t *testing.T) {
+			srv, bodies := captureOllama(t, tt.dim)
+			e, err := NewOllama(srv.URL, tt.model, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, _ := spec.renderQuery(tt.query); got != tt.wantQuery {
-				t.Errorf("query = %q, want %q", got, tt.wantQuery)
+			if tt.hasQuery {
+				if _, err := e.EmbedQueries(context.Background(), []string{tt.query}); err != nil {
+					t.Fatalf("EmbedQueries: %v", err)
+				}
+			} else {
+				if _, err := e.EmbedDocuments(context.Background(), []Document{tt.doc}); err != nil {
+					t.Fatalf("EmbedDocuments: %v", err)
+				}
 			}
-			if got, _ := spec.renderDoc(tt.doc); got != tt.wantDoc {
-				t.Errorf("doc = %q, want %q", got, tt.wantDoc)
+			if len(*bodies) != 1 {
+				t.Fatalf("got %d requests, want 1", len(*bodies))
+			}
+			if got, want := (*bodies)[0], wantBody(tt.model, tt.wantInput); got != want {
+				t.Errorf("request body mismatch:\n got %q\nwant %q", got, want)
 			}
 		})
 	}
+}
+
+// wantBody builds the exact request body Embedder should send for one input.
+func wantBody(model, input string) string {
+	b, err := json.Marshal(map[string]any{"model": model, "input": []string{input}})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// captureOllama is a fake /api/embed that records each raw request body and
+// answers with one dim-length unit vector per input.
+func captureOllama(t *testing.T, dim int) (*httptest.Server, *[]string) {
+	t.Helper()
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		bodies = append(bodies, string(b))
+		var req struct {
+			Input []string `json:"input"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		out := make([][]float64, len(req.Input))
+		for i := range out {
+			out[i] = constVec(dim, 1)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"embeddings": out}); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &bodies
 }
 
 func TestUnknownModel(t *testing.T) {
