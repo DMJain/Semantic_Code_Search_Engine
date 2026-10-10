@@ -30,7 +30,7 @@ var commands = []command{
 	{"parse", "parse Go files into function and method symbols", runParse},
 	{"audit", "check a seeded sample of stored symbols against the source", runAudit},
 	{"chunk", "split symbols into chunks (not implemented)", stub("chunk")},
-	{"summarize", "summarize functions, files and packages (not implemented)", stub("summarize")},
+	{"summarize", "summarize in-slice functions with a local LLM", runSummarize},
 	{"embed", "embed chunks and summaries (not implemented)", stub("embed")},
 }
 
