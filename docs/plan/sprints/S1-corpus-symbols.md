@@ -430,3 +430,25 @@ vendor/k8s.io/client-go: absent at the tag (not a symlink)   exit 0
 ```
 
 Q-05 updated with the outcome. Fixture test (with `_windows.go`, `//go:build windows` and `import "C"` files): walk set == go/packages set with `CGO_ENABLED=1` in the process env; the env builder always ends with `CGO_ENABLED=0`.
+
+### S1-12 / T11 - Summarization throughput benchmark
+
+`indexer summarize --bench` (new `--bench` flag and `--out`, default `eval/results/bench/summarize.json`) measures throughput **without writing any summary row**: it only reads `symbols`/`files`, and the fn-v1 calls for the file/package input-building pass are not stored either. Bench logic lives in `internal/summarize/bench.go` (pure `SampleFiles`, `FileStratum`, `WriteBenchResult`, and `Runner.Bench`); the CLI wiring is in `cmd/indexer/summarize.go`. `summarize.Result` now carries Ollama's `eval_count` as `OutputTokens` for the token metric.
+
+Design: 200 eligible functions drawn with the ticket-11 `summarize.Sample` (stratified across the four slice roots, seed 7) run with the exact production fn-v1 prompt at concurrency 1, then the same 200 at concurrency 2. 20 files are drawn stratified by eligible-function-count (`FileStratum` buckets `1-2`, `3-5`, `6-11`, `12-23`, `24+`; largest-remainder allocation, seed 7); before a file prompt is timed, **all** its eligible functions are summarized with fn-v1 (not stored) and the file prompt is built from those summaries. 3 package prompts aggregate the file summaries of 3 distinct packages. The file- and package-level prompts are throwaway drafts (`file-bench`, `pkg-bench`) documented as synthetic in the JSON `note`, since hierarchical summaries are S5. `file_per_hour`/`pkg_per_hour` time only the file/package prompt itself, so the D-005 projection `T = eligible_fns/fn_per_hour + files/file_per_hour + packages/pkg_per_hour` does not double-count the constituent fn calls.
+
+Real run (qwen2.5-coder:7b, `num_ctx` 4096, seed 7), wall **5105.5 s (~85 min)**, ~646 Ollama calls:
+
+```
+fn_per_hour_c1 = 459.1     fn_per_hour_c2 = 622.5
+file_per_hour  = 167.3     pkg_per_hour   = 226.4
+skipped_fns    = 2683      slice_fns_eligible = 8225
+file_strata    = [1-2, 3-5, 6-11, 12-23, 24+]  (5 strata)
+fn p50/p95 ms: c1 6897/15785, c2 11153/16990; output tokens fn 54, file 96, pkg 93
+file_done 19/20 (one 68-eligible file exceeded the 0.8 x num_ctx pre-send guard -> too_large)
+summaries rows before = 28, after = 28   (unchanged; --bench inserts nothing)
+```
+
+Files/package levels and embeddings remain out of scope (S5); no migration touched. Tests: `TestSampleFilesDeterministic` and `TestSampleFilesStrata` (seeded determinism and >= 3 strata on a fake candidate set) and `TestFileStratumBoundaries` reuse/extend the ticket-11 sampler tests; `TestBenchDoesNotInsertSummaries` runs the whole benchmark against a throwaway DB plus a fake Ollama server and asserts `summaries` stays empty.
+
+Acceptance: `eval/results/bench/summarize.json` has `fn_per_hour_c1`, `fn_per_hour_c2`, `file_per_hour`, `pkg_per_hour`, `skipped_fns`, `slice_fns_eligible` and `file_strata` (5 strata >= 3); summaries row count 28 before and 28 after; `go test -count=1 ./...` passes; `make test` 0 SKIP; `go vet ./...` and `make lint` clean.

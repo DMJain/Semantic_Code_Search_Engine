@@ -437,24 +437,40 @@ func Sample(cands []Candidate, n int, seed int64) []int64 {
 // the leftover slots go to the roots with the largest remainders, ties broken
 // by roots order.
 func allocate(n int, byRoot map[string][]Candidate, roots []string) map[string]int {
-	total := 0
+	sizes := make(map[string]int, len(roots))
 	for _, root := range roots {
-		total += len(byRoot[root])
+		sizes[root] = len(byRoot[root])
+	}
+	return allocateCounts(n, sizes, roots)
+}
+
+// allocateCounts distributes n slots over the keys in order in proportion to
+// their sizes by the largest-remainder (Hare quota) method: each key gets
+// floor(n*size/total) slots, and the leftover slots go to the keys with the
+// largest remainders, ties broken by order. Every size is assumed present in
+// sizes; a zero total returns empty quotas.
+func allocateCounts(n int, sizes map[string]int, order []string) map[string]int {
+	total := 0
+	for _, key := range order {
+		total += sizes[key]
+	}
+	quotas := make(map[string]int, len(order))
+	if total == 0 {
+		return quotas
 	}
 	type remainder struct {
-		root  string
+		key   string
 		value int
 		rank  int
 	}
-	quotas := make(map[string]int, len(roots))
-	rems := make([]remainder, 0, len(roots))
+	rems := make([]remainder, 0, len(order))
 	assigned := 0
-	for i, root := range roots {
-		size := len(byRoot[root])
+	for i, key := range order {
+		size := sizes[key]
 		q := n * size / total
-		quotas[root] = q
+		quotas[key] = q
 		assigned += q
-		rems = append(rems, remainder{root: root, value: n*size - q*total, rank: i})
+		rems = append(rems, remainder{key: key, value: n*size - q*total, rank: i})
 	}
 	sort.SliceStable(rems, func(i, j int) bool {
 		if rems[i].value != rems[j].value {
@@ -463,7 +479,7 @@ func allocate(n int, byRoot map[string][]Candidate, roots []string) map[string]i
 		return rems[i].rank < rems[j].rank
 	})
 	for i := 0; i < n-assigned && i < len(rems); i++ {
-		quotas[rems[i].root]++
+		quotas[rems[i].key]++
 	}
 	return quotas
 }

@@ -1,0 +1,247 @@
+{
+  "model": "qwen2.5-coder:7b",
+  "num_ctx": 4096,
+  "seed": 7,
+  "generated_at": "2026-10-10T16:43:16Z",
+  "wall_seconds": 5105.530813,
+  "fn_per_hour_c1": 459.144874714896,
+  "fn_per_hour_c2": 622.4869926773307,
+  "fn_p50_ms_c1": 6897.076,
+  "fn_p95_ms_c1": 15784.601,
+  "fn_p50_ms_c2": 11153.361,
+  "fn_p95_ms_c2": 16989.585,
+  "fn_output_tokens_c1": 54,
+  "fn_output_tokens_c2": 54,
+  "fn_done_c1": 200,
+  "fn_failed_c1": 0,
+  "fn_done_c2": 200,
+  "fn_failed_c2": 0,
+  "file_per_hour": 167.3274386063202,
+  "file_p50_ms": 20821.455,
+  "file_p95_ms": 58171.298,
+  "file_output_tokens": 96,
+  "file_done": 19,
+  "file_failed": 1,
+  "pkg_per_hour": 226.35167514151746,
+  "pkg_p50_ms": 14743.122,
+  "pkg_p95_ms": 18539.125,
+  "pkg_output_tokens": 93,
+  "pkg_done": 3,
+  "pkg_failed": 0,
+  "skipped_fns": 2683,
+  "slice_fns_eligible": 8225,
+  "file_strata": [
+    "1-2",
+    "3-5",
+    "6-11",
+    "12-23",
+    "24+"
+  ],
+  "file_strata_count": 5,
+  "note": "File- and package-level prompts are throwaway drafts (file-bench, pkg-bench); hierarchical summaries are S5. Their input text is built from the fn-v1 summaries of the file's eligible functions, which are not stored. Nothing is written to the summaries table.",
+  "files": [
+    {
+      "path": "staging/src/k8s.io/client-go/util/apply/apply.go",
+      "package": "k8s.io/client-go/util/apply",
+      "eligible": 1,
+      "stratum": "1-2",
+      "latency_ms": 13709.071,
+      "output_tokens": 84,
+      "ok": true
+    },
+    {
+      "path": "staging/src/k8s.io/client-go/util/csaupgrade/options.go",
+      "package": "k8s.io/client-go/util/csaupgrade",
+      "eligible": 1,
+      "stratum": "1-2",
+      "latency_ms": 9332.281,
+      "output_tokens": 59,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/kubelet_linux.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet",
+      "eligible": 1,
+      "stratum": "1-2",
+      "latency_ms": 13908.796,
+      "output_tokens": 93,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/cm/memorymanager/policy_none.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/cm/memorymanager",
+      "eligible": 1,
+      "stratum": "1-2",
+      "latency_ms": 9073.529,
+      "output_tokens": 59,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/server/metrics/metrics.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/server/metrics",
+      "eligible": 2,
+      "stratum": "1-2",
+      "latency_ms": 13332.875,
+      "output_tokens": 87,
+      "ok": true
+    },
+    {
+      "path": "pkg/controller/certificates/signer/config/v1alpha1/defaults.go",
+      "package": "k8s.io/kubernetes/pkg/controller/certificates/signer/config/v1alpha1",
+      "eligible": 1,
+      "stratum": "1-2",
+      "latency_ms": 11759.058,
+      "output_tokens": 75,
+      "ok": true
+    },
+    {
+      "path": "staging/src/k8s.io/client-go/metadata/metadatalister/shim.go",
+      "package": "k8s.io/client-go/metadata/metadatalister",
+      "eligible": 3,
+      "stratum": "3-5",
+      "latency_ms": 12391.973,
+      "output_tokens": 74,
+      "ok": true
+    },
+    {
+      "path": "pkg/controller/deployment/recreate.go",
+      "package": "k8s.io/kubernetes/pkg/controller/deployment",
+      "eligible": 4,
+      "stratum": "3-5",
+      "latency_ms": 23394.863,
+      "output_tokens": 120,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/cm/cgroup_v1_manager_linux.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/cm",
+      "eligible": 5,
+      "stratum": "3-5",
+      "latency_ms": 22436.298,
+      "output_tokens": 120,
+      "ok": true
+    },
+    {
+      "path": "pkg/scheduler/framework/plugins/podtopologyspread/scoring.go",
+      "package": "k8s.io/kubernetes/pkg/scheduler/framework/plugins/podtopologyspread",
+      "eligible": 5,
+      "stratum": "3-5",
+      "latency_ms": 24910.088,
+      "output_tokens": 120,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/pluginmanager/pluginwatcher/example_handler.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/pluginmanager/pluginwatcher",
+      "eligible": 6,
+      "stratum": "6-11",
+      "latency_ms": 20821.455,
+      "output_tokens": 101,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/images/pullmanager/image_pull_policies.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/images/pullmanager",
+      "eligible": 9,
+      "stratum": "6-11",
+      "latency_ms": 20576.662,
+      "output_tokens": 79,
+      "ok": true
+    },
+    {
+      "path": "pkg/scheduler/framework/plugins/interpodaffinity/plugin.go",
+      "package": "k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity",
+      "eligible": 9,
+      "stratum": "6-11",
+      "latency_ms": 28327.803,
+      "output_tokens": 120,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/allocation/handlers.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/allocation",
+      "eligible": 6,
+      "stratum": "6-11",
+      "latency_ms": 17408.727,
+      "output_tokens": 75,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/cm/memorymanager/state/state_mem.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/cm/memorymanager/state",
+      "eligible": 14,
+      "stratum": "12-23",
+      "latency_ms": 28769.885,
+      "output_tokens": 120,
+      "ok": true
+    },
+    {
+      "path": "pkg/scheduler/extender.go",
+      "package": "k8s.io/kubernetes/pkg/scheduler",
+      "eligible": 12,
+      "stratum": "12-23",
+      "latency_ms": 30670.943,
+      "output_tokens": 114,
+      "ok": true
+    },
+    {
+      "path": "pkg/controller/certificates/clustertrustbundlepublisher/publisher.go",
+      "package": "k8s.io/kubernetes/pkg/controller/certificates/clustertrustbundlepublisher",
+      "eligible": 16,
+      "stratum": "12-23",
+      "latency_ms": 33692.97,
+      "output_tokens": 108,
+      "ok": true
+    },
+    {
+      "path": "pkg/controller/volume/selinuxwarning/selinux_warning_controller.go",
+      "package": "k8s.io/kubernetes/pkg/controller/volume/selinuxwarning",
+      "eligible": 20,
+      "stratum": "12-23",
+      "latency_ms": 37605.114,
+      "output_tokens": 100,
+      "ok": true
+    },
+    {
+      "path": "pkg/kubelet/volumemanager/cache/actual_state_of_world.go",
+      "package": "k8s.io/kubernetes/pkg/kubelet/volumemanager/cache",
+      "eligible": 68,
+      "stratum": "24+",
+      "latency_ms": 0.077,
+      "output_tokens": 0,
+      "ok": false
+    },
+    {
+      "path": "pkg/scheduler/backend/cache/podgroupstate.go",
+      "package": "k8s.io/kubernetes/pkg/scheduler/backend/cache",
+      "eligible": 39,
+      "stratum": "24+",
+      "latency_ms": 58171.298,
+      "output_tokens": 120,
+      "ok": true
+    }
+  ],
+  "packages": [
+    {
+      "package": "k8s.io/client-go/metadata/metadatalister",
+      "files": 1,
+      "latency_ms": 14743.122,
+      "output_tokens": 69,
+      "ok": true
+    },
+    {
+      "package": "k8s.io/client-go/util/apply",
+      "files": 1,
+      "latency_ms": 18539.125,
+      "output_tokens": 116,
+      "ok": true
+    },
+    {
+      "package": "k8s.io/client-go/util/csaupgrade",
+      "files": 1,
+      "latency_ms": 14431.061,
+      "output_tokens": 94,
+      "ok": true
+    }
+  ]
+}

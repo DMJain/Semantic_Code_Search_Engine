@@ -73,6 +73,7 @@ type chatOptions struct {
 type chatResponse struct {
 	Message         chatMessage `json:"message"`
 	PromptEvalCount int         `json:"prompt_eval_count"`
+	EvalCount       int         `json:"eval_count"`
 }
 
 // Summarize sends the system and user messages and applies the D-015 guards: a
@@ -105,7 +106,7 @@ func (c *Client) Summarize(ctx context.Context, system, user string) Result {
 	if resp.Message.Content == "" {
 		return Result{Reason: ReasonEmptyOutput}
 	}
-	return Result{Text: resp.Message.Content}
+	return Result{Text: resp.Message.Content, OutputTokens: resp.EvalCount}
 }
 
 func (c *Client) post(ctx context.Context, in, out any) error {
