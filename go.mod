@@ -7,6 +7,7 @@ require (
 	github.com/pgvector/pgvector-go/pgx v0.4.1
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+	golang.org/x/tools v0.51.0
 )
 
 require (
@@ -18,6 +19,7 @@ require (
 	github.com/sethvargo/go-retry v0.4.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )

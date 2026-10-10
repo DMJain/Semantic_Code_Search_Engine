@@ -329,3 +329,19 @@ Deviations recorded: changed non-`.go` files are ignored (Go-only corpus), so a 
 ### S1-07 / T06 - raw calls per function
 
 Each function/method stores the call-expression function-operand text as written (trimmed, truncated to 80 runes, deduplicated in source order, capped at 40, nested `func_literal` calls included), written in the same transaction as the symbol. Builtins and predeclared-type conversions are dropped by one fixed list (`builtins`); a user-defined-type conversion `MyType(x)` is kept (syntactically indistinguishable without type info). On the real tree `schedulePod`'s raw_calls is non-empty (e.g. `utiltrace.New`, `sched.findNodesThatFitPod`, `framework.NewSortedScoredNodes`). Goldens cover method chains, builtins, closures and both dropped (`any`, `string`) and kept (`MyType`) conversions. A re-parse overwrites the stored list through the upsert. Raw calls are never written to `edges`.
+
+### S1-09 / T08 second half - walk vs go/packages file-set check
+
+`callgraph-gt --check` loads the four slice roots with `go/packages` (`NeedName|NeedFiles`, `Tests:false`), applies the shared `walk.Excluded` predicate, normalizes symlinks and compares with the walk's `in_slice` set.
+
+Real tag run: the pinned `GOWORK=off -mod=vendor` load fails (`inconsistent vendoring`, matching Q-05), so the workspace (`GOWORK=auto`, `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`, `CGO_ENABLED=0` appended last) is used — 720 packages, 0 load errors. Result:
+
+```
+load: workspace (GOWORK=auto)
+walk excluded:     vendor 4460, zz_generated 1221, pb_go 119, testdata 50, test_go 3195, client_go_generated 2021, build_constraint 176
+packages excluded: vendor 0, zz_generated 89, pb_go 4, testdata 0, test_go 0, client_go_generated 2021, build_constraint 1
+file-set: equal (1131 files)     exit 0
+vendor/k8s.io/client-go: absent at the tag (not a symlink)   exit 0
+```
+
+Q-05 updated with the outcome. Fixture test (with `_windows.go`, `//go:build windows` and `import "C"` files): walk set == go/packages set with `CGO_ENABLED=1` in the process env; the env builder always ends with `CGO_ENABLED=0`.

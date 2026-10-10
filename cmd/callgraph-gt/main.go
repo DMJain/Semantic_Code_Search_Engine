@@ -1,16 +1,33 @@
-// Command callgraph-gt will build a ground-truth call graph for the
-// Kubernetes checkout with golang.org/x/tools/go/packages, to measure the
-// accuracy of the tree-sitter call graph (edges.source = 'gopackages').
+// Command callgraph-gt builds a ground-truth call graph for the Kubernetes
+// checkout with golang.org/x/tools/go/packages and measures the accuracy of the
+// tree-sitter call graph (edges.source = 'gopackages').
 //
-// Not implemented yet.
+// S1-09 implements only the --check mode: it proves the files the walk selected
+// for the four slice roots are exactly the files go/packages loads under the
+// identical build context (D-067). Building the VTA graph itself is S2.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "callgraph-gt: not implemented yet")
-	os.Exit(1)
+	os.Exit(run(os.Args[1:]))
+}
+
+// run dispatches the flags and returns the process exit code. --check uses 0
+// (equal), 1 (unequal) and 2 (cannot check: load or database failure).
+func run(args []string) int {
+	fs := flag.NewFlagSet("callgraph-gt", flag.ContinueOnError)
+	check := fs.Bool("check", false, "check that the walk and go/packages file sets are equal")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if !*check {
+		fmt.Fprintln(os.Stderr, "callgraph-gt: pass --check (building the VTA graph is S2)")
+		return 2
+	}
+	return runCheck()
 }
