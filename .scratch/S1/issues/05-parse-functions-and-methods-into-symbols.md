@@ -2,7 +2,7 @@
 
 Plan: S1-T04 + T07 (core) (`docs/plan/sprints/S1-corpus-symbols.md`). Spec user stories: 22, 23, 24, 28, 29, 30, 31, 32, 33.
 
-**What to build:** `indexer parse` turns every walked file into function and method symbols with qualified names that preserve pointer versus value receivers, signature, line range and doc comment. Duplicate names in a package (several `init` functions, same names in different files) get deterministic `#n` suffixes numbered across the whole package. Parsing is idempotent and resumable after an interrupt. A symbol keeps its id when its file is re-parsed, symbols that vanished from a file are removed together with their function summaries, and summary freshness is decided by the recomputed input hash (D-064). Files with parse errors are stored and counted.
+**What to build:** `indexer parse` turns every walked file into function and method symbols with qualified names that preserve pointer versus value receivers, signature, line range and doc comment. Duplicate names in a package (several `init` functions, same names in different files) get deterministic `#n` suffixes numbered across the whole package. Parsing is idempotent and resumable after an interrupt. A symbol keeps its id when its file is re-parsed, symbols that vanished from a file are removed together with their function summaries, and summary freshness is decided by the recomputed input hash (D-065). Files with parse errors are stored and counted.
 
 **Blocked by:** 01 (ci-local and CGO-safe CI), 04 (Walk the corpus)
 

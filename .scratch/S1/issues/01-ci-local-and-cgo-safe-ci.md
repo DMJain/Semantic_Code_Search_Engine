@@ -2,7 +2,7 @@
 
 Plan: S1-T15 (`docs/plan/sprints/S1-corpus-symbols.md`). Spec user stories: 1, 2, 3, 4, 5, 8.
 
-**What to build:** The developer can run one command, `make ci-local`, that mirrors the CI workflow's steps and environment against the local Postgres and proves the project builds, vets, lints and tests with no skipped test. The workflow file is checked by a pinned linter that needs no installation. The C toolchain is enabled for build, vet and test only (never job-wide), so the parser added later compiles without touching the corpus build context (D-062). Checking a deliberately broken copy of the workflow must fail.
+**What to build:** The developer can run one command, `make ci-local`, that mirrors the CI workflow's steps and environment against the local Postgres and proves the project builds, vets, lints and tests with no skipped test. The workflow file is checked by a pinned linter that needs no installation. The C toolchain is enabled for build, vet and test only (never job-wide), so the parser added later compiles without touching the corpus build context (D-063). Checking a deliberately broken copy of the workflow must fail.
 
 **Blocked by:** None (can start immediately)
 

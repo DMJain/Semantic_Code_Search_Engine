@@ -2,7 +2,7 @@
 
 Plan: S1-T08 (second half) (`docs/plan/sprints/S1-corpus-symbols.md`). Spec user stories: 7, 21, 35, 36, 37.
 
-**What to build:** `callgraph-gt --check` proves that the files the walk selected for the four slice roots are exactly the files `go/packages` loads under the identical build context (D-066): cgo off appended last to the environment, client-go loaded by import path from the root module, symlinks normalized, the shared exclusion predicate applied. Exit 0 means equal; 1 means unequal with both difference lists capped at 50 lines and totals; 2 means a load error, which is recorded under the open question and stops for the owner.
+**What to build:** `callgraph-gt --check` proves that the files the walk selected for the four slice roots are exactly the files `go/packages` loads under the identical build context (D-067): cgo off appended last to the environment, client-go loaded by import path from the root module, symlinks normalized, the shared exclusion predicate applied. Exit 0 means equal; 1 means unequal with both difference lists capped at 50 lines and totals; 2 means a load error, which is recorded under the open question and stops for the owner.
 
 **Blocked by:** 04 (Walk the corpus)
 

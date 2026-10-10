@@ -30,8 +30,8 @@
 - **Raw calls**: call-expression text as written, per symbol, used only as summary-prompt input (D-019); never read by the S2 graph.
 - **Qualified name**: the globally unique symbol name: package path plus `Name` or `Receiver.Name`, with `#n` appended from the second duplicate in a package, ordered by `(path, start_line)`.
 - **12-month yield / 18-month extension yield**: counts of merged PRs usable as semantic eval queries, counted after every automatable filter, in the 12 months before the pinned tag and the further 6 months; their sum must be at least 30 at the freeze and is recomputed on the frozen slice. (S4 pool "tiers" are a separate, later notion.)
-- **Quality gate**: the author's review of 30 seeded summaries from a 200-row sample before the overnight run; at most 3 bad passes (D-067).
-- **ci-local**: `make ci-local`, the local mirror of `ci.yml` used until the owner pushes (D-062).
+- **Quality gate**: the author's review of 30 seeded summaries from a 200-row sample before the overnight run; at most 3 bad passes (D-068).
+- **ci-local**: `make ci-local`, the local mirror of `ci.yml` used until the owner pushes (D-063).
 - **Gate**: a handoff sprint (S10, P2-S10) after which the agent stops and waits for the author's explicit approval.
 
 ## Phase 2
