@@ -174,7 +174,7 @@ func TestParseCorpusRemovesVanishedSymbolAndSummary(t *testing.T) {
 }
 
 // TestParseCorpusRemovesAllSymbolsFromFile proves that when a file is left
-// with no functions the per-file delete still removes every old symbol (the
+// with no symbols the per-file delete still removes every old symbol (the
 // seen list is empty, which must delete rather than no-op).
 func TestParseCorpusRemovesAllSymbolsFromFile(t *testing.T) {
 	pool := testdb.New(t)
@@ -183,7 +183,7 @@ func TestParseCorpusRemovesAllSymbolsFromFile(t *testing.T) {
 	seedFiles(t, pool, root)
 	runParseCorpus(t, pool, root, 0)
 
-	writeSrc(t, root, "pkg/a/a.go", "package a\n\ntype X struct{}\n")
+	writeSrc(t, root, "pkg/a/a.go", "package a\n\nvar X = 1\n")
 	seedFiles(t, pool, root)
 	runParseCorpus(t, pool, root, 0)
 

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
@@ -47,6 +48,124 @@ func TestFileGolden(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("golden mismatch for sample.go (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFileTypesGolden pins the Symbol JSON for testdata/types.go, which covers
+// a lone struct, a lone interface, a generic struct, an embedded interface, a
+// grouped type block (one symbol per spec) and a `type X = Y` alias plus a
+// named non-struct type, neither of which is a symbol.
+func TestFileTypesGolden(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("testdata", "types.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	syms, err := parse.File("pkg/scheduler/types.go", src)
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	got, err := json.MarshalIndent(syms, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, '\n')
+
+	golden := filepath.Join("testdata", "types.json")
+	if *update {
+		if err := os.WriteFile(golden, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("golden mismatch for types.go (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestTypeSignatureHeaderOnly proves a type's signature is its header only:
+// bounded by 200 characters and free of field or method bodies.
+func TestTypeSignatureHeaderOnly(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("testdata", "types.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	syms, err := parse.File("pkg/scheduler/types.go", src)
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	byName := make(map[string]parse.Symbol, len(syms))
+	for _, s := range syms {
+		byName[s.Name] = s
+	}
+
+	if aliases := byName["Alias"]; aliases.Kind != "" {
+		t.Errorf("Alias is an alias and must not be a symbol: %+v", aliases)
+	}
+	if myInt := byName["MyInt"]; myInt.Kind != "" {
+		t.Errorf("MyInt is a named non-struct type and must not be a symbol: %+v", myInt)
+	}
+
+	cases := []struct {
+		name string
+		kind string
+		sig  string
+	}{
+		{"Lone", parse.KindStruct, "type Lone struct"},
+		{"Plain", parse.KindInterface, "type Plain interface"},
+		{"Set", parse.KindStruct, "type Set[T comparable] struct"},
+		{"ReadWriter", parse.KindInterface, "type ReadWriter interface"},
+		{"GroupedStruct", parse.KindStruct, "type GroupedStruct struct"},
+		{"GroupedInterface", parse.KindInterface, "type GroupedInterface interface"},
+	}
+	for _, c := range cases {
+		s := byName[c.name]
+		if s.Kind != c.kind {
+			t.Errorf("%s kind = %q, want %q", c.name, s.Kind, c.kind)
+		}
+		if s.Signature != c.sig {
+			t.Errorf("%s signature = %q, want %q", c.name, s.Signature, c.sig)
+		}
+		if len(s.Signature) > 200 {
+			t.Errorf("%s signature length = %d, want <= 200", c.name, len(s.Signature))
+		}
+	}
+
+	for _, body := range []string{"FieldA", "FieldB", "members", "Do(", "M(", "{", "}"} {
+		for name, s := range byName {
+			if s.Kind != parse.KindStruct && s.Kind != parse.KindInterface {
+				continue
+			}
+			if strings.Contains(s.Signature, body) {
+				t.Errorf("%s header-only signature %q contains body token %q", name, s.Signature, body)
+			}
+		}
+	}
+}
+
+// TestTypeSignatureCap proves an over-long type-parameter list is truncated to
+// 200 characters rather than inlined.
+func TestTypeSignatureCap(t *testing.T) {
+	src := []byte("package p\n\ntype Big[" + strings.Repeat("T any, ", 40) + "Last any] struct {\n\tHidden int\n}\n")
+	syms, err := parse.File("pkg/p/big.go", src)
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	if len(syms) != 1 || syms[0].Kind != parse.KindStruct {
+		t.Fatalf("symbols = %+v, want one struct", syms)
+	}
+	sig := syms[0].Signature
+	if len(sig) > 200 {
+		t.Errorf("signature length = %d, want <= 200", len(sig))
+	}
+	if strings.Contains(sig, "Hidden") {
+		t.Errorf("signature %q contains the field body", sig)
+	}
+	if !strings.HasPrefix(sig, "type Big[") {
+		t.Errorf("signature = %q, want a `type Big[` header", sig)
 	}
 }
 

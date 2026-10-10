@@ -304,3 +304,9 @@ Interrupt/resume: `kill -INT` exited 0 after writing complete files; resume pars
 Integration tests (throwaway DBs, no raw `t.Skip`): idempotency; a symbol id is unchanged after a re-parse with `parsed_sha` cleared; a removed function leaves no symbol and no function summary and the orphan query returns 0; an inserted extra `init` shifts `init#n` so the stored summary's recomputed `input_hash` differs (stale). `#n` numbering is the second occurrence onward (`init`, `init#1`, `init#2`, ...), ordered by `(path, start_line)`.
 
 `make ci-local` exits 0 (parser compiles with CGO); `make test` 0 SKIP; `go vet ./...`, `make lint` clean.
+
+### S1-06 / T05 - struct and interface symbols
+
+Struct and interface types are extracted as symbols with a header-only signature (`type Name` + type-parameter list + `struct`/`interface`, capped at 200 chars, no field bodies), doc comment and qualified name `<import path>.Name`. Grouped `type ( ... )` blocks yield one symbol per spec; `type X = Y` aliases and non-struct/interface named types are skipped.
+
+Real tree (after clearing `parsed_sha` and re-parsing): `parsed 6633 files, 55499 symbols (func 19796, method 24743, struct 9267, interface 1693), 15 parse errors`; second run `0 files to parse`; duplicate qualified names 0. Goldens cover grouped blocks, generic types and embedded interfaces. `make test` 0 SKIP; `make ci-local` exits 0; `go vet`/`make lint` clean.

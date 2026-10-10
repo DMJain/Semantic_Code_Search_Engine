@@ -1,0 +1,55 @@
+[
+  {
+    "kind": "struct",
+    "name": "Lone",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Lone",
+    "signature": "type Lone struct",
+    "start_line": 4,
+    "end_line": 7,
+    "doc": "// Lone is a documented lone struct."
+  },
+  {
+    "kind": "interface",
+    "name": "Plain",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Plain",
+    "signature": "type Plain interface",
+    "start_line": 9,
+    "end_line": 11
+  },
+  {
+    "kind": "struct",
+    "name": "Set",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Set",
+    "signature": "type Set[T comparable] struct",
+    "start_line": 14,
+    "end_line": 16,
+    "doc": "// Set is a generic struct with a comparable type parameter."
+  },
+  {
+    "kind": "interface",
+    "name": "ReadWriter",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.ReadWriter",
+    "signature": "type ReadWriter interface",
+    "start_line": 19,
+    "end_line": 22,
+    "doc": "// ReadWriter embeds two interfaces."
+  },
+  {
+    "kind": "struct",
+    "name": "GroupedStruct",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.GroupedStruct",
+    "signature": "type GroupedStruct struct",
+    "start_line": 30,
+    "end_line": 32,
+    "doc": "\t// GroupedStruct is declared in a grouped block."
+  },
+  {
+    "kind": "interface",
+    "name": "GroupedInterface",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.GroupedInterface",
+    "signature": "type GroupedInterface interface",
+    "start_line": 35,
+    "end_line": 37,
+    "doc": "\t// GroupedInterface is also declared in the group."
+  }
+]

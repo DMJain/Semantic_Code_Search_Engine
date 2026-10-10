@@ -55,6 +55,8 @@ type parseStats struct {
 	filesParsed  int
 	funcs        int
 	methods      int
+	structs      int
+	interfaces   int
 	parseErrors  int
 }
 
@@ -99,6 +101,10 @@ groups:
 					st.funcs++
 				case parse.KindMethod:
 					st.methods++
+				case parse.KindStruct:
+					st.structs++
+				case parse.KindInterface:
+					st.interfaces++
 				}
 			}
 			if ctx.Err() != nil {
@@ -108,9 +114,10 @@ groups:
 	}
 
 	fmt.Fprintf(out, "parsed %d files, %d symbols, %d parse errors\n",
-		st.filesParsed, st.funcs+st.methods, st.parseErrors)
+		st.filesParsed, st.funcs+st.methods+st.structs+st.interfaces, st.parseErrors)
 	if showKinds {
-		fmt.Fprintf(out, "symbols by kind: func %d, method %d\n", st.funcs, st.methods)
+		fmt.Fprintf(out, "symbols by kind: func %d, method %d, struct %d, interface %d\n",
+			st.funcs, st.methods, st.structs, st.interfaces)
 	}
 	return nil
 }

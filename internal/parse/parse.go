@@ -13,24 +13,33 @@ import (
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/walk"
 )
 
-// Symbol kinds. Only func and method are produced here; struct and interface
-// (S1-T05) and raw_calls (S1-T06) extend this without changing the shape.
+// Symbol kinds. Func, method, struct and interface are produced here;
+// raw_calls (S1-T06) extends the shape without adding a kind.
 const (
 	// KindFunc is a top-level function declaration.
 	KindFunc = "func"
 	// KindMethod is a declaration with a receiver.
 	KindMethod = "method"
+	// KindStruct is a named struct type declaration.
+	KindStruct = "struct"
+	// KindInterface is a named interface type declaration.
+	KindInterface = "interface"
 )
+
+// maxSignature is the header length cap. A type's signature is the declaration
+// header only (never a field or method body), so the cap only bites on a type
+// with an unusually long type-parameter list.
+const maxSignature = 200
 
 // ErrSyntax reports that tree-sitter found ERROR nodes in a file. [File] still
 // returns the symbols it managed to extract; the caller counts the file as a
 // parse error and stores it anyway.
 var ErrSyntax = errors.New("parse: syntax errors")
 
-// Symbol is one function or method extracted from a Go file. QualifiedName is
-// the base name (<import path>.<Name>, or <import path>.(*T).Name for
-// methods); [AssignQualifiedNames] appends #n suffixes to duplicates across a
-// package.
+// Symbol is one function, method, struct or interface extracted from a Go
+// file. QualifiedName is the base name (<import path>.<Name>, or
+// <import path>.(*T).Name for methods); [AssignQualifiedNames] appends #n
+// suffixes to duplicates across a package.
 type Symbol struct {
 	Kind          string `json:"kind"`
 	Name          string `json:"name"`
@@ -43,9 +52,9 @@ type Symbol struct {
 }
 
 // File parses src as the Go file at repo-root-relative slash path relPath and
-// returns its function and method symbols in source order. The base qualified
-// name uses walk.ImportPath(relPath). If tree-sitter finds ERROR nodes it
-// returns the symbols it extracted together with [ErrSyntax].
+// returns its function, method, struct and interface symbols in source order.
+// The base qualified name uses walk.ImportPath(relPath). If tree-sitter finds
+// ERROR nodes it returns the symbols it extracted together with [ErrSyntax].
 func File(relPath string, src []byte) ([]Symbol, error) {
 	p := sitter.NewParser()
 	defer p.Close()
@@ -67,6 +76,8 @@ func File(relPath string, src []byte) ([]Symbol, error) {
 			syms = append(syms, symbol(n, src, pkg, KindFunc))
 		case "method_declaration":
 			syms = append(syms, symbol(n, src, pkg, KindMethod))
+		case "type_declaration":
+			syms = append(syms, typeSymbols(n, src, pkg)...)
 		}
 	}
 	if root.HasError() {
@@ -94,6 +105,59 @@ func symbol(n *sitter.Node, src []byte, pkg, kind string) Symbol {
 		sym.QualifiedName = pkg + "." + name
 	}
 	return sym
+}
+
+// typeSymbols builds one Symbol per named struct or interface in a
+// type_declaration, in source order. A grouped `type ( ... )` block yields one
+// symbol per spec; `type X = Y` aliases and other named types (for example
+// `type X int`) are skipped. Each symbol carries the spec's own span, so a
+// grouped symbol starts at its spec line, not at the `type (` keyword.
+func typeSymbols(n *sitter.Node, src []byte, pkg string) []Symbol {
+	var syms []Symbol
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		spec := n.NamedChild(i)
+		if spec.Type() != "type_spec" {
+			continue
+		}
+		kind := ""
+		switch spec.ChildByFieldName("type").Type() {
+		case "struct_type":
+			kind = KindStruct
+		case "interface_type":
+			kind = KindInterface
+		default:
+			continue
+		}
+		name := spec.ChildByFieldName("name").Content(src)
+		syms = append(syms, Symbol{
+			Kind:          kind,
+			Name:          name,
+			QualifiedName: pkg + "." + name,
+			Signature:     typeSignature(spec, src, kind),
+			StartLine:     int(spec.StartPoint().Row) + 1,
+			EndLine:       int(spec.EndPoint().Row) + 1,
+			Doc:           doc(src, int(spec.StartPoint().Row)),
+		})
+	}
+	return syms
+}
+
+// typeSignature is the header only: `type Name`, any type-parameter list, then
+// the kind (`struct` or `interface`). Field and method bodies are never
+// inlined, for example `type Foo[T any] struct` or `type Reader interface`. The
+// result is capped at [maxSignature] characters.
+func typeSignature(spec *sitter.Node, src []byte, kind string) string {
+	sig := "type " + spec.ChildByFieldName("name").Content(src)
+	if tp := spec.ChildByFieldName("type_parameters"); tp != nil {
+		sig += tp.Content(src)
+	}
+	sig += " " + kind
+	if len(sig) > maxSignature {
+		if r := []rune(sig); len(r) > maxSignature {
+			sig = string(r[:maxSignature])
+		}
+	}
+	return sig
 }
 
 // signature is the declaration header from the func keyword through the result
