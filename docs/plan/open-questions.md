@@ -6,7 +6,7 @@ Items resolved by a task are recorded in the named decision and deleted here.
 - **Q-02**: Groq model ID and free-tier RPM/TPM limits (D-007): read from Groq docs at S6-T01/T02.
 - **Q-03**: Per-model card facts for `qwen3-embedding:0.6b` and `nomic-embed-text` (prefixes, MRL, context) (D-003): S0-T05/T07.
 - **Q-04**: Whether VTA over the slice plus dependencies fits in 24GB memory; fallback in S2-T07.
-- **Q-05**: Whether `staging/src/k8s.io/client-go` can be loaded by `go/packages` from the clone's `vendor/` layout: first tried in S1-T08 (`callgraph-gt --check`, D-067; a load failure stops for the owner before the T13 freeze), then offline loadability in S2-T06.
+- **Q-05**: Whether `staging/src/k8s.io/client-go` can be loaded by `go/packages` from the clone's `vendor/` layout: first tried in S1-T08 (`callgraph-gt --check`, D-067; a load failure stops for the owner before the T13 freeze), then offline loadability in S2-T06. Evidence (S1-02, 2026-10-10, tag v1.37.0): the clone has `go.work` (`use ./staging/src/k8s.io/...`) and its `vendor/k8s.io` holds only gengo, klog, kube-openapi, system-validators and utils: there is NO `vendor/k8s.io/client-go`, `api` or `apimachinery`, so the `GOWORK=off` with `-mod=vendor` invocation assumed by D-058 cannot resolve client-go; S1-09 and S2-T06 must try the workspace (default `GOWORK`) first.
 - **Q-06**: SQLite driver, inference runtime, MCP SDK, GGUF sources (D-052 to D-055): P2-S0.
 - **Q-07**: GitHub and `go install` name collisions for `lodestone` (D-034): checked before the first release, P2-S9-T09.
 - **Q-08**: The three smoke repos and their pinned shas (D-043): P2-S8-T07.

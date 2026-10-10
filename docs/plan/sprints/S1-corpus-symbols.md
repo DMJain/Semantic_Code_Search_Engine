@@ -247,3 +247,18 @@ exit status 1
 $ echo $?  ->  2
 ```
 Scratch copies (`/tmp/s1-ci-typo.yml`, `/tmp/s1-shellcheck.yml`) were deleted after the run.
+
+### S1-02 / T01 - Pin and fetch the Kubernetes tag
+
+**Chosen tag: `v1.37.0`**, commit `f54c212e3a2f75d674b717a9b29052b20b60aefc`, committed 2026-08-26, `go` directive `1.26.0` (`<=` local go1.27.1). Latest stable `v1.N.0` with no alpha/beta/rc whose go directive is not newer than the local toolchain; recorded in D-006. `KUBE_TAG=v1.37.0` in `.env` and `.env.example`.
+
+```
+$ git -C data/kubernetes describe --tags          -> v1.37.0
+$ test -d data/kubernetes/vendor && test -d data/kubernetes/staging/src/k8s.io/client-go   -> OK
+$ printf '%s\n%s\n' "$(grep '^go ' data/kubernetes/go.mod | cut -d' ' -f2)" \
+      "$(go env GOVERSION | sed 's/^go//')" | sort -V -C                       -> OK (1.26.0 <= 1.27.1)
+$ make fetch-repo   # second run
+level=INFO msg="kubernetes already checked out at tag, skipping" dir=./data/kubernetes tag=v1.37.0   -> exit 0
+```
+
+Clone fact for Q-05: `vendor/k8s.io/` holds only gengo, klog, kube-openapi, system-validators and utils — no `client-go`/`api`/`apimachinery` — and the clone carries `go.work` (`use ./staging/src/k8s.io/...`), so the `GOWORK=off -mod=vendor` invocation assumed by D-058 cannot resolve client-go from `vendor/`.
