@@ -33,7 +33,7 @@ Details: sprint files in `docs/plan/sprints/`; `architecture.md`, `v2-architectu
 | P2-S10 | GATE: Phase 2 handoff | P2-S9 | `phase2-handoff.md`; STOP message given | todo |
 
 ## Critical path
-Phase 1: S0 -> S1-T01..T14 (benchmark, yield probe, slice freeze, quality gate, summary-run launch) -> overnight function summaries (runs during S2-S4; pause only for S3-T09 embedding) -> S5 -> S6 -> S7 -> S8-T06 (single TEST run) -> S9 -> S10 gate.
+Phase 1: S0 -> S1-T01..T15 (ci-local, benchmark, yield probe, slice freeze, quality gate, summary-run launch) -> overnight function summaries (runs during S2-S4; pause only for S3-T09 embedding) -> S5 -> S6 -> S7 -> S8-T06 (single TEST run) -> S9 -> S10 gate.
 Hard gate inside Phase 1: S4-T14 TEST freeze precedes all tuning (S5-T08, S6-T12, S8-T04). Labeling (S4) overlaps the summary run.
 Phase 2: P2-S0 -> P2-S1 (needs the fixture e2e first) -> {P2-S2, P2-S3} -> P2-S4 -> P2-S5 -> P2-S6 -> P2-S7 -> P2-S8 -> P2-S9 -> P2-S10 gate.
 
