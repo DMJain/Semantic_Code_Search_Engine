@@ -1,39 +1,30 @@
 # Domain Docs
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+How the engineering skills should consume this repo's domain documentation when exploring the codebase. This is a single-context repo: one glossary and one decision log, both in the plan folder.
 
 ## Before exploring, read these
 
 - **`docs/plan/glossary.md`**: the project glossary. Read it for the vocabulary of the domain.
-- **`docs/plan/decisions.md`**: the project decision log (ADR-lite). Read entries that touch the area you're about to work in.
+- **`docs/plan/decisions.md`**: the project decision log (ADR-lite, append-only, IDs `D-nnn`). Read the entries that touch the area you're about to work in.
+- **`docs/plan/architecture.md`**: the canonical architecture; sprint files link to its headings.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) appends to them lazily when terms or decisions actually get resolved.
+Other plan documents (`docs/plan/ROADMAP.md`, `eval-protocol.md`, `open-questions.md`, `v2-architecture.md`, and the sprint files under `docs/plan/sprints/`) are read on demand when a task names them.
+
+If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) appends to the glossary and the decision log lazily when terms or decisions actually get resolved.
 
 ## File structure
-
-Single-context repo (most repos):
 
 ```
 /
 ├── docs/plan/glossary.md
 ├── docs/plan/decisions.md
-└── src/
+├── docs/plan/architecture.md
+├── docs/agents/            ← how skills use the docs and the issue tracker
+├── .scratch/<feature>/     ← specs and issues (local markdown tracker)
+└── cmd/, internal/
 ```
 
-Multi-context repo:
-
-```
-/
-├── docs/plan/glossary.md               ← system-wide glossary
-├── docs/plan/decisions.md              ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── docs/plan/glossary.md       ← context-specific glossary
-    │   └── docs/plan/decisions.md      ← context-specific decisions
-    └── billing/
-        ├── docs/plan/glossary.md
-        └── docs/plan/decisions.md
-```
+There is no `CONTEXT.md` and no `docs/adr/` folder: the plan's glossary and decision log serve those roles (D-017).
 
 ## Use the glossary's vocabulary
 
@@ -41,8 +32,10 @@ When your output names a domain concept (in an issue title, a refactor proposal,
 
 If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 
-## Flag decision-log conflicts
+## Decision log rules
+
+The decision log is append-only. An outcome is added under the existing entry as "Outcome (ticket, date, evidence)"; a changed decision becomes a new entry that supersedes the old one, and the old entry is marked superseded.
 
 If your output contradicts an existing decision in `docs/plan/decisions.md`, surface it explicitly rather than silently overriding:
 
-> _Contradicts D-0007 (event-sourced orders), but worth reopening because…_
+> _Contradicts D-006 (pinned Kubernetes tag), but worth reopening because…_
