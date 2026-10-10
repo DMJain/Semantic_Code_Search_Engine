@@ -46,6 +46,7 @@ The prompt uses raw call-expression names from parse, permanently, so summarizat
 
 ## D-017 AGENTS.md links are plain, not auto-loaded imports (2026-10-08)
 `AGENTS.md` mentions `docs/agents/*` as backticked paths, not `@`-imports, so they are read on demand. S0-T09 re-checks that no `@` import exists, re-points `docs/agents/domain.md` to `docs/plan/glossary.md` and `docs/plan/decisions.md`, and fixes the stale "Domain docs" line in `AGENTS.md`.
+Outcome (S0-T09, 2026-10-10, `grep -rn "@" AGENTS.md | grep -v "@latest"` returns nothing): no auto-loading imports exist. `AGENTS.md` is the only project instruction file (there is no `CLAUDE.md` in this repo), and it references `docs/agents/*` only as plain backticked paths.
 
 ## D-018 Q&A comparison (2026-10-08)
 `/ask` multi-hop versus single-shot RAG (top-10 from A3 + one call); identical answer prompt constraints and rendering; grading sheet shows only answer and citations, seeded A/B shuffle; tokens and LLM calls reported for both. LLM-only baseline rejected.

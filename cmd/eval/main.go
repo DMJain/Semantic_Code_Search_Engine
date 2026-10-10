@@ -1,4 +1,4 @@
-// Command eval will run the queries in eval/queries.jsonl against the query
+// Command eval will run the queries in eval/queries.dev.jsonl against the query
 // service and write scored results to eval/results/.
 //
 // Not implemented yet.
