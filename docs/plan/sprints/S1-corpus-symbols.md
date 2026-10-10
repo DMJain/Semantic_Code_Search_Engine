@@ -196,4 +196,54 @@ Tag pinned (D-006); walk and parse idempotent; `callgraph-gt --check` equal; sli
 `indexer walk && indexer parse --stats` prints stats; `psql` shows the qualified name `k8s.io/kubernetes/pkg/scheduler.(*Scheduler).schedulePod`; `make summarize-status` shows the run progressing.
 
 ## Results
-(empty)
+
+### S1-01 / T15 - `make ci-local` and CGO-safe CI
+
+**Pinned actionlint version: `v1.7.12`.** Chosen from `GOTOOLCHAIN=local go list -m -versions github.com/rhysd/actionlint` (newest entry). The absolute newest required no fallback: `v1.7.12` builds and runs under `GOTOOLCHAIN=local` with the local toolchain (`GOTOOLCHAIN=local go run ...@v1.7.12 -version` reports `v1.7.12` "built with go1.27.1 compiler for darwin/arm64"), so the newest that works *is* the newest. Pinned as the Makefile variable `ACTIONLINT_VERSION`, next to `GOLANGCI_LINT_VERSION`.
+
+**shellcheck check runs (not skipped).** `shellcheck 0.11.0` is on `PATH`, so actionlint's shell-script integration is active. Proven with a scratch workflow whose only defect was `run: echo $FOO`; `make lint-ci WORKFLOW=/tmp/s1-shellcheck.yml` reported `SC2086:info: ... Double quote to prevent globbing [shellcheck]` and exited non-zero. actionlint auto-detects shellcheck; when it is absent the shell-script checks are silently skipped (the ticket's note). The GitHub `ubuntu-latest` runner ships shellcheck, so CI and `ci-local` behave the same.
+
+**Commands in `ci.yml` vs `make ci-local`:**
+
+| Step | `ci.yml` | `make ci-local` |
+|---|---|---|
+| Vet | `go vet ./...`, per-step `env: CGO_ENABLED: "1"` | `CGO_ENABLED=1 go vet ./...` |
+| Test | `make test`, per-step `env: CGO_ENABLED: "1"` | `CGO_ENABLED=1 make test` |
+| Lint | `golangci/golangci-lint-action@v9` `version: v2.14.0` then `make lint-ci` | `make lint` (local binary) then `make lint-ci` |
+
+Differences, all explained:
+- **golangci-lint**: CI invokes the `golangci/golangci-lint-action@v9` wrapper pinned to `v2.14.0`; `ci-local` invokes the locally installed `golangci-lint` binary (`v2.14.0`, same pin). The commands are the same (`golangci-lint run`); only the delivery mechanism differs. `make lint` also fails fast with an install hint if the binary is missing.
+- **Platform / C toolchain**: CI runs on `ubuntu-latest` (system clang); `ci-local` runs on macOS `darwin/arm64` (Xcode CommandLineTools clang). `CGO_ENABLED=1` is set per-step in `ci.yml` (never job-wide) and inline in `ci-local`; it is what lets the later tree-sitter parser (T04) build. The corpus build context stays `CGO_ENABLED=0` (D-063), untouched here.
+- **Postgres**: CI provisions a `pgvector/pgvector:pg17` service container; `ci-local` uses the compose Postgres via `TEST_DATABASE_URL` from `.env` and additionally refuses early when it is unset (the guard inside `make test`).
+- The vet command, the test command (`make test` → `REQUIRE_TEST_DB=1 go test -count=1 -v ./...` with the SKIP check) and the actionlint command (`make lint-ci`) are literally the same strings in both.
+
+**Acceptance evidence (trimmed):**
+
+```
+$ make ci-local
+CGO_ENABLED=1 go vet ./...
+CGO_ENABLED=1 /Library/Developer/CommandLineTools/usr/bin/make test
+...
+ok  github.com/DMJain/Semantic_Code_Search_Engine/internal/walk  1.330s
+/Library/Developer/CommandLineTools/usr/bin/make lint
+golangci-lint run
+0 issues.
+/Library/Developer/CommandLineTools/usr/bin/make lint-ci
+GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml
+$ echo $?  ->  0        # 0 `--- SKIP`, no FAIL
+```
+
+```
+$ make lint-ci
+GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml
+$ echo $?  ->  0
+```
+
+```
+$ make lint-ci WORKFLOW=/tmp/s1-ci-typo.yml   # scratch copy with `runs-ON` typo
+/tmp/s1-ci-typo.yml:11:3: "runs-on" section is missing in job "test" [syntax-check]
+/tmp/s1-ci-typo.yml:12:5: unexpected key "runs-ON" for "job" section ... [syntax-check]
+exit status 1
+$ echo $?  ->  2
+```
+Scratch copies (`/tmp/s1-ci-typo.yml`, `/tmp/s1-shellcheck.yml`) were deleted after the run.

@@ -3,8 +3,11 @@
 export
 
 GOLANGCI_LINT_VERSION := v2.14.0
+# Newest actionlint that builds/runs under GOTOOLCHAIN=local (see S1 Results).
+ACTIONLINT_VERSION := v1.7.12
+WORKFLOW ?= .github/workflows/ci.yml
 
-.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean lint build
+.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean lint lint-ci ci-local build
 
 up: ## Start Postgres and wait until it is healthy
 	docker compose up -d --wait
@@ -75,5 +78,14 @@ lint: ## Run golangci-lint (brew install golangci-lint)
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint not found: brew install golangci-lint (CI uses $(GOLANGCI_LINT_VERSION))"; exit 1; }
 	golangci-lint run
 
+lint-ci: ## Validate the workflow with a pinned actionlint (no install needed)
+	GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) $(WORKFLOW)
+
+ci-local: ## Mirror ci.yml locally against the compose Postgres (no skips allowed)
+	CGO_ENABLED=1 go vet ./...
+	CGO_ENABLED=1 $(MAKE) test
+	$(MAKE) lint
+	$(MAKE) lint-ci
+
 build: ## Build all binaries into bin/
-	go build -o bin/ ./cmd/...
+	CGO_ENABLED=1 go build -o bin/ ./cmd/...

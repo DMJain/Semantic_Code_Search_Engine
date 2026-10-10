@@ -31,11 +31,16 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go vet ./...
+      - name: Vet
+        run: go vet ./...
+        env:
+          CGO_ENABLED: "1"
       # `make test` is the single definition of "run every test": one uncached
       # run that fails if the database URL is missing or any test skips.
       - name: Test (no skips allowed)
         run: make test
+        env:
+          CGO_ENABLED: "1"
 
   lint:
     runs-on: ubuntu-latest
@@ -47,3 +52,5 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
+      - name: actionlint (pinned)
+        run: make lint-ci
