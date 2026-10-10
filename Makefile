@@ -4,7 +4,7 @@ export
 
 GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test lint build
+.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean lint build
 
 up: ## Start Postgres and wait until it is healthy
 	docker compose up -d --wait
@@ -54,13 +54,22 @@ test: ## Run every test fresh (uncached); fail if the Postgres integration test 
 		exit 1; \
 	fi
 	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
-	go test -count=1 -v ./... >"$$tmp" 2>&1; status=$$?; \
+	REQUIRE_TEST_DB=1 go test -count=1 -v ./... >"$$tmp" 2>&1; status=$$?; \
 	cat "$$tmp"; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -q -- '--- SKIP' "$$tmp"; then \
 		echo "ERROR: a test was skipped; tests must run, not skip"; \
 		exit 1; \
 	fi
+
+test-db-clean: ## Drop leftover codesearch_test_* throwaway databases from interrupted test runs
+	@for db in $$(docker compose exec -T postgres psql -tA -v ON_ERROR_STOP=1 \
+		-U $${POSTGRES_USER:-codesearch} -d postgres \
+		-c "SELECT datname FROM pg_database WHERE datname LIKE 'codesearch\\_test\\_%'"); do \
+		echo "dropping $$db"; \
+		docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $${POSTGRES_USER:-codesearch} -d postgres \
+			-c "DROP DATABASE \"$$db\" WITH (FORCE)" || exit 1; \
+	done
 
 lint: ## Run golangci-lint (brew install golangci-lint)
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint not found: brew install golangci-lint (CI uses $(GOLANGCI_LINT_VERSION))"; exit 1; }

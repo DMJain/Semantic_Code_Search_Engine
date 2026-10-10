@@ -1,27 +1,29 @@
-package store
+package store_test
 
 import (
 	"context"
-	"fmt"
-	"net/url"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
 )
 
 var schemaTables = []string{"files", "symbols", "chunks", "edges", "summaries", "embeddings", "llm_cache", "traces"}
 
-// TestMigrateCreatesTables needs a real Postgres with pgvector, such as the
-// docker-compose one. It is skipped unless TEST_DATABASE_URL is set; `make test`
-// sets it so a missing configuration is loud rather than silent.
+// These tests need a real Postgres with pgvector, such as the docker-compose
+// one. Each runs in its own throwaway database (internal/testdb); `make test`
+// sets REQUIRE_TEST_DB=1 so a missing configuration fails instead of skipping.
+
+// TestMigrateCreatesTables checks a fresh database has every table and extension.
 func TestMigrateCreatesTables(t *testing.T) {
-	dbURL := testURL(t)
+	dbURL := testdb.Create(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := Migrate(ctx, dbURL); err != nil {
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -40,11 +42,11 @@ func TestMigrateCreatesTables(t *testing.T) {
 // generated, and a value inserted explicitly is matched by a text query. The
 // inserts run in a transaction that is rolled back, so no rows are left behind.
 func TestSearchTSVIsPlainColumn(t *testing.T) {
-	dbURL := testURL(t)
+	dbURL := testdb.Create(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := Migrate(ctx, dbURL); err != nil {
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -96,37 +98,12 @@ func TestSearchTSVIsPlainColumn(t *testing.T) {
 
 // TestMigrateUpDownUpInThrowawayDatabase exercises goose Up, Down (one step),
 // then Up again in a throwaway database, so a rollback never touches dev data.
-// The codesearch role is a superuser, so it can CREATE DATABASE.
 func TestMigrateUpDownUpInThrowawayDatabase(t *testing.T) {
-	base := testURL(t)
+	throwaway := testdb.Create(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	dbName := fmt.Sprintf("csmig_%d", time.Now().UnixNano())
-	admin, err := pgx.Connect(ctx, replaceDatabase(t, base, "postgres"))
-	if err != nil {
-		t.Fatalf("connect to maintenance database: %v", err)
-	}
-	defer admin.Close(ctx)
-
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize()); err != nil {
-		t.Fatalf("create throwaway database %s: %v", dbName, err)
-	}
-	defer func() {
-		dropCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if _, err := admin.Exec(dropCtx,
-			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", dbName); err != nil {
-			t.Errorf("terminate backends: %v", err)
-		}
-		if _, err := admin.Exec(dropCtx, "DROP DATABASE IF EXISTS "+pgx.Identifier{dbName}.Sanitize()); err != nil {
-			t.Errorf("drop throwaway database: %v", err)
-		}
-	}()
-
-	throwaway := replaceDatabase(t, base, dbName)
-
-	if _, err := Migrate(ctx, throwaway); err != nil {
+	if _, err := store.Migrate(ctx, throwaway); err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	assertSchema(ctx, t, throwaway)
@@ -135,7 +112,7 @@ func TestMigrateUpDownUpInThrowawayDatabase(t *testing.T) {
 		t.Fatal("no goose version applied after up")
 	}
 
-	if _, err := MigrateDown(ctx, throwaway); err != nil {
+	if _, err := store.MigrateDown(ctx, throwaway); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	downVersion := gooseVersion(ctx, t, throwaway)
@@ -151,33 +128,13 @@ func TestMigrateUpDownUpInThrowawayDatabase(t *testing.T) {
 		t.Error("files table missing after rolling back a later migration; 00001 should stay applied")
 	}
 
-	if _, err := Migrate(ctx, throwaway); err != nil {
+	if _, err := store.Migrate(ctx, throwaway); err != nil {
 		t.Fatalf("up again: %v", err)
 	}
 	assertSchema(ctx, t, throwaway)
 	if got := gooseVersion(ctx, t, throwaway); got != upVersion {
 		t.Errorf("goose version after re-up = %d, want %d", got, upVersion)
 	}
-}
-
-func testURL(t *testing.T) string {
-	t.Helper()
-	raw := os.Getenv("TEST_DATABASE_URL")
-	if raw == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
-	}
-	return raw
-}
-
-// replaceDatabase rewrites the database name in a Postgres URL.
-func replaceDatabase(t *testing.T, raw, dbName string) string {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	u.Path = "/" + dbName
-	return u.String()
 }
 
 func assertSchema(ctx context.Context, t *testing.T, dbURL string) {

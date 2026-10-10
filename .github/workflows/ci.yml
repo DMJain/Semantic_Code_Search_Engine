@@ -32,16 +32,17 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      - run: go test -count=1 ./...
-      # The store tests need Postgres; run them verbosely and fail the job if
-      # any of them reports --- SKIP instead of running.
-      - name: Store tests must run, not skip
+      # One run of every test. Postgres tests must run, not skip: the job
+      # fails if REQUIRE_TEST_DB is unmet or any test reports --- SKIP.
+      - name: Test (no skips allowed)
         shell: bash
+        env:
+          REQUIRE_TEST_DB: "1"
         run: |
           set -o pipefail
-          go test -count=1 -v ./internal/store/... | tee store-test.log
-          if grep -q -- '--- SKIP' store-test.log; then
-            echo "ERROR: a store test was skipped; tests must run, not skip"
+          go test -v -count=1 ./... 2>&1 | tee test.log
+          if grep -q -- '--- SKIP' test.log; then
+            echo "ERROR: a test was skipped; tests must run, not skip"
             exit 1
           fi
 
