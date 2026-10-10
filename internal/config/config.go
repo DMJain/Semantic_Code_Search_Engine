@@ -23,6 +23,11 @@ type Config struct {
 	GroqAPIKey string
 	GroqModel  string
 
+	// GithubToken is a fine-grained read-only token for public repos, used by
+	// the eval GitHub probes. Optional; commands that need it check it
+	// themselves and never print it.
+	GithubToken string
+
 	// KubeTag is the Kubernetes release tag to index. Only fetch-repo
 	// requires it, so it is validated there rather than here.
 	KubeTag string
@@ -43,11 +48,17 @@ func Load() (Config, error) {
 	return load(os.Getenv)
 }
 
-// LoadOllama reads the Ollama-related settings (with defaults) without
-// requiring DATABASE_URL. It is for Ollama-only commands such as the doctor
-// probe modes, which must work before Postgres is configured.
-func LoadOllama() Config {
+// LoadEnv reads every setting (with defaults) without requiring any key. It is
+// for commands that need only optional values and no database, such as the
+// doctor probe modes and the GitHub mining probe.
+func LoadEnv() Config {
 	return loadEnv(os.Getenv)
+}
+
+// LoadOllama reads the Ollama-related settings without requiring DATABASE_URL;
+// it is LoadEnv kept as a named alias for the Ollama-only doctor probe modes.
+func LoadOllama() Config {
+	return LoadEnv()
 }
 
 func load(getenv func(string) string) (Config, error) {
@@ -79,6 +90,7 @@ func loadEnv(getenv func(string) string) Config {
 		OllamaEmbedModel:   get("OLLAMA_EMBED_MODEL", DefaultOllamaEmbedModel),
 		GroqAPIKey:         get("GROQ_API_KEY", ""),
 		GroqModel:          get("GROQ_MODEL", ""),
+		GithubToken:        get("GITHUB_TOKEN", ""),
 		KubeTag:            get("KUBE_TAG", ""),
 		KubeDir:            get("KUBE_DIR", DefaultKubeDir),
 	}

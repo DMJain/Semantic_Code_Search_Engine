@@ -36,6 +36,7 @@ func TestLoadOverrides(t *testing.T) {
 		"OLLAMA_EMBED_MODEL":   "nomic-embed-text",
 		"GROQ_API_KEY":         "key",
 		"GROQ_MODEL":           "m",
+		"GITHUB_TOKEN":         "tok",
 		"KUBE_TAG":             "v1.0.0",
 		"KUBE_DIR":             "/tmp/k",
 	}))
@@ -46,7 +47,8 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("OllamaURL = %q, want trailing slash trimmed", cfg.OllamaURL)
 	}
 	if cfg.HTTPAddr != ":9000" || cfg.OllamaSummaryModel != "llama3" || cfg.OllamaEmbedModel != "nomic-embed-text" ||
-		cfg.GroqAPIKey != "key" || cfg.GroqModel != "m" || cfg.KubeTag != "v1.0.0" || cfg.KubeDir != "/tmp/k" {
+		cfg.GroqAPIKey != "key" || cfg.GroqModel != "m" || cfg.GithubToken != "tok" ||
+		cfg.KubeTag != "v1.0.0" || cfg.KubeDir != "/tmp/k" {
 		t.Errorf("overrides not applied: %+v", cfg)
 	}
 }

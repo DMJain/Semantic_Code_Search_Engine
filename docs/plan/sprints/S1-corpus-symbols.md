@@ -310,3 +310,18 @@ Integration tests (throwaway DBs, no raw `t.Skip`): idempotency; a symbol id is 
 Struct and interface types are extracted as symbols with a header-only signature (`type Name` + type-parameter list + `struct`/`interface`, capped at 200 chars, no field bodies), doc comment and qualified name `<import path>.Name`. Grouped `type ( ... )` blocks yield one symbol per spec; `type X = Y` aliases and non-struct/interface named types are skipped.
 
 Real tree (after clearing `parsed_sha` and re-parsing): `parsed 6633 files, 55499 symbols (func 19796, method 24743, struct 9267, interface 1693), 15 parse errors`; second run `0 files to parse`; duplicate qualified names 0. Goldens cover grouped blocks, generic types and embedded interfaces. `make test` 0 SKIP; `make ci-local` exits 0; `go vet`/`make lint` clean.
+
+### S1-13 / T12 - Mining-yield probe
+
+`eval mine-yield` (GitHub REST search, weekly `merged:` windows with `base:master linked:issue`, windows ending at the tag date 2026-08-26; a window at the 1,000-result cap is halved recursively). Candidate = merged PR closing an issue whose 1-5 changed non-test non-generated `.go` files are all in the candidate slice and exist at the tag (reusing `walk.Excluded`/`walk.InSlice`).
+
+Real run (`eval/results/bench/mine-yield.json`, token never printed):
+
+```
+yield_12m = 128     yield_18m_extension = 40     (total 168 >= 30)
+by_prefix = {controller 37, kubelet 67, scheduler 49, client-go 18}
+windows_at_cap = 0  prs_scanned = 938
+rerun: 0 HTTP calls (cache under eval/candidates/cache/, gitignored)
+```
+
+Deviations recorded: changed non-`.go` files are ignored (Go-only corpus), so a PR touching only non-Go files in the slice counts 0; "exists at the tag" is an `os.Stat` against the checkout, valid because `fetch-repo` is pinned to the tag; `by_prefix` counts a PR once per slice prefix it touches (overlaps, so the sum may exceed the yield). Fake-GitHub tests cover pagination, cap halving, the `/rate_limit` search bucket waited out on an injected clock (no real sleeps), cache reuse (second run 0 HTTP), the missing-token gate before any network call, and the token absent from captured logs.

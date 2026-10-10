@@ -1,0 +1,16 @@
+{
+  "tag": "v1.37.0",
+  "window_months": 18,
+  "window_start": "2025-02-26",
+  "window_end": "2026-08-26",
+  "yield_12m": 128,
+  "yield_18m_extension": 40,
+  "by_prefix": {
+    "pkg/controller": 37,
+    "pkg/kubelet": 67,
+    "pkg/scheduler": 49,
+    "staging/src/k8s.io/client-go": 18
+  },
+  "windows_at_cap": 0,
+  "prs_scanned": 938
+}

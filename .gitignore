@@ -1,6 +1,9 @@
 # Kubernetes checkout and other local data
 data/
 
+# Raw GitHub responses cached by the eval mining probes (reused by S4)
+eval/candidates/cache/
+
 # Secrets
 .env
 
