@@ -43,7 +43,27 @@ func Load() (Config, error) {
 	return load(os.Getenv)
 }
 
+// LoadOllama reads the Ollama-related settings (with defaults) without
+// requiring DATABASE_URL. It is for Ollama-only commands such as the doctor
+// probe modes, which must work before Postgres is configured.
+func LoadOllama() Config {
+	return loadEnv(os.Getenv)
+}
+
 func load(getenv func(string) string) (Config, error) {
+	cfg := loadEnv(getenv)
+
+	var missing []string
+	if cfg.DatabaseURL == "" {
+		missing = append(missing, "DATABASE_URL")
+	}
+	if len(missing) > 0 {
+		return Config{}, fmt.Errorf("%w: %s (see .env.example)", ErrMissing, strings.Join(missing, ", "))
+	}
+	return cfg, nil
+}
+
+func loadEnv(getenv func(string) string) Config {
 	get := func(key, def string) string {
 		if v := strings.TrimSpace(getenv(key)); v != "" {
 			return v
@@ -51,7 +71,7 @@ func load(getenv func(string) string) (Config, error) {
 		return def
 	}
 
-	cfg := Config{
+	return Config{
 		DatabaseURL:        get("DATABASE_URL", ""),
 		HTTPAddr:           get("HTTP_ADDR", DefaultHTTPAddr),
 		OllamaURL:          strings.TrimRight(get("OLLAMA_URL", DefaultOllamaURL), "/"),
@@ -62,15 +82,6 @@ func load(getenv func(string) string) (Config, error) {
 		KubeTag:            get("KUBE_TAG", ""),
 		KubeDir:            get("KUBE_DIR", DefaultKubeDir),
 	}
-
-	var missing []string
-	if cfg.DatabaseURL == "" {
-		missing = append(missing, "DATABASE_URL")
-	}
-	if len(missing) > 0 {
-		return Config{}, fmt.Errorf("%w: %s (see .env.example)", ErrMissing, strings.Join(missing, ", "))
-	}
-	return cfg, nil
 }
 
 // ErrMissing is returned when a required environment variable is unset.

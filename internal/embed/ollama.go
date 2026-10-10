@@ -124,6 +124,44 @@ func (o *Ollama) Probe(ctx context.Context) (ProbeResult, error) {
 	return res, nil
 }
 
+// ProbeNorms embeds one query-shaped input and several document-shaped inputs
+// and returns the raw (pre-normalization) L2 norm of each. It fails on a wrong
+// dimension (the error names both sizes) or a NaN/Inf value. The doctor uses it
+// to check a model's output quality before indexing.
+func (o *Ollama) ProbeNorms(ctx context.Context, query string, docs []Document) ([]float64, error) {
+	inputs := make([]string, 0, 1+len(docs))
+	q, err := o.spec.renderQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	inputs = append(inputs, q)
+	for _, d := range docs {
+		s, err := o.spec.renderDoc(d)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, s)
+	}
+	vecs, err := o.embedRaw(ctx, inputs)
+	if err != nil {
+		return nil, err
+	}
+	norms := make([]float64, len(vecs))
+	for i, v := range vecs {
+		norms[i] = l2(v)
+	}
+	return norms, nil
+}
+
+// ProbeOversizedInput sends one input to /api/embed with truncate:false and
+// returns the server's error, or nil if it accepted the input. It measures
+// whether over-length input is rejected, which D-015's guard depends on.
+func (o *Ollama) ProbeOversizedInput(ctx context.Context, input string) error {
+	truncate := false
+	_, err := o.embed(ctx, []string{input}, &truncate)
+	return err
+}
+
 func (o *Ollama) embedNormalized(ctx context.Context, inputs []string) ([][]float32, error) {
 	vecs, err := o.embedRaw(ctx, inputs)
 	if err != nil {
@@ -143,13 +181,23 @@ func (o *Ollama) embedNormalized(ctx context.Context, inputs []string) ([][]floa
 
 // embedRaw calls /api/embed and validates the output shape and values.
 func (o *Ollama) embedRaw(ctx context.Context, inputs []string) ([][]float32, error) {
+	return o.embed(ctx, inputs, nil)
+}
+
+// embed calls /api/embed and validates the output shape and values. A nil
+// truncate omits the field (Ollama's default); a non-nil value sets it.
+func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([][]float32, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
 
-	payload, err := json.Marshal(map[string]any{"model": o.model, "input": inputs})
+	reqBody := map[string]any{"model": o.model, "input": inputs}
+	if truncate != nil {
+		reqBody["truncate"] = *truncate
+	}
+	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}

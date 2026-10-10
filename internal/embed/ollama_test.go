@@ -268,6 +268,28 @@ func TestProbeHTTPError(t *testing.T) {
 	}
 }
 
+func TestProbeOversizedInputSendsTruncateFalse(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = string(b)
+		http.Error(w, `{"error":"input length exceeds context window"}`, http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	e, err := NewOllama(srv.URL, "nomic-embed-text", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.ProbeOversizedInput(context.Background(), "x")
+	if err == nil || !strings.Contains(err.Error(), "input length exceeds context window") {
+		t.Fatalf("err = %v, want the server error", err)
+	}
+	if !strings.Contains(got, `"truncate":false`) {
+		t.Errorf("request body = %s, want truncate:false", got)
+	}
+}
+
 func TestCheckVectorNaN(t *testing.T) {
 	// NaN cannot travel through JSON, so check the validator directly.
 	v := []float32{0.5, float32(math.NaN())}

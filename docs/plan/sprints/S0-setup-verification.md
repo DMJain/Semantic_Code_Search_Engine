@@ -130,7 +130,11 @@ All ten tasks done; CI runs the migration integration test; D-003 outcome filled
 ## Results
 Status 2026-10-10: in progress. Only verified facts below; no task is closed.
 
-- S0-T06 (partial): Ollama client 0.40.1 installed; `ollama list` shows `qwen3-embedding:0.6b` (639 MB) and `qwen2.5-coder:7b` (4.7 GB). `nomic-embed-text` is NOT pulled, so T06 acceptance (all three) is not met.
+- S0-T06 (done): Ollama client 0.40.1 installed; `ollama list` shows all three: `qwen3-embedding:0.6b` (639 MB), `nomic-embed-text:latest` (274 MB) and `qwen2.5-coder:7b` (4.7 GB), so T06 acceptance (all three) is met. nomic-embed-text is now pulled (it was missing at spec time).
+- S0-T07 probe table (`go run ./cmd/indexer doctor --probe-all`, exit 0):
+  `nomic-embed-text dim 768 norm 1.0000 PASS`; `qwen3-embedding:0.6b dim 1024 norm 1.0000 PASS`.
+- S0-T07 ollama-checks (`go run ./cmd/indexer doctor --ollama-checks`, exit 0): `gen_count_1 36`, `gen_count_2 36` (no prompt-cache reduction, see D-015 outcome); `embed_oversized: error (nomic-embed-text)`, `embed_oversized: error (qwen3-embedding:0.6b)`.
+- S0-T07 model IDs/sizes (D-060, from `/api/tags`, Ollama 0.40.1): `qwen3-embedding:0.6b` digest `ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d` 639,150,858 B (dim 1024, configured `OLLAMA_EMBED_MODEL`); `nomic-embed-text:latest` digest `0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f` 274,302,450 B (dim 768); `qwen2.5-coder:7b` digest `dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364` 4,683,087,561 B (summary model).
 - State A doctor transcript (Postgres up via `make up`, Ollama up, two models pulled), exit 0:
   PASS config; PASS postgres (PostgreSQL 17.11); PASS vector 0.8.7; PASS pg_trgm 1.6; PASS ollama reachable; PASS model qwen2.5-coder:7b; PASS model qwen3-embedding:0.6b; PASS embedding probe (dim 1024, query norm 1.0000, doc norm 1.0000).
 - Migrations: `goose_db_version` has versions 0 and 1 applied; tables: chunks, edges, embeddings, files, goose_db_version, llm_cache, summaries, symbols, traces. No 00002 (T03 not done).

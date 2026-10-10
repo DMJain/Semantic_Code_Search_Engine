@@ -49,6 +49,7 @@ The prompt uses raw call-expression names from parse, permanently, so summarizat
 
 ## D-015 Token estimate and truncation guard (2026-10-08)
 `bytes/4` estimate (documented, golden-file tested). Explicit `num_ctx` on every Ollama request. Two layers ([architecture.md#ollama-requests](architecture.md#ollama-requests)): pre-send, estimated tokens > 0.8 x `num_ctx` means the request is not sent and the row fails with reason `too_large` (summaries: `status='failed'`; embeds: an `embed_failures` row); post-send, embed uses `truncate:false` (error = `truncated`) and generation with `prompt_eval_count >= num_ctx - num_predict` fails as `truncated`. `prompt_eval_count` is not compared with the estimate because the prompt cache can lower it; S0-T07 tests this empirically. Rejected: tokenizer dependency; estimate comparison.
+Outcome (S0-T07, 2026-10-10, `doctor --ollama-checks`): two identical 7B generation requests returned the same prompt-token count (gen_count_1 = 36, gen_count_2 = 36), so no prompt-cache reduction was observed; the estimate is still not compared with `prompt_eval_count`.
 
 ## D-017 AGENTS.md links are plain, not auto-loaded imports (2026-10-08)
 `AGENTS.md` mentions `docs/agents/*` as backticked paths, not `@`-imports, so they are read on demand. S0-T09 re-checks that no `@` import exists, re-points `docs/agents/domain.md` to `docs/plan/glossary.md` and `docs/plan/decisions.md`, and fixes the stale "Domain docs" line in `AGENTS.md`.
@@ -164,6 +165,13 @@ The plan was rewritten from the new brief; deletions are listed below.
 
 ## D-061 S0 process: one branch, one commit per ticket, draft PR for CI (2026-10-10)
 Work happens on branch `s0-setup-verification`. One commit per ticket. Agents push only when CI proof is needed and after showing the owner the workflow triggers and GitHub auth status; a draft pull request triggers CI. The owner reviews and merges; agents never push to or merge into `main`.
+
+## D-060 Ollama model IDs recorded at S0; any ID change before S8 means re-running affected DEV configs (an embedder change means re-embed); never mix IDs within one result (2026-10-10)
+Ollama model IDs recorded at S0; any ID change before S8 means re-running affected DEV configs (an embedder change means re-embed); never mix IDs within one result. Recorded from `ollama list` / `/api/tags` on 2026-10-10 (Ollama 0.40.1):
+- `qwen3-embedding:0.6b` — digest `ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`, size 639,150,858 bytes (~639 MB), dim 1024 (configured `OLLAMA_EMBED_MODEL`).
+- `nomic-embed-text:latest` — digest `0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f`, size 274,302,450 bytes (~274 MB), dim 768.
+- `qwen2.5-coder:7b` — digest `dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364`, size 4,683,087,561 bytes (~4.7 GB), summary model.
+Evidence (S0-T07, 2026-10-10): `doctor --probe-all` printed `nomic-embed-text dim 768 norm 1.0000 PASS` and `qwen3-embedding:0.6b dim 1024 norm 1.0000 PASS`, exit 0; `doctor --ollama-checks` printed `gen_count_1 36`, `gen_count_2 36`, and `embed_oversized: error` for both embedding models, exit 0.
 
 ## Deleted decisions
 - D-013 (ANN recipe with iterative scan, exact re-sort and slice post-filter): superseded by D-029 (slice-only embeddings, no post-filter in SQL). The ANN overlap gate itself is kept in D-027.
