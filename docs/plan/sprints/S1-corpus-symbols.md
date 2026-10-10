@@ -526,3 +526,11 @@ $ make verify-slice            -> match; exit 0
 ```
 
 `summarize --status` counts only the current prompt version (`fn-v1`): a `file`-level row and an `fn-v0` row are not counted (test). ETA is sampled over a wall-clock window (`--eta-window`, default 30s) because the frozen `summaries` table has no completion timestamp; it returns immediately when nothing is pending (`pending 0 done 28 failed 0`, `eta 0s`). Pause/resume is verified by counts on a small fake-Ollama run: cancel at request 6, exactly 6 `done`, no partial rows (no `done` with NULL text, no `failed` with text), resume completes, 0 duplicates. The keep-awake assertion is observable via `pmset -g assertions | grep -i caffeinate` while `caffeinate -i` runs; the owner starts the full run. `make test` 0 SKIP; `make lint` 0 issues.
+
+### S1-16 / T14 second half - quality gate (PREPARED, awaiting the author)
+
+The gate sample was summarized: `bin/indexer summarize --level function --sample 200 --seed 3` -> `eligible 6673, selected 200, done 200, failed 0`; among the 200, `too_large = 0` and `truncated = 0` (all `fn-v1`). A reproducible helper `indexer gate` (`cmd/indexer/gate.go`, read-only, no Ollama) draws 30 of the done rows with seed 3 and writes the grading artifacts:
+- `.scratch/S1/quality-gate-fn-v1.md` — 30 sections (qualified name, input_hash, code, summary, blank verdict).
+- `.scratch/S1/quality-gate-fn-v1.jsonl` — 30 lines `{qualified_name, input_hash, verdict:"", criterion:""}`.
+
+The author grades each summary good/bad against the D-068 rubric (first failing criterion), edits the jsonl, and starts `make summarize-run` in their own terminal. The agent does not grade or start the run. The 200 gate rows stay; the full run skips them by `input_hash`.

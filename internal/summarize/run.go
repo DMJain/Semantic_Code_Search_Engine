@@ -515,7 +515,7 @@ func rootOrder(ordered []Candidate) []string {
 func sampleCandidates(rows []symbolRow) []Candidate {
 	out := make([]Candidate, len(rows))
 	for i, sr := range rows {
-		out[i] = Candidate{ID: sr.id, QualifiedName: sr.qualifiedName, Root: sliceRoot(sr.path)}
+		out[i] = Candidate{ID: sr.id, QualifiedName: sr.qualifiedName, Root: SliceRoot(sr.path)}
 	}
 	return out
 }
@@ -535,9 +535,9 @@ func filterByID(rows []symbolRow, ids []int64) []symbolRow {
 	return out
 }
 
-// sliceRoot returns the walk.SlicePrefixes entry path belongs to, or "" when
+// SliceRoot returns the walk.SlicePrefixes entry path belongs to, or "" when
 // the path is outside the slice.
-func sliceRoot(path string) string {
+func SliceRoot(path string) string {
 	for _, p := range walk.SlicePrefixes {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return p

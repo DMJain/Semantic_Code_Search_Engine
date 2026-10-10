@@ -31,6 +31,7 @@ var commands = []command{
 	{"audit", "check a seeded sample of stored symbols against the source", runAudit},
 	{"chunk", "split symbols into chunks (not implemented)", stub("chunk")},
 	{"summarize", "summarize in-slice functions with a local LLM", runSummarize},
+	{"gate", "print the quality-gate sample with code and write the grade sheet (S1-T14)", runGate},
 	{"embed", "embed chunks and summaries (not implemented)", stub("embed")},
 }
 
