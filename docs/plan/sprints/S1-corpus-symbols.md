@@ -262,3 +262,26 @@ level=INFO msg="kubernetes already checked out at tag, skipping" dir=./data/kube
 ```
 
 Clone fact for Q-05: `vendor/k8s.io/` holds only gengo, klog, kube-openapi, system-validators and utils — no `client-go`/`api`/`apimachinery` — and the clone carries `go.work` (`use ./staging/src/k8s.io/...`), so the `GOWORK=off -mod=vendor` invocation assumed by D-058 cannot resolve client-go from `vendor/`.
+
+### S1-04 / T03 - `indexer walk`
+
+Real run over `data/kubernetes` (v1.37.0), one exported rule table (`walk.Excluded`, shared with S1-08/S1-12):
+
+```
+excluded vendor               4460
+excluded zz_generated         1221
+excluded pb_go                 119
+excluded testdata               50
+excluded test_go              3195
+excluded client_go_generated  2021
+excluded build_constraint      176
+indexed 6633 files (slice 1131), LOC 1145424 (slice 234075)
+run 1: 6633 changed, 0 deleted
+run 2: 0 changed, 0 deleted        # idempotent
+```
+
+Notes:
+- `build_constraint` adds an explicit `importsC(abs) && !CgoEnabled` check: `go/build.Context.MatchFile` does NOT reject `import "C"` (verified on go1.27.1), so without it a cgo file would be indexed. The walk's context is always `{linux, amd64, CgoEnabled:false}` whatever `CGO_ENABLED` the shell sets.
+- The sprint's literal DB check `path like '%_test.go'` is wrong: `_` is a LIKE single-char wildcard and it matches 8 legitimate names (`latest.go`, `resttest.go`, …). The rule is a `_test.go` suffix; the escaped check `path like '%\_test.go' escape '\'` and `path ~ '_test\.go$'` both return 0.
+- `in_slice` = 1131, all with a slice prefix; `_(windows|darwin|freebsd|plan9)\.go$` count 0.
+- `make test` 0 SKIP; `go vet ./...`, `make lint`, `make ci-local` clean.

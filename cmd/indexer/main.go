@@ -26,6 +26,7 @@ var commands = []command{
 	{"migrate", "apply database migrations", runMigrate},
 	{"doctor", "check Postgres, extensions, Ollama and models", runDoctor},
 	{"fetch-repo", "shallow-clone Kubernetes at KUBE_TAG into KUBE_DIR", runFetchRepo},
+	{"walk", "walk the corpus and fill the files table", runWalk},
 	{"parse", "parse Go files and build the call graph (not implemented)", stub("parse")},
 	{"chunk", "split symbols into chunks (not implemented)", stub("chunk")},
 	{"summarize", "summarize functions, files and packages (not implemented)", stub("summarize")},
@@ -75,8 +76,8 @@ func usage() {
 	}
 }
 
-// parseFlags parses a subcommand's flags. None of the current subcommands
-// take flags yet, but this keeps -h working consistently.
+// parseFlags parses a subcommand's flags with the shared flag set, so -h
+// works consistently everywhere.
 func parseFlags(name string, args []string) error {
 	return newFlagSet(name).Parse(args)
 }
