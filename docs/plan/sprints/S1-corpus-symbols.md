@@ -285,3 +285,22 @@ Notes:
 - The sprint's literal DB check `path like '%_test.go'` is wrong: `_` is a LIKE single-char wildcard and it matches 8 legitimate names (`latest.go`, `resttest.go`, …). The rule is a `_test.go` suffix; the escaped check `path like '%\_test.go' escape '\'` and `path ~ '_test\.go$'` both return 0.
 - `in_slice` = 1131, all with a slice prefix; `_(windows|darwin|freebsd|plan9)\.go$` count 0.
 - `make test` 0 SKIP; `go vet ./...`, `make lint`, `make ci-local` clean.
+
+### S1-05 / T04+T07 - `indexer parse` (functions and methods)
+
+Tree-sitter Go grammar (`github.com/smacker/go-tree-sitter`, CGO) extracts `function_declaration` -> `func` and `method_declaration` -> `method`; qualified name `<import path>.<Name>` / `<import path>.(*T).Name` (pointer vs value receiver preserved), signature, line range and contiguous `//` doc.
+
+Real run over `data/kubernetes` (v1.37.0), after `indexer walk`:
+
+```
+parse = 6633 files, 44539 symbols (func 19796, method 24743), 15 parse errors
+schedulePod -> k8s.io/kubernetes/pkg/scheduler.(*Scheduler).schedulePod (lines 572-626)
+second parse -> 0 files to parse
+select qualified_name,count(*) ... having count(*)>1 -> 0 rows
+```
+
+Interrupt/resume: `kill -INT` exited 0 after writing complete files; resume parsed the rest; final `count(*) from symbols` = 44539, equal to the uninterrupted run, 0 duplicates.
+
+Integration tests (throwaway DBs, no raw `t.Skip`): idempotency; a symbol id is unchanged after a re-parse with `parsed_sha` cleared; a removed function leaves no symbol and no function summary and the orphan query returns 0; an inserted extra `init` shifts `init#n` so the stored summary's recomputed `input_hash` differs (stale). `#n` numbering is the second occurrence onward (`init`, `init#1`, `init#2`, ...), ordered by `(path, start_line)`.
+
+`make ci-local` exits 0 (parser compiles with CGO); `make test` 0 SKIP; `go vet ./...`, `make lint` clean.

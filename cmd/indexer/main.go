@@ -27,7 +27,7 @@ var commands = []command{
 	{"doctor", "check Postgres, extensions, Ollama and models", runDoctor},
 	{"fetch-repo", "shallow-clone Kubernetes at KUBE_TAG into KUBE_DIR", runFetchRepo},
 	{"walk", "walk the corpus and fill the files table", runWalk},
-	{"parse", "parse Go files and build the call graph (not implemented)", stub("parse")},
+	{"parse", "parse Go files into function and method symbols", runParse},
 	{"chunk", "split symbols into chunks (not implemented)", stub("chunk")},
 	{"summarize", "summarize functions, files and packages (not implemented)", stub("summarize")},
 	{"embed", "embed chunks and summaries (not implemented)", stub("embed")},

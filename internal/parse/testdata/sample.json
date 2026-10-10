@@ -1,0 +1,76 @@
+[
+  {
+    "kind": "func",
+    "name": "Documented",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Documented",
+    "signature": "func Documented() int",
+    "start_line": 8,
+    "end_line": 10,
+    "doc": "// Documented has a two-part doc comment.\n//\n// The second paragraph is behind an empty comment line."
+  },
+  {
+    "kind": "method",
+    "name": "ValueReceiver",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.(Scheduler).ValueReceiver",
+    "receiver": "Scheduler",
+    "signature": "func (s Scheduler) ValueReceiver()",
+    "start_line": 13,
+    "end_line": 13,
+    "doc": "// ValueReceiver is a method with a value receiver."
+  },
+  {
+    "kind": "method",
+    "name": "PointerReceiver",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.(*Scheduler).PointerReceiver",
+    "receiver": "*Scheduler",
+    "signature": "func (s *Scheduler) PointerReceiver(ctx context.Context) (ScheduleResult, error)",
+    "start_line": 16,
+    "end_line": 18,
+    "doc": "// PointerReceiver is a method with a pointer receiver."
+  },
+  {
+    "kind": "func",
+    "name": "Generic",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Generic",
+    "signature": "func Generic[T any](in T) T",
+    "start_line": 21,
+    "end_line": 23,
+    "doc": "// Generic declares a type parameter."
+  },
+  {
+    "kind": "func",
+    "name": "MultiReturn",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.MultiReturn",
+    "signature": "func MultiReturn() (int, error)",
+    "start_line": 26,
+    "end_line": 28,
+    "doc": "// MultiReturn returns several values."
+  },
+  {
+    "kind": "func",
+    "name": "Variadic",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Variadic",
+    "signature": "func Variadic(prefix string, rest ...int)",
+    "start_line": 31,
+    "end_line": 31,
+    "doc": "// Variadic takes a variadic parameter."
+  },
+  {
+    "kind": "func",
+    "name": "Unnamed",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Unnamed",
+    "signature": "func Unnamed()",
+    "start_line": 35,
+    "end_line": 35
+  },
+  {
+    "kind": "method",
+    "name": "Embedded",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.(embedded).Embedded",
+    "receiver": "embedded",
+    "signature": "func (e embedded) Embedded()",
+    "start_line": 38,
+    "end_line": 38,
+    "doc": "// Embedded is a method whose receiver type is an embedded field type."
+  }
+]
