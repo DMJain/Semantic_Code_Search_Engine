@@ -139,4 +139,33 @@ Status 2026-10-10: in progress. Only verified facts below; no task is closed.
   PASS config; PASS postgres (PostgreSQL 17.11); PASS vector 0.8.7; PASS pg_trgm 1.6; PASS ollama reachable; PASS model qwen2.5-coder:7b; PASS model qwen3-embedding:0.6b; PASS embedding probe (dim 1024, query norm 1.0000, doc norm 1.0000).
 - Migrations: `goose_db_version` has versions 0 and 1 applied; tables: chunks, edges, embeddings, files, goose_db_version, llm_cache, summaries, symbols, traces. No 00002 (T03 not done).
 - `make lint`: 0 issues. `make test`: pass, but cached (T01 not done).
-- Not done: T01-T05, T07-T10; State B doctor transcript (T08); CI run URL (T10).
+- S0-T08 install method detected: Ollama 0.40.1 is installed via Homebrew under `/opt/homebrew` but runs as a **manually started `ollama serve`** (pid seen in `pgrep -lf ollama`), NOT a `brew services` unit (`brew services list | grep ollama` shows `none`).
+- S0-T08 State A doctor transcript (`make doctor`, Postgres up, Ollama up, all models pulled), exit 0, 8/8 PASS:
+  ```
+  PASS  config                       loaded
+  PASS  postgres connection          PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2)
+  PASS  extension vector             version 0.8.7
+  PASS  extension pg_trgm            version 1.6
+  PASS  ollama reachable             http://localhost:11434
+  PASS  model qwen2.5-coder:7b       pulled
+  PASS  model qwen3-embedding:0.6b   pulled
+  PASS  embedding probe              dim 1024, query norm 1.0000, doc norm 1.0000
+  all checks passed
+  ```
+- S0-T08 State B doctor transcript (Ollama stopped, closed-port simulation), exit 1, Postgres checks still reported above the Ollama failure: `set -a; . ./.env; set +a; OLLAMA_URL=http://127.0.0.1:1 go run ./cmd/indexer doctor`:
+  ```
+  PASS  config                       loaded
+  PASS  postgres connection          PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2)
+  PASS  extension vector             version 0.8.7
+  PASS  extension pg_trgm            version 1.6
+  FAIL  ollama reachable             Get "http://127.0.0.1:1/api/tags": dial tcp 127.0.0.1:1: connect: connection refused
+        fix: install Ollama natively (brew install ollama, or https://ollama.com/download); start Ollama: ollama serve (or open the app); OLLAMA_URL is http://127.0.0.1:1
+  SKIP  model qwen2.5-coder:7b       ollama unreachable
+  SKIP  model qwen3-embedding:0.6b   ollama unreachable
+  SKIP  embedding probe              ollama unreachable
+  indexer doctor: 1 check(s) failed
+  ```
+  Closed-port-simulation note: the running `ollama serve` was NOT killed (owner-approved guard). The "Ollama stopped" state is represented by pointing `OLLAMA_URL` at a port with nothing listening (`http://127.0.0.1:1`). The fix message wording in `cmd/indexer/doctor.go` was adjusted minimally so it contains the exact substring `start Ollama: ollama serve` (install guidance and the `OLLAMA_URL` echo kept); the checklist text was unmet before this change.
+- S0-T08 unit test: `TestDoctorOllamaUnreachableFixMessage` (cmd/indexer/doctor_test.go) starts an `httptest.Server`, captures its URL, closes it, then drives the doctor CLI against it; asserts non-zero exit, the failing check `FAIL  ollama reachable`, and the fix message substring `start Ollama: ollama serve`. `go test -count=1 -run TestDoctorOllamaUnreachableFixMessage -v ./cmd/indexer/` -> `--- PASS: TestDoctorOllamaUnreachableFixMessage`.
+- S0-T08 end state: Ollama still running (`curl -s localhost:11434/api/tags` answers, `pgrep -lf ollama` shows `ollama serve`), `make doctor` 8/8 exit 0. `go vet ./...`, `make lint` (0 issues), `make test` all clean.
+- Not done: T01-T05, T09, T10; CI run URL (T10).

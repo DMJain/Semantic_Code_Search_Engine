@@ -100,6 +100,25 @@ func (f *fakeOllama) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func TestDoctorOllamaUnreachableFixMessage(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	t.Setenv("OLLAMA_URL", url)
+	t.Setenv("DATABASE_URL", "postgres://x:x@127.0.0.1:1/x?sslmode=disable")
+
+	out, code := captureRun(t, "doctor")
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero; output:\n%s", out)
+	}
+	if !strings.Contains(out, "FAIL  ollama reachable") {
+		t.Errorf("failing check not named:\n%s", out)
+	}
+	if !strings.Contains(out, "start Ollama: ollama serve") {
+		t.Errorf("fix message missing %q:\n%s", "start Ollama: ollama serve", out)
+	}
+}
+
 func TestProbeAllGoodModelsPass(t *testing.T) {
 	f := &fakeOllama{
 		t:      t,

@@ -140,8 +140,8 @@ func (d *doctor) checkOllama(ctx context.Context, cfg config.Config) {
 	models, err := llm.ListOllamaModels(ctx, http.DefaultClient, cfg.OllamaURL)
 	if err != nil {
 		d.fail("ollama reachable", err,
-			"install Ollama natively (brew install ollama, or https://ollama.com/download), "+
-				"then start it (open the app or run: ollama serve); OLLAMA_URL is "+cfg.OllamaURL)
+			"install Ollama natively (brew install ollama, or https://ollama.com/download); "+
+				"start Ollama: ollama serve (or open the app); OLLAMA_URL is "+cfg.OllamaURL)
 		d.skip(summaryCheck, "ollama unreachable")
 		d.skip(embedCheck, "ollama unreachable")
 		d.skip(probeCheck, "ollama unreachable")
