@@ -234,7 +234,7 @@ func TestRunInterruptResume(t *testing.T) {
 	// No partial row survives an interrupt: a done row carries text, a failed
 	// row carries a reason and no text, a pending row carries no text.
 	var partial int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM summaries
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM summaries
 		WHERE (status = 'done' AND text IS NULL)
 		   OR (status = 'failed' AND (reason IS NULL OR text IS NOT NULL))
 		   OR (status = 'pending' AND text IS NOT NULL)`).Scan(&partial); err != nil {
