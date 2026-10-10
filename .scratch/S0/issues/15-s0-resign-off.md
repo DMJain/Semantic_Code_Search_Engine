@@ -4,7 +4,7 @@
 
 **Blocked by:** 11, 12, 13, 14
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `make reset-db` (empty-guard first), `go vet ./...`, `make lint`, `make test` (0 SKIP, 0 cached), `make doctor` (8 of 8), `doctor --probe-all`, `doctor --ollama-checks` all exit 0; summaries pasted in Results
 - [ ] Results list the five gap tickets with evidence links and the deferred CI step
