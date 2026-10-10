@@ -16,4 +16,4 @@ Domain docs: glossary `docs/plan/glossary.md`, decisions `docs/plan/decisions.md
 
 ## Working rules
 
-Work directly on `main` with local commits (one commit per ticket). Do not create feature branches. Never push, open pull requests or upload anything to a remote; CI is checked locally with `make ci-local` (D-069).
+Work directly on `main` with local commits (one commit per ticket). Do not create feature branches. Never push, open pull requests or upload anything to a remote, and never use `gh`. The only git commands an agent runs are `git add`, `git commit` and `git merge`, in the Antigravity terminal; no other git command. CI is checked locally with `make ci-local` (D-069).
