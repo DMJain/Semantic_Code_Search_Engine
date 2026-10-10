@@ -16,10 +16,11 @@ import (
 // DefaultOllamaTimeout bounds a single /api/embed call.
 const DefaultOllamaTimeout = 60 * time.Second
 
-// Probe accepts a raw vector as normalized when its L2 norm is in this range.
+// Probe accepts a raw vector as normalized when its L2 norm is in this range
+// (plus or minus 1%; both supported models measure 1.0000, D-060).
 const (
-	NormMin = 0.95
-	NormMax = 1.05
+	NormMin = 0.99
+	NormMax = 1.01
 )
 
 // Ollama embeds text through a local Ollama server's /api/embed endpoint.

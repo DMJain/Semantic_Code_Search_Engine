@@ -2,6 +2,8 @@ package embed
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"math"
@@ -295,5 +297,58 @@ func TestCheckVectorNaN(t *testing.T) {
 	v := []float32{0.5, float32(math.NaN())}
 	if err := checkVector(v, 2); err == nil || !strings.Contains(err.Error(), "NaN") {
 		t.Fatalf("err = %v, want NaN error", err)
+	}
+}
+
+// TestRenderedTemplateHashesArePinned fixes the exact bytes of every rendered
+// template with the sha256 values recorded in D-003 (S0-T05). A change to any
+// template, even one character, changes a hash and fails here, so the change
+// must be made deliberately together with a new decision.
+func TestRenderedTemplateHashesArePinned(t *testing.T) {
+	const (
+		query = "pod eviction"
+		text  = "func evictPod()"
+		title = "pkg/kubelet/kubelet.go (*Kubelet).evictPod"
+	)
+	tests := []struct {
+		name, model string
+		dim         int
+		isQuery     bool
+		doc         Document
+		wantSHA256  string
+	}{
+		{"qwen3 query", "qwen3-embedding:0.6b", 1024, true, Document{}, "f44facdd632c133383e6f36cc06c141f9f16776d97926ee800046edc40001e6a"},
+		{"qwen3 document", "qwen3-embedding:0.6b", 1024, false, Document{Text: text}, "f9c00a192adb9bc11cd97b3c420b90e0564ec31f3d0676d4ec0d88ed2186893d"},
+		{"qwen3 document with title", "qwen3-embedding:0.6b", 1024, false, Document{Title: title, Text: text}, "99a44a99894d86b7b56aa3069fdf864461be551741c306426b5bc9504275384c"},
+		{"nomic query", "nomic-embed-text", 768, true, Document{}, "e1ce55bdb8c19ba3bc53a73c71aa5cf2869d5c9415cda10da19dda0defcb171f"},
+		{"nomic document", "nomic-embed-text", 768, false, Document{Text: text}, "7de036e71c1bb500bad38d85ad0bfd141cd3fa5b284430cd5e6ab5840aca29d0"},
+		{"nomic document with title", "nomic-embed-text", 768, false, Document{Title: title, Text: text}, "886261933d0f40c5aaa60799ad69f2a33b9b82f38167a44afa39f59997e37b92"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, bodies := captureOllama(t, tt.dim)
+			e, err := NewOllama(srv.URL, tt.model, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.isQuery {
+				_, err = e.EmbedQueries(context.Background(), []string{query})
+			} else {
+				_, err = e.EmbedDocuments(context.Background(), []Document{tt.doc})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req struct {
+				Input []string `json:"input"`
+			}
+			if err := json.Unmarshal([]byte((*bodies)[0]), &req); err != nil || len(req.Input) != 1 {
+				t.Fatalf("decode request: %v (%d inputs)", err, len(req.Input))
+			}
+			sum := sha256.Sum256([]byte(req.Input[0]))
+			if got := hex.EncodeToString(sum[:]); got != tt.wantSHA256 {
+				t.Errorf("sha256 of rendered %q = %s, want %s (template changed? record a decision)", req.Input[0], got, tt.wantSHA256)
+			}
+		})
 	}
 }

@@ -182,3 +182,11 @@ Sign-off note (deferral): the exit criterion "CI runs the migration integration 
 - S0-T08 unit test: `TestDoctorOllamaUnreachableFixMessage` (cmd/indexer/doctor_test.go) starts an `httptest.Server`, captures its URL, closes it, then drives the doctor CLI against it; asserts non-zero exit, the failing check `FAIL  ollama reachable`, and the fix message substring `start Ollama: ollama serve`. `go test -count=1 -run TestDoctorOllamaUnreachableFixMessage -v ./cmd/indexer/` -> `--- PASS: TestDoctorOllamaUnreachableFixMessage`.
 - S0-T08 end state: Ollama still running (`curl -s localhost:11434/api/tags` answers, `pgrep -lf ollama` shows `ollama serve`), `make doctor` 8/8 exit 0. `go vet ./...`, `make lint` (0 issues), `make test` all clean.
 - T01-T10 all done as of the 2026-10-10 sign-off run above; `go vet`, `make lint`, `make test` all clean. Deferred (owner chose not to push): CI run URL and draft-PR URL (see sign-off note).
+
+### S0 gap closure (2026-10-10, after the S0 code review; tickets 11-15 in `.scratch/S0/issues/`)
+- S0-11 (templates pinned): `TestRenderedTemplateHashesArePinned` pins the six D-003 sha256 values through the public embedder. Mutation evidence, one-character edit of each template, each reverted afterwards (`git diff` empty):
+  - qwen3 query, space added after `Query:` -> `--- FAIL: TestRequestBodies`, `--- FAIL: TestRenderedTemplateHashesArePinned`
+  - qwen3 document, title separator `\n` -> space -> both fail
+  - nomic query, `search_query: ` -> `search_query:` -> `TestRequestBodies`, `TestEmbedPrefixesAndNormalizes`, `TestRenderedTemplateHashesArePinned` fail
+  - nomic document, `search_document: ` -> `search_documents: ` -> the same three fail
+  Probe norm range now 0.99 to 1.01; `doctor --probe-all` still `nomic-embed-text dim 768 norm 1.0000 PASS`, `qwen3-embedding:0.6b dim 1024 norm 1.0000 PASS`, exit 0. Qwen3 format choice recorded as a D-003 outcome.

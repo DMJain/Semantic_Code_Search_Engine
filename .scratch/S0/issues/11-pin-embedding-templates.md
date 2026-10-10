@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Found by:** S0 code review (hash-pin, mutation demonstration, norm bounds, Qwen3 prefix record).
 
