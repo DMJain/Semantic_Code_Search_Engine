@@ -128,7 +128,20 @@ All ten tasks done; CI runs the migration integration test; D-003 outcome filled
 `make reset-db && make doctor && go run ./cmd/indexer doctor --probe-all` all green; stop Ollama and `make doctor` fails with the fix message.
 
 ## Results
-Status 2026-10-10: in progress. Only verified facts below; no task is closed.
+Status 2026-10-10: signed off (local). All ten tasks T01-T10 are done and every local verification command is green. CI-green-on-a-pushed-branch proof is DEFERRED because the owner chose not to push (D-061); see the sign-off note.
+
+### S0-T10 sign-off run (2026-10-10, local)
+Executed in order; every command exited 0:
+1. `make reset-db` exit 0. Emptiness guard printed `chunks=0 edges=0 embeddings=0 files=0 llm_cache=0 summaries=0 symbols=0 traces=0`, wiped the pg volume, restarted Postgres healthy, and applied both migrations: `applied migration version=1 file=00001_init.sql`, `applied migration version=2 file=00002_search_tsv_regular.sql`.
+2. `go vet ./...` exit 0 (no findings).
+3. `make lint` exit 0, `0 issues.`
+4. `make test` exit 0, uncached and strict (`TEST_DATABASE_URL` loaded from `.env`): 45 `--- PASS`, 0 `--- FAIL`, 0 `--- SKIP`, 0 `(cached)`. Store package: `TestMigrateCreatesTables`, `TestSearchTSVIsPlainColumn`, `TestMigrateUpDownUpInThrowawayDatabase` all PASS.
+5. `make doctor` exit 0, 8/8 PASS (State A transcript below).
+6. `go run ./cmd/indexer doctor --probe-all` exit 0 (probe table below).
+Post-reset schema (fresh volume): `goose_db_version` version_id 0,1,2 all applied; 9 tables (chunks, edges, embeddings, files, goose_db_version, llm_cache, summaries, symbols, traces); extensions `vector 0.8.7` and `pg_trgm 1.6`; `chunks.search_tsv` is `tsvector NOT NULL DEFAULT ''::tsvector`, `is_generated = NEVER`.
+Doctor State A transcript of record: the 8/8 block below (T08). `--probe-all` probe table (T07): `nomic-embed-text dim 768 norm 1.0000 PASS`; `qwen3-embedding:0.6b dim 1024 norm 1.0000 PASS`.
+References: D-003 outcome (verified prefixes/dims, decisions.md) confirmed present; D-060 (Ollama model IDs) confirmed present; D-061 (S0 process, push/draft-PR) confirmed present.
+Sign-off note (deferral): the exit criterion "CI runs the migration integration test on a pushed branch / green CI on the final commit" is NOT satisfied locally-verifiable and is deferred. The owner explicitly chose not to push this branch, so no CI run URL and no draft-PR URL exist. Everything verifiable locally is green (commands 1-6 above, including the Postgres integration test running PASS not SKIP). The CI wiring itself (S0-T04) is in place in `.github/workflows/ci.yml` and the store integration test passes locally, so the deferred step is only the push/CI observation.
 
 - S0-T06 (done): Ollama client 0.40.1 installed; `ollama list` shows all three: `qwen3-embedding:0.6b` (639 MB), `nomic-embed-text:latest` (274 MB) and `qwen2.5-coder:7b` (4.7 GB), so T06 acceptance (all three) is met. nomic-embed-text is now pulled (it was missing at spec time).
 - S0-T07 probe table (`go run ./cmd/indexer doctor --probe-all`, exit 0):
@@ -137,8 +150,8 @@ Status 2026-10-10: in progress. Only verified facts below; no task is closed.
 - S0-T07 model IDs/sizes (D-060, from `/api/tags`, Ollama 0.40.1): `qwen3-embedding:0.6b` digest `ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d` 639,150,858 B (dim 1024, configured `OLLAMA_EMBED_MODEL`); `nomic-embed-text:latest` digest `0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f` 274,302,450 B (dim 768); `qwen2.5-coder:7b` digest `dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364` 4,683,087,561 B (summary model).
 - State A doctor transcript (Postgres up via `make up`, Ollama up, two models pulled), exit 0:
   PASS config; PASS postgres (PostgreSQL 17.11); PASS vector 0.8.7; PASS pg_trgm 1.6; PASS ollama reachable; PASS model qwen2.5-coder:7b; PASS model qwen3-embedding:0.6b; PASS embedding probe (dim 1024, query norm 1.0000, doc norm 1.0000).
-- Migrations: `goose_db_version` has versions 0 and 1 applied; tables: chunks, edges, embeddings, files, goose_db_version, llm_cache, summaries, symbols, traces. No 00002 (T03 not done).
-- `make lint`: 0 issues. `make test`: pass, but cached (T01 not done).
+- Migrations (pre-sign-off): `goose_db_version` had versions 0 and 1 applied; tables: chunks, edges, embeddings, files, goose_db_version, llm_cache, summaries, symbols, traces. After the T10 `make reset-db`, version 2 (00002) is applied too, so all three versions are present (T03 done).
+- `make lint`: 0 issues. `make test` is now uncached and strict (T01 done; see the T10 sign-off run above).
 - S0-T08 install method detected: Ollama 0.40.1 is installed via Homebrew under `/opt/homebrew` but runs as a **manually started `ollama serve`** (pid seen in `pgrep -lf ollama`), NOT a `brew services` unit (`brew services list | grep ollama` shows `none`).
 - S0-T08 State A doctor transcript (`make doctor`, Postgres up, Ollama up, all models pulled), exit 0, 8/8 PASS:
   ```
@@ -168,4 +181,4 @@ Status 2026-10-10: in progress. Only verified facts below; no task is closed.
   Closed-port-simulation note: the running `ollama serve` was NOT killed (owner-approved guard). The "Ollama stopped" state is represented by pointing `OLLAMA_URL` at a port with nothing listening (`http://127.0.0.1:1`). The fix message wording in `cmd/indexer/doctor.go` was adjusted minimally so it contains the exact substring `start Ollama: ollama serve` (install guidance and the `OLLAMA_URL` echo kept); the checklist text was unmet before this change.
 - S0-T08 unit test: `TestDoctorOllamaUnreachableFixMessage` (cmd/indexer/doctor_test.go) starts an `httptest.Server`, captures its URL, closes it, then drives the doctor CLI against it; asserts non-zero exit, the failing check `FAIL  ollama reachable`, and the fix message substring `start Ollama: ollama serve`. `go test -count=1 -run TestDoctorOllamaUnreachableFixMessage -v ./cmd/indexer/` -> `--- PASS: TestDoctorOllamaUnreachableFixMessage`.
 - S0-T08 end state: Ollama still running (`curl -s localhost:11434/api/tags` answers, `pgrep -lf ollama` shows `ollama serve`), `make doctor` 8/8 exit 0. `go vet ./...`, `make lint` (0 issues), `make test` all clean.
-- Not done: T01-T05, T09, T10; CI run URL (T10).
+- T01-T10 all done as of the 2026-10-10 sign-off run above; `go vet`, `make lint`, `make test` all clean. Deferred (owner chose not to push): CI run URL and draft-PR URL (see sign-off note).
