@@ -60,6 +60,10 @@ func (o *Ollama) Dim() int { return o.spec.dim }
 // Model implements Embedder.
 func (o *Ollama) Model() string { return o.model }
 
+// NumCtx is the context size sent with every embed request. The pre-send
+// guard of D-015 compares request size with 0.8 x NumCtx.
+func (o *Ollama) NumCtx() int { return o.spec.numCtx }
+
 // EmbedQueries implements Embedder.
 func (o *Ollama) EmbedQueries(ctx context.Context, queries []string) ([][]float32, error) {
 	inputs := make([]string, len(queries))
@@ -158,6 +162,14 @@ func (o *Ollama) ProbeNorms(ctx context.Context, query string, docs []Document) 
 // returns the server's error, or nil if it accepted the input. It measures
 // whether over-length input is rejected, which D-015's guard depends on.
 func (o *Ollama) ProbeOversizedInput(ctx context.Context, input string) error {
+	return o.ProbeInput(ctx, input)
+}
+
+// ProbeInput sends one input with truncate:false and the model's NumCtx and
+// returns the server's error, or nil if it accepted the input. The doctor uses
+// it to check that an input within 0.8 x NumCtx is accepted and one well over
+// NumCtx is rejected.
+func (o *Ollama) ProbeInput(ctx context.Context, input string) error {
 	truncate := false
 	_, err := o.embed(ctx, []string{input}, &truncate)
 	return err
@@ -194,7 +206,11 @@ func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([]
 	ctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
 
-	reqBody := map[string]any{"model": o.model, "input": inputs}
+	reqBody := map[string]any{
+		"model":   o.model,
+		"input":   inputs,
+		"options": map[string]any{"num_ctx": o.spec.numCtx},
+	}
 	if truncate != nil {
 		reqBody["truncate"] = *truncate
 	}

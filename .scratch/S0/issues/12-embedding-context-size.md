@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Found by:** S0 code review (nomic context-size caveat); the embed client never sent a context size although D-015 requires it.
 

@@ -190,3 +190,15 @@ Sign-off note (deferral): the exit criterion "CI runs the migration integration 
   - nomic query, `search_query: ` -> `search_query:` -> `TestRequestBodies`, `TestEmbedPrefixesAndNormalizes`, `TestRenderedTemplateHashesArePinned` fail
   - nomic document, `search_document: ` -> `search_documents: ` -> the same three fail
   Probe norm range now 0.99 to 1.01; `doctor --probe-all` still `nomic-embed-text dim 768 norm 1.0000 PASS`, `qwen3-embedding:0.6b dim 1024 norm 1.0000 PASS`, exit 0. Qwen3 format choice recorded as a D-003 outcome.
+- S0-12 (embedding context size): the embed client had never sent a context size (D-015 requires it). The registry now holds `num_ctx` per model (qwen3 4096, nomic 2048), sent as `options.num_ctx` on every embed request, and `Ollama.NumCtx()` is exposed for the S3 guard. Live evidence (2026-10-10), filler text, `truncate:false`: nomic accepts 1,909 tokens and rejects about 2,860 for `num_ctx` unset, 2048, 4096 and 8192 alike (`ollama show nomic-embed-text` reports context length 2048); qwen3 accepts 3,812 and rejects about 4,200 with `num_ctx` unset, accepts 4,574 with 8192, rejects 2,288 with 1024. `go run ./cmd/indexer doctor --ollama-checks`, exit 0:
+  ```
+  gen_count_1 36
+  gen_count_2 36
+  embed_oversized: error (nomic-embed-text)
+  embed_ctx_within: ok (nomic-embed-text, num_ctx 2048)
+  embed_ctx_over: error (nomic-embed-text, num_ctx 2048)
+  embed_oversized: error (qwen3-embedding:0.6b)
+  embed_ctx_within: ok (qwen3-embedding:0.6b, num_ctx 4096)
+  embed_ctx_over: error (qwen3-embedding:0.6b, num_ctx 4096)
+  ```
+  Tests: `TestNumCtxIsSentOnEveryEmbedRequest`, request-body tests with `options.num_ctx`, and `TestOllamaChecksFailsWhenRegistryContextSizeIsWrong` (fake Ollama that accepts more than the registry says makes the doctor exit non-zero). Consequence for S3 (nomic request ceiling 1,638 estimated tokens) recorded in D-003 and on the S3 entry checklist.

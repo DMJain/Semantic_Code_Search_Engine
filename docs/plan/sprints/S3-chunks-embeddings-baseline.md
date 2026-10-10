@@ -5,6 +5,7 @@ Chunk the filtered repo with context headers, populate `search_tsv` with identif
 
 ## Entry criteria
 S1 and S2 done (symbols, edges). Function-summary run is in progress or finished ([S1 overnight procedure](S1-corpus-symbols.md#overnight-run-procedure)). The existing prefix registry, L2 normalization and probe are NOT rebuilt here.
+Checklist before S3-T01: decide the chunk ceiling given the nomic embedding `num_ctx` of 2048 (D-003 outcome, S0-12): a request may be at most 0.8 x 2048 = 1,638 estimated tokens including header, title and prefix, so a 1,500-token chunk plus header does not fit; choose one limit for all models or one per model, and record it in D-003.
 
 ## Links
 [architecture.md#stage-chunk](../architecture.md#stage-chunk), [#stage-embed](../architecture.md#stage-embed), [#embedding-variants](../architecture.md#embedding-variants), [#vector-indexes](../architecture.md#vector-indexes), [#result-contract](../architecture.md#result-contract), [#ollama-requests](../architecture.md#ollama-requests), [#token-estimate](../architecture.md#token-estimate); [eval-protocol.md#ann-overlap](../eval-protocol.md#ann-overlap). Decisions: D-015, D-027, D-029, D-039.

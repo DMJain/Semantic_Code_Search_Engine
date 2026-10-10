@@ -283,24 +283,30 @@ func TestProbeAllSkippedConfiguredModelWithLatestTagFails(t *testing.T) {
 	}
 }
 
+// ctxLimitedEmbed behaves like Ollama with truncation off: it rejects an input
+// whose estimated size (bytes/4) exceeds the model's real context limit.
+func ctxLimitedEmbed(limits map[string]int) func(string, []string, *bool) ([][]float64, int, string) {
+	return func(model string, inputs []string, truncate *bool) ([][]float64, int, string) {
+		if truncate != nil && !*truncate && len(inputs[0])/4 > limits[model] {
+			return nil, http.StatusBadRequest, `{"error":"the input length exceeds the context length"}`
+		}
+		dim := 1024
+		if model == "nomic-embed-text" {
+			dim = 768
+		}
+		out := make([][]float64, len(inputs))
+		for i := range out {
+			out[i] = unitVec(dim, 1)
+		}
+		return out, 0, ""
+	}
+}
+
 func TestOllamaChecksPrintsCountsAndOversizedError(t *testing.T) {
 	f := &fakeOllama{
-		t:      t,
-		models: []string{"qwen3-embedding:0.6b", "nomic-embed-text:latest"},
-		embed: func(model string, inputs []string, truncate *bool) ([][]float64, int, string) {
-			if truncate != nil && !*truncate {
-				return nil, http.StatusBadRequest, `{"error":"input length exceeds context window"}`
-			}
-			dim := 1024
-			if model == "nomic-embed-text" {
-				dim = 768
-			}
-			out := make([][]float64, len(inputs))
-			for i := range out {
-				out[i] = unitVec(dim, 1)
-			}
-			return out, 0, ""
-		},
+		t:          t,
+		models:     []string{"qwen3-embedding:0.6b", "nomic-embed-text:latest"},
+		embed:      ctxLimitedEmbed(map[string]int{"qwen3-embedding:0.6b": 4096, "nomic-embed-text": 2048}),
 		chatCounts: []int{42, 35},
 	}
 	srv := f.start()
@@ -312,12 +318,44 @@ func TestOllamaChecksPrintsCountsAndOversizedError(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; output:\n%s", code, out)
 	}
-	for _, want := range []string{"gen_count_1 42", "gen_count_2 35", "embed_oversized: error"} {
+	for _, want := range []string{
+		"gen_count_1 42", "gen_count_2 35",
+		"embed_oversized: error (nomic-embed-text)", "embed_oversized: error (qwen3-embedding:0.6b)",
+		"embed_ctx_within: ok (nomic-embed-text, num_ctx 2048)", "embed_ctx_over: error (nomic-embed-text, num_ctx 2048)",
+		"embed_ctx_within: ok (qwen3-embedding:0.6b, num_ctx 4096)", "embed_ctx_over: error (qwen3-embedding:0.6b, num_ctx 4096)",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
 		}
 	}
 	if got := strings.Count(out, "embed_oversized: error"); got != 2 {
 		t.Errorf("embed_oversized error count = %d, want 2 (one per model):\n%s", got, out)
+	}
+}
+
+// If Ollama really allows more than the registry says (here nomic accepts
+// 4096 tokens while the registry says 2048 is enough to reject at 1.5x), or
+// less, the doctor fails and names the model.
+func TestOllamaChecksFailsWhenRegistryContextSizeIsWrong(t *testing.T) {
+	f := &fakeOllama{
+		t:      t,
+		models: []string{"nomic-embed-text:latest"},
+		// nomic accepts 8192 estimated tokens here, so the 1.5 x 2048 probe is accepted.
+		embed:      ctxLimitedEmbed(map[string]int{"nomic-embed-text": 8192}),
+		chatCounts: []int{1, 1},
+	}
+	srv := f.start()
+	t.Setenv("OLLAMA_URL", srv.URL)
+	t.Setenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+	t.Setenv("OLLAMA_SUMMARY_MODEL", "qwen2.5-coder:7b")
+
+	out, code := captureRun(t, "doctor", "--ollama-checks")
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero; output:\n%s", out)
+	}
+	for _, want := range []string{"embed_ctx_over: ok (nomic-embed-text, num_ctx 2048)", "FAIL  nomic-embed-text"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output:\n%s", want, out)
+		}
 	}
 }

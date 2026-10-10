@@ -33,9 +33,13 @@ type Document struct {
 // These templates MUST be checked against each model's card before
 // indexing: a wrong prefix silently degrades retrieval quality.
 type modelSpec struct {
-	dim   int
-	query *template.Template
-	doc   *template.Template
+	dim int
+	// numCtx is the context size sent as options.num_ctx on every embed
+	// request (D-015). Ollama clamps it to the model's own context length,
+	// so it must not exceed what the model supports (D-003 outcome, S0-12).
+	numCtx int
+	query  *template.Template
+	doc    *template.Template
 }
 
 // The document rule is the same for every model: a non-empty title (file
@@ -47,21 +51,24 @@ var registry = map[string]modelSpec{
 	// The canonical get_detailed_instruct is
 	//   f'Instruct: {task}\nQuery:{query}'  (no space after "Query:").
 	// Documents are unprefixed ("No need to add instruction for retrieval documents").
-	"qwen3-embedding:0.6b": newSpec(1024,
+	"qwen3-embedding:0.6b": newSpec(1024, 4096,
 		"Instruct: Given a search query, retrieve relevant code\nQuery:{{.Text}}",
 		"{{if .Title}}{{.Title}}\n{{end}}{{.Text}}"),
 	// Card: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
 	// Query and document prefixes are "search_query: " and "search_document: ".
-	"nomic-embed-text": newSpec(768,
+	// numCtx is 2048, not the card's 8192: Ollama serves the model with a
+	// 2048-token context and rejects longer input even when asked for more
+	// (measured in S0-12, recorded in D-003).
+	"nomic-embed-text": newSpec(768, 2048,
 		"search_query: {{.Text}}",
 		"search_document: {{if .Title}}{{.Title}}\n{{end}}{{.Text}}"),
 }
 
-func newSpec(dim int, query, doc string) modelSpec {
+func newSpec(dim, numCtx int, query, doc string) modelSpec {
 	parse := func(src string) *template.Template {
 		return template.Must(template.New("").Option("missingkey=error").Parse(src))
 	}
-	return modelSpec{dim: dim, query: parse(query), doc: parse(doc)}
+	return modelSpec{dim: dim, numCtx: numCtx, query: parse(query), doc: parse(doc)}
 }
 
 // KnownModels lists the models with a template registry entry.

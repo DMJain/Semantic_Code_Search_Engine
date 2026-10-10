@@ -281,6 +281,7 @@ func runOllamaChecks(ctx context.Context) error {
 	fmt.Printf("gen_count_1 %d\n", first.PromptTokens)
 	fmt.Printf("gen_count_2 %d\n", second.PromptTokens)
 
+	failures := 0
 	for _, name := range embed.KnownModels() {
 		e, err := embed.NewOllama(cfg.OllamaURL, name, 0)
 		if err != nil {
@@ -290,14 +291,48 @@ func runOllamaChecks(ctx context.Context) error {
 			fmt.Printf("embed_oversized: skip (%s not pulled)\n", name)
 			continue
 		}
-		checkCtx, cancel := context.WithTimeout(ctx, embed.DefaultOllamaTimeout)
-		err = e.ProbeOversizedInput(checkCtx, oversizedProbeInput)
-		cancel()
+		accepts := func(input string) bool {
+			checkCtx, cancel := context.WithTimeout(ctx, embed.DefaultOllamaTimeout)
+			defer cancel()
+			return e.ProbeInput(checkCtx, input) == nil
+		}
 		verdict := "ok"
-		if err != nil {
+		if !accepts(oversizedProbeInput) {
 			verdict = "error"
 		}
 		fmt.Printf("embed_oversized: %s (%s)\n", verdict, name)
+
+		// The registry num_ctx must be the size Ollama really enforces: an
+		// input within 0.8 x num_ctx (estimated, bytes/4) is accepted and one
+		// at 1.5 x num_ctx is rejected. A mismatch means the registry value is
+		// wrong (D-003).
+		numCtx := e.NumCtx()
+		within := accepts(ctxProbeInput(numCtx * 4 * 8 / 10))
+		over := accepts(ctxProbeInput(numCtx * 4 * 3 / 2))
+		fmt.Printf("embed_ctx_within: %s (%s, num_ctx %d)\n", okOrError(within), name, numCtx)
+		fmt.Printf("embed_ctx_over: %s (%s, num_ctx %d)\n", okOrError(over), name, numCtx)
+		if !within || over {
+			failures++
+			fmt.Printf("FAIL  %s: expected within=ok over=error at num_ctx %d; fix the registry value (D-003)\n", name, numCtx)
+		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("embedding context-size check failed for %d model(s)", failures)
 	}
 	return nil
+}
+
+func okOrError(accepted bool) string {
+	if accepted {
+		return "ok"
+	}
+	return "error"
+}
+
+// ctxProbeInput returns about n bytes of English-like filler, which Ollama
+// tokenizes at roughly 5 bytes per token (measured in S0-12), so an input of
+// 0.8 x num_ctx x 4 bytes is well inside the context and 1.5 x is well over.
+func ctxProbeInput(n int) string {
+	const unit = "kubelet evicts pods under memory pressure "
+	return strings.Repeat(unit, n/len(unit)+1)[:n]
 }

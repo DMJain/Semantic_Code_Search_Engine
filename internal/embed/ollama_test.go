@@ -103,9 +103,16 @@ func TestRequestBodies(t *testing.T) {
 	}
 }
 
+// wantNumCtx is the embedding context size each model must send (D-003, S0-12).
+var wantNumCtx = map[string]int{"qwen3-embedding:0.6b": 4096, "nomic-embed-text": 2048}
+
 // wantBody builds the exact request body Embedder should send for one input.
 func wantBody(model, input string) string {
-	b, err := json.Marshal(map[string]any{"model": model, "input": []string{input}})
+	b, err := json.Marshal(map[string]any{
+		"model":   model,
+		"input":   []string{input},
+		"options": map[string]any{"num_ctx": wantNumCtx[model]},
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -348,6 +355,53 @@ func TestRenderedTemplateHashesArePinned(t *testing.T) {
 			sum := sha256.Sum256([]byte(req.Input[0]))
 			if got := hex.EncodeToString(sum[:]); got != tt.wantSHA256 {
 				t.Errorf("sha256 of rendered %q = %s, want %s (template changed? record a decision)", req.Input[0], got, tt.wantSHA256)
+			}
+		})
+	}
+}
+
+// TestNumCtxIsSentOnEveryEmbedRequest drives queries, documents and both probe
+// kinds and checks each request body carries options.num_ctx for the model.
+func TestNumCtxIsSentOnEveryEmbedRequest(t *testing.T) {
+	for model, want := range wantNumCtx {
+		t.Run(model, func(t *testing.T) {
+			dim := 1024
+			if model == "nomic-embed-text" {
+				dim = 768
+			}
+			srv, bodies := captureOllama(t, dim)
+			e, err := NewOllama(srv.URL, model, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := e.NumCtx(); got != want {
+				t.Errorf("NumCtx() = %d, want %d", got, want)
+			}
+			ctx := context.Background()
+			if _, err := e.EmbedQueries(ctx, []string{"q"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.EmbedDocuments(ctx, []Document{{Text: "d"}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.Probe(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.ProbeInput(ctx, "x"); err != nil {
+				t.Fatal(err)
+			}
+			if len(*bodies) != 4 {
+				t.Fatalf("got %d requests, want 4", len(*bodies))
+			}
+			for i, b := range *bodies {
+				var req struct {
+					Options struct {
+						NumCtx int `json:"num_ctx"`
+					} `json:"options"`
+				}
+				if err := json.Unmarshal([]byte(b), &req); err != nil || req.Options.NumCtx != want {
+					t.Errorf("request %d options.num_ctx = %d (err %v), want %d: %s", i, req.Options.NumCtx, err, want, b)
+				}
 			}
 		})
 	}
