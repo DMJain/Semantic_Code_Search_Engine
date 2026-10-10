@@ -330,6 +330,91 @@ Deviations recorded: changed non-`.go` files are ignored (Go-only corpus), so a 
 
 Each function/method stores the call-expression function-operand text as written (trimmed, truncated to 80 runes, deduplicated in source order, capped at 40, nested `func_literal` calls included), written in the same transaction as the symbol. Builtins and predeclared-type conversions are dropped by one fixed list (`builtins`); a user-defined-type conversion `MyType(x)` is kept (syntactically indistinguishable without type info). On the real tree `schedulePod`'s raw_calls is non-empty (e.g. `utiltrace.New`, `sched.findNodesThatFitPod`, `framework.NewSortedScoredNodes`). Goldens cover method chains, builtins, closures and both dropped (`any`, `string`) and kept (`MyType`) conversions. A re-parse overwrites the stored list through the upsert. Raw calls are never written to `edges`.
 
+### S1-08 / T08 first half - walk + parse audit
+
+Clean full pass on the pinned tag `v1.37.0` (commit `f54c212e3a2f75d674b717a9b29052b20b60aefc`): `indexer walk` (idempotent), then `parsed_sha` cleared and `indexer parse --stats` re-run so every symbol and its `raw_calls` is rewritten from source (33421 symbols now carry a non-empty `raw_calls`).
+
+Commands (env from `.env`; SQL via `docker compose exec -T postgres psql -U codesearch -d codesearch`, no local `psql`):
+
+```
+$ CGO_ENABLED=1 go run ./cmd/indexer walk
+excluded vendor 4460, zz_generated 1221, pb_go 119, testdata 50, test_go 3195, client_go_generated 2021, build_constraint 176
+indexed 6633 files (slice 1131), LOC 1145424 (slice 234075)
+0 changed, 0 deleted
+$ psql -c "UPDATE files SET parsed_sha = NULL"      ->  UPDATE 6633
+$ CGO_ENABLED=1 go run ./cmd/indexer parse --stats   # 19.2s wall
+6633 files to parse
+parsed 6633 files, 55499 symbols, 15 parse errors
+symbols by kind: func 19796, method 24743, struct 9267, interface 1693
+```
+
+Counts:
+
+| metric | value |
+|---|---|
+| total files | 6633 |
+| in-slice files | 1131 |
+| LOC | 1,145,424 |
+| in-slice LOC | 234,075 |
+| symbols total | 55,499 |
+| func | 19,796 |
+| method | 24,743 |
+| struct | 9,267 |
+| interface | 1,693 |
+| in-slice func/method | 10,908 |
+| in-slice func/method with `end_line - start_line >= 3` | 8,225 |
+| parse errors | 15 |
+
+**Audit tool.** New `indexer audit` subcommand (`cmd/indexer/audit.go`, registered in `main.go`): selects in-slice `func`/`method` rows `ORDER BY qualified_name`, shuffles them with `math/rand.New(rand.NewSource(seed))` (seed 42, sample 30), re-reads `KUBE_DIR/<path>` lines `start_line..end_line`, and checks (1) the first line contains the symbol name, (2) the receiver type appears in the signature, (3) the stored `doc` equals the contiguous `//` lines immediately above `start_line`. Prints a table and exits non-zero on any mismatch. Unit tests (`cmd/indexer/audit_test.go`) cover the deterministic sampler (same seed -> same ids, different seed -> different order, clamping) and the pure helpers `checkSymbol`/`docAbove`.
+
+```
+$ CGO_ENABLED=1 go run ./cmd/indexer audit | tee /tmp/s1-08-audit.txt
+audit sample: 30 in-slice func/method symbols (seed 42)
+...+ 30 table rows, all "ok"...
+30/30 ok       # exit 0
+$ shasum -a 256 /tmp/s1-08-audit.txt
+474e03beded3b7e2effcf23e2c7ac224e6dc71548bfc1fc1bc481f41fe9bd3f2
+```
+
+A second run produced the identical sha256 (reproducible). 30-sample table (seed 42), all `ok`, **0 unexplained mismatches**:
+
+| qualified_name | result |
+|---|---|
+| k8s.io/client-go/discovery.(\*DiscoveryClient).ServerGroupsAndResourcesWithContext | ok |
+| k8s.io/client-go/util/workqueue.(\*waitForPriorityQueue[T]).Push | ok |
+| k8s.io/kubernetes/pkg/kubelet.(\*ReasonCache).add | ok |
+| k8s.io/kubernetes/pkg/controller/volume/attachdetach/cache.(\*actualStateOfWorld).AddVolumeNode | ok |
+| k8s.io/kubernetes/pkg/kubelet/status.isInitContainerInitialized | ok |
+| k8s.io/client-go/rest.(\*NoBackoff).CalculateBackoff | ok |
+| k8s.io/kubernetes/pkg/kubelet/kuberuntime.convertToRuntimeSELinuxOption | ok |
+| k8s.io/kubernetes/pkg/scheduler/backend/cache/debugger.(\*CacheDumper).dumpSchedulingQueue | ok |
+| k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity.(\*InterPodAffinity).isSchedulableAfterNodeChange | ok |
+| k8s.io/kubernetes/pkg/kubelet/cm/memorymanager.memoryBlocksToString | ok |
+| k8s.io/client-go/tools/record.WithContext | ok |
+| k8s.io/kubernetes/pkg/kubelet/allocation/state.(\*noopStateCheckpoint).RemovePod | ok |
+| k8s.io/client-go/discovery/fake.(\*FakeDiscovery).ServerGroups | ok |
+| k8s.io/kubernetes/pkg/controller/replication.(podControlAdapter).DeletePod | ok |
+| k8s.io/client-go/transport.NewCachedTokenSource | ok |
+| k8s.io/client-go/tools/cache.(\*sharedIndexInformer).handleBatchDeltas | ok |
+| k8s.io/client-go/testing.NewGetSubresourceActionWithOptions | ok |
+| k8s.io/client-go/transport.maskValue | ok |
+| k8s.io/kubernetes/pkg/scheduler/testing/framework.Node2PrioritizerExtender | ok |
+| k8s.io/kubernetes/pkg/controller/volume/attachdetach/cache.(\*actualStateOfWorld).DeleteVolumeNode | ok |
+| k8s.io/kubernetes/pkg/scheduler/framework.(\*CycleState).ShouldRecordPluginMetrics | ok |
+| k8s.io/client-go/tools/watch.(\*RetryWatcher).doReceive | ok |
+| k8s.io/kubernetes/pkg/kubelet/container/testing.(\*MockRuntime).APIVersion | ok |
+| k8s.io/kubernetes/pkg/scheduler/testing/framework.(PersistentVolumeLister).List | ok |
+| k8s.io/kubernetes/pkg/kubelet/volumemanager.(\*volumeManager).GetMountedVolumesForPod | ok |
+| k8s.io/kubernetes/pkg/controller/job.sortByFinishedTime | ok |
+| k8s.io/client-go/tools/watch.UntilWithoutRetry | ok |
+| k8s.io/client-go/tools/cache.(\*tombstone).GetName | ok |
+| k8s.io/client-go/util/cert.GetServingCertificates | ok |
+| k8s.io/kubernetes/pkg/kubelet/volumemanager/reconciler.(\*globalVolumeInfo).addPodVolume | ok |
+
+**No parse bug found** (0/30 mismatches); no walk/parse logic changed. Tag `v1.37.0`; audit output sha256 `474e03beded3b7e2effcf23e2c7ac224e6dc71548bfc1fc1bc481f41fe9bd3f2`.
+
+Acceptance: `go test -count=1 ./...` passes; `make test` 0 SKIP; `CGO_ENABLED=1 go vet ./...` clean; `make lint` 0 issues; `make ci-local` exits 0.
+
 ### S1-09 / T08 second half - walk vs go/packages file-set check
 
 `callgraph-gt --check` loads the four slice roots with `go/packages` (`NeedName|NeedFiles`, `Tests:false`), applies the shared `walk.Excluded` predicate, normalizes symlinks and compares with the walk's `in_slice` set.
