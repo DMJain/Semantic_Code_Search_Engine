@@ -452,3 +452,61 @@ summaries rows before = 28, after = 28   (unchanged; --bench inserts nothing)
 Files/package levels and embeddings remain out of scope (S5); no migration touched. Tests: `TestSampleFilesDeterministic` and `TestSampleFilesStrata` (seeded determinism and >= 3 strata on a fake candidate set) and `TestFileStratumBoundaries` reuse/extend the ticket-11 sampler tests; `TestBenchDoesNotInsertSummaries` runs the whole benchmark against a throwaway DB plus a fake Ollama server and asserts `summaries` stays empty.
 
 Acceptance: `eval/results/bench/summarize.json` has `fn_per_hour_c1`, `fn_per_hour_c2`, `file_per_hour`, `pkg_per_hour`, `skipped_fns`, `slice_fns_eligible` and `file_strata` (5 strata >= 3); summaries row count 28 before and 28 after; `go test -count=1 ./...` passes; `make test` 0 SKIP; `go vet ./...` and `make lint` clean.
+
+### S1-14 / T13 - Slice frozen
+
+The author approved this exact freeze: apply the D-005 drop order and drop `staging/src/k8s.io/client-go` (the concurrency-1 eligible-function projection exceeded the D-005 budget), then freeze. Decision entry **D-070** appended after D-069; **D-005 is unedited**. One-shot freeze; no CI hash pin (D-069).
+
+**Ordered drop list (D-005 order):** `["staging/src/k8s.io/client-go"]`.
+
+**Counts (frozen slice):**
+
+| metric | pre-drop | frozen |
+|---|---|---|
+| in-slice files | 1,131 | **876** |
+| in-slice packages | 423 | **329** |
+| in-slice LOC | 234,075 | **187,823** |
+| in-slice func/method | 10,908 | **8,534** |
+| in-slice func/method with `end_line - start_line >= 3` (eligible) | 8,225 | **6,673** |
+| files with an eligible fn | — | 629 |
+| packages with an eligible fn | — | 293 |
+
+Total corpus unchanged: 6,633 files, 55,499 symbols (func 19,796, method 24,743, struct 9,267, interface 1,693).
+
+**D-005 calculation.** Eligible-function budget = `min(25k, fn_per_hour_c1 × 20 h × 0.8) = min(25k, 459.14 × 20 × 0.8) = 7,346`. Candidate 8,225 > 7,346 -> first drop applied; frozen 6,673 <= 7,346. Combined run-length (T13 formula, `eval/results/bench/summarize.json`): function `6,673/459.14 = 14.5 h` + file `876/167.33 = 5.2 h` + package `329/226.35 = 1.5 h` = **21.2 h at concurrency 1** (17.4 h at c2); the S1 function-level overnight run is 14.5 h and fits the 16 h effective budget.
+
+**File-set check.** `go run ./cmd/callgraph-gt --check` -> `file-set: equal (876 files)`, **exit 0** (workspace `GOWORK=auto` load, 0 load errors; walk excluded vendor 4460, zz_generated 1221, pb_go 119, testdata 50, test_go 3195, client_go_generated 2021, build_constraint 176).
+
+**Yields recomputed on the frozen slice (0 HTTP calls, from `eval/candidates/cache/`).** `yield_12m = 115`, `yield_18m_extension = 35` (total **150 >= 30**); `by_prefix = {pkg/controller 35, pkg/kubelet 67, pkg/scheduler 49, staging/src/k8s.io/client-go 0}`; `windows_at_cap = 0`; `prs_scanned = 938`. A second immediate run produced identical numbers with the cache directory's file count (1,056) and mtimes unchanged -> **0 HTTP calls**.
+
+**Frozen hash.** sha256 of the sorted `in_slice` path list (repo-root-relative, `/` separators, one per line, LF-terminated, bytewise sort):
+
+```
+2738a003140d98239b54254051a0ddf0b46c9fd1b554ac6f4f6f43edc3c04ec5
+```
+
+Written to `internal/walk/slice.sha256` (exactly 64 lowercase hex + one newline, 65 bytes). Shell recomputation over the same list:
+
+```
+$ docker compose exec -T postgres psql -tA -U codesearch -d codesearch \
+    -c "select path from files where in_slice" | LC_ALL=C sort | shasum -a 256
+2738a003140d98239b54254051a0ddf0b46c9fd1b554ac6f4f6f43edc3c04ec5  -
+```
+
+-> **match** (`internal/walk/slice.sha256` == shell). 876 paths, 0 duplicates.
+
+**Deviation from the 15,000-25,000 in-slice func/method expectation.** Not met (8,534 total, 6,673 eligible), justified in D-070: at tag `v1.37.0` the four roots hold only ~8.5k non-generated `func`/`method` after the walk exclusions (vendor, `zz_generated`, `.pb.go`, `testdata`, `_test.go`, `client_go_generated`, build-constrained); reaching 15,000+ would require counting generated or test functions, which the slice's hand-written-code-search purpose forbids.
+
+**Commands run** (env via `set -a; . ./.env; set +a`):
+
+```
+CGO_ENABLED=1 go run ./cmd/indexer walk          # 255 changed; indexed 6633 (slice 876), LOC 187823
+go run ./cmd/callgraph-gt --check                # file-set: equal (876 files), exit 0
+go run ./cmd/eval mine-yield --window-months 18  # yield_12m=115 yield_18m_extension=35 windows_at_cap=0
+go run ./cmd/eval mine-yield --window-months 18  # rerun: 0 HTTP calls (cache unchanged)
+docker compose exec -T postgres psql ... | LC_ALL=C sort | shasum -a 256   # frozen hash (above)
+```
+
+**Measurements to record (sprint).** Final slice size 876 files / 329 packages / 187,823 LOC; projected combined summarization run length 21.2 h at concurrency 1 (17.4 h at c2), function level alone 14.5 h.
+
+**Acceptance.** D-070 holds every required field; D-005 unedited. `internal/walk/slice.sha256` equals the shell recomputation. `--check` exits 0. `yield_12m + yield_18m_extension = 150 >= 30`. Eligible count below 15,000 but deviation justified in D-070. `CGO_ENABLED=1 go test -count=1 ./...` passes; `CGO_ENABLED=1 make test` exits 0 with 0 `--- SKIP`; `CGO_ENABLED=1 go vet ./...` clean; `make lint` -> `0 issues.`. Fixture updates: `internal/walk/walk_test.go` `TestWalkGoldenFixture` now expects `InSlice = 1` (the fixture's client-go file stays indexed but is no longer in the slice); `slice_test.go` pins the frozen drop list and the client-go `InSlice` cases as false.

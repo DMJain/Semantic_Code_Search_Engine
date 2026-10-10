@@ -17,10 +17,10 @@ var SlicePrefixes = []string{
 	"staging/src/k8s.io/client-go",
 }
 
-// SliceDropPrefixes is the ordered list of slice subpath prefixes removed from
-// the slice, in the D-005 shrink order. Empty until the slice is sized at
-// S1-T13; T13 may add to it but the slice never grows.
-var SliceDropPrefixes = []string{}
+// SliceDropPrefixes is the FROZEN ordered list of slice subpath prefixes
+// removed from the slice, in the D-005 shrink order (S1-T13, D-070). The slice
+// never grows; a re-freeze needs an owner-authorized superseding decision.
+var SliceDropPrefixes = []string{"staging/src/k8s.io/client-go"}
 
 // InSlice reports whether a repo-root-relative path (slash separators) is
 // inside the slice: it starts with one of SlicePrefixes and none of

@@ -21,15 +21,16 @@ func TestSlicePrefixesOrdered(t *testing.T) {
 	}
 }
 
-// TestSliceDropPrefixesEmpty pins the drop list as empty until S1-T13.
-func TestSliceDropPrefixesEmpty(t *testing.T) {
-	if len(walk.SliceDropPrefixes) != 0 {
-		t.Errorf("SliceDropPrefixes = %v, want empty", walk.SliceDropPrefixes)
+// TestSliceDropPrefixesFrozen pins the frozen D-005 drop list (S1-T13, D-070).
+func TestSliceDropPrefixesFrozen(t *testing.T) {
+	want := []string{"staging/src/k8s.io/client-go"}
+	if !slices.Equal(walk.SliceDropPrefixes, want) {
+		t.Errorf("SliceDropPrefixes = %v, want %v", walk.SliceDropPrefixes, want)
 	}
 }
 
 // TestInSlice checks the membership helper on segment boundaries and the
-// empty drop list.
+// frozen drop list.
 func TestInSlice(t *testing.T) {
 	cases := []struct {
 		path string
@@ -39,7 +40,9 @@ func TestInSlice(t *testing.T) {
 		{"pkg/scheduler", true},
 		{"pkg/kubelet/kubelet.go", true},
 		{"pkg/controller/deployment/deployment.go", true},
-		{"staging/src/k8s.io/client-go/tools/cache/store.go", true},
+		{"staging/src/k8s.io/client-go/tools/cache/store.go", false},
+		{"staging/src/k8s.io/client-go", false},
+		{"staging/src/k8s.io/client-goX/x.go", false},
 		{"pkg/schedulerX/x.go", false},
 		{"pkg/api/types.go", false},
 		{"vendor/k8s.io/client-go/x.go", false},

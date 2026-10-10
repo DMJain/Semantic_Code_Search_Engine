@@ -47,8 +47,8 @@ func TestWalkGoldenFixture(t *testing.T) {
 	if stats.Indexed != 3 {
 		t.Errorf("Indexed = %d, want 3", stats.Indexed)
 	}
-	if stats.InSlice != 2 {
-		t.Errorf("InSlice = %d, want 2", stats.InSlice)
+	if stats.InSlice != 1 {
+		t.Errorf("InSlice = %d, want 1", stats.InSlice)
 	}
 
 	for _, f := range files {

@@ -202,6 +202,25 @@ Before the overnight run, a seeded sample of 200 (stratified across the four roo
 ## D-069 Work directly on main; agents never push (2026-10-10)
 Supersedes D-061 (branch per sprint, one commit per ticket, draft PR for CI proof, owner merges) and the push and draft-PR parts of D-063. The owner works on `main`: commits are local and made directly on `main`, one per ticket; there are no feature branches. Agents never run `git push`, never open a pull request and never upload anything to a remote, and they do not propose it as the way to get CI proof. CI is checked locally by `make ci-local` (and, for S0, by the simulation recorded in the S0 Results); the owner may push on their own, outside the plan. `AGENTS.md` carries the rule. Rejected: keeping the branch-and-draft-PR flow.
 
+## D-070 Slice frozen (refs D-005) (2026-10-10)
+The slice is FINAL, never changes. D-005 is not edited; this entry fills its PENDING size, calculation, yield-probe outcome and path-list sha256. A re-freeze needs an owner-authorized superseding entry. No CI hash pin (D-069: nothing is pushed).
+
+**Tag / commit.** `v1.37.0`, commit `f54c212e3a2f75d674b717a9b29052b20b60aefc` (D-006).
+
+**Ordered drop list (D-005 order).** `["staging/src/k8s.io/client-go"]`. The four slice roots (`pkg/scheduler`, `pkg/kubelet`, `pkg/controller`, `staging/src/k8s.io/client-go`) are unchanged; the drop list removes whole subpath prefixes and the slice never grows.
+
+**Final size and calculation.** In-slice = **876 files**, **329 packages**, **187,823 LOC**. The candidate slice before the drop was 1,131 files / 423 packages / 234,075 LOC. D-005's eligible-function budget at the measured concurrency-1 throughput is `min(25k, 459.14 fn/h × 20 h × 0.8) = 7,346` eligible functions. The candidate slice held **8,225** eligible functions (S1-08), over budget, so the D-005 first drop (client-go) was applied; the frozen slice holds **6,673**, under budget. Dropping client-go removed 255 files, 94 packages and 1,552 eligible functions. Combined run-length projection (T13 formula, benchmark `eval/results/bench/summarize.json`): function `6,673/459.14 = 14.5 h` + file `876/167.33 = 5.2 h` + package `329/226.35 = 1.5 h` = **21.2 h at concurrency 1** (**17.4 h** at concurrency 2, `fn_per_hour_c2 = 622.49`); the S1 overnight run is function-level only (14.5 h) and fits the 16 h effective budget, while the file/package levels are S5.
+
+**Eligible-function count.** In-slice `func`/`method` with `end_line - start_line >= 3`: **6,673** (in-slice `func`/`method` total 8,534).
+
+**Yields recomputed on the frozen slice (from the request cache, 0 HTTP calls).** `yield_12m = 115`, `yield_18m_extension = 35` (total **150 >= 30**); `by_prefix = {pkg/controller 35, pkg/kubelet 67, pkg/scheduler 49, staging/src/k8s.io/client-go 0}` (client-go's 18 and the 2 controller PRs that also touched a dropped file are no longer in the slice); `windows_at_cap = 0`; `prs_scanned = 938`. A second run made 0 HTTP calls (cache mtimes unchanged).
+
+**File-set check.** `go run ./cmd/callgraph-gt --check` exits **0** and prints `file-set: equal (876 files)` on the post-drop set.
+
+**Path-list sha256.** `2738a003140d98239b54254051a0ddf0b46c9fd1b554ac6f4f6f43edc3c04ec5` over the sorted `in_slice` path list (repo-root-relative, `/` separators, one per line, LF-terminated, bytewise sort = `LC_ALL=C sort`), written to `internal/walk/slice.sha256`; it equals the shell recomputation (`docker compose exec -T postgres psql -tA -U codesearch -d codesearch -c "select path from files where in_slice" | LC_ALL=C sort | shasum -a 256`).
+
+**Deviation from the ticket's 15,000-25,000 in-slice func/method expectation.** Not met (8,534, and 6,673 eligible), with the honest reason: this corpus at tag `v1.37.0` yields fewer hand-written non-generated `func`/`method` in the four roots than the ticket assumed. The walk excludes vendor, `zz_generated`, `.pb.go`, `testdata`, `_test.go`, `client_go_generated` and build-constrained files first, so the four roots contain only ~8.5k non-generated `func`/`method` total; the 15,000-25,000 figure is unreachable at this tag without counting generated or test functions, which the slice's purpose (hand-written code search) forbids. The eligible count (6,673) is what the summary budget and eval scope actually consume, and it is under the D-005 budget.
+
 ## Deleted decisions
 - D-013 (ANN recipe with iterative scan, exact re-sort and slice post-filter): superseded by D-029 (slice-only embeddings, no post-filter in SQL). The ANN overlap gate itself is kept in D-027.
 - D-016 (embedding variants with whole-repo header vectors): superseded by D-029.
