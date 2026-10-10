@@ -4,7 +4,7 @@ export
 
 GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: up down migrate doctor fetch-repo test lint build
+.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test lint build
 
 up: ## Start Postgres and wait until it is healthy
 	docker compose up -d --wait
@@ -13,6 +13,33 @@ down: ## Stop Postgres (data is kept in the named volume)
 	docker compose down
 
 migrate: ## Apply database migrations
+	go run ./cmd/indexer migrate
+
+migrate-up: migrate ## Apply database migrations (alias for `migrate`)
+
+migrate-down: ## Roll back exactly one migration
+	go run ./cmd/indexer migrate down
+
+# Fail-closed emptiness guard for reset-db. The SQL runs an EXACT count(*) per
+# user table via query_to_xml (not the approximate pg_stat_user_tables.n_live_tup),
+# and the wipe is refused unless psql exits 0 AND every non-version table is empty.
+# The query's exit status is checked explicitly, so a psql/auth/not-ready error
+# can never look like "empty".
+reset-db: ## Rebuild the DB from an empty volume; fails closed if the emptiness check cannot run
+	docker compose up -d --wait
+	@counts=$$(docker compose exec -T postgres psql -tA -v ON_ERROR_STOP=1 \
+		-U $${POSTGRES_USER:-codesearch} -d $${POSTGRES_DB:-codesearch} \
+		-c "SELECT relname || '=' || (xpath('/row/c/text()', query_to_xml('SELECT count(*) AS c FROM ' || quote_ident(relname), false, true, '')))[1]::text FROM pg_stat_user_tables WHERE relname <> 'goose_db_version' ORDER BY relname"); \
+	status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		echo "refusing to wipe: emptiness check failed (psql exit $$status)"; exit 1; \
+	fi; \
+	echo "row counts before wipe:"; echo "$$counts"; \
+	if echo "$$counts" | grep -qE '=[1-9][0-9]*$$'; then \
+		echo "refusing to wipe: a non-version table holds rows (see counts above)"; exit 1; \
+	fi
+	docker compose down -v
+	docker compose up -d --wait
 	go run ./cmd/indexer migrate
 
 doctor: ## Check Postgres, extensions, Ollama and models

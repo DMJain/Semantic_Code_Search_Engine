@@ -33,25 +33,50 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// Migrate applies every pending migration.
+// Migrate applies every pending migration (goose Up).
 func Migrate(ctx context.Context, databaseURL string) ([]*goose.MigrationResult, error) {
-	db, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-	defer db.Close()
-
-	migrations, err := fs.Sub(migrationsFS, "migrations")
+	provider, err := newProvider(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations)
-	if err != nil {
-		return nil, fmt.Errorf("create migration provider: %w", err)
-	}
+	defer provider.Close()
+
 	results, err := provider.Up(ctx)
 	if err != nil {
 		return results, fmt.Errorf("apply migrations: %w", err)
 	}
 	return results, nil
+}
+
+// MigrateDown rolls back exactly one migration (goose Down).
+func MigrateDown(ctx context.Context, databaseURL string) (*goose.MigrationResult, error) {
+	provider, err := newProvider(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	defer provider.Close()
+
+	result, err := provider.Down(ctx)
+	if err != nil {
+		return result, fmt.Errorf("roll back migration: %w", err)
+	}
+	return result, nil
+}
+
+func newProvider(databaseURL string) (*goose.Provider, error) {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	migrations, err := fs.Sub(migrationsFS, "migrations")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create migration provider: %w", err)
+	}
+	return provider, nil
 }
