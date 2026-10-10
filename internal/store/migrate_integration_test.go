@@ -2,10 +2,13 @@ package store_test
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
@@ -93,6 +96,83 @@ func TestSearchTSVIsPlainColumn(t *testing.T) {
 	}
 	if matched != 1 {
 		t.Errorf("chunks matching search_tsv @@ to_tsquery('simple','foo') = %d, want 1", matched)
+	}
+}
+
+// TestSymbolsRawCallsAndSummaryUniqueness proves migration 00003 adds
+// symbols.raw_calls, files.parsed_sha and summaries.reason, and that the
+// unique index rejects a second summary for the same
+// (level, target_id, prompt_version). It runs against a throwaway database and
+// rolls back, so no rows are left behind.
+func TestSymbolsRawCallsAndSummaryUniqueness(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var fileID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc, parsed_sha)
+		VALUES ('pkg/a.go', 'pkg', 'sha-unparsed', 10, 'sha-parsed') RETURNING id`).Scan(&fileID); err != nil {
+		t.Fatalf("insert file: %v", err)
+	}
+
+	rawCalls := []string{"sched.cache.AssumePod", "klog.V(2).InfoS"}
+	var symbolID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line, raw_calls)
+		VALUES ($1, 'func', 'Foo', 'pkg.Foo', 1, 5, $2) RETURNING id`, fileID, rawCalls).Scan(&symbolID); err != nil {
+		t.Fatalf("insert symbol: %v", err)
+	}
+
+	var gotParsed string
+	if err := tx.QueryRow(ctx, `SELECT parsed_sha FROM files WHERE id = $1`, fileID).Scan(&gotParsed); err != nil {
+		t.Fatalf("read parsed_sha: %v", err)
+	}
+	if gotParsed != "sha-parsed" {
+		t.Errorf("files.parsed_sha = %q, want %q", gotParsed, "sha-parsed")
+	}
+
+	var gotRaw []string
+	if err := tx.QueryRow(ctx, `SELECT raw_calls FROM symbols WHERE id = $1`, symbolID).Scan(&gotRaw); err != nil {
+		t.Fatalf("read raw_calls: %v", err)
+	}
+	if !slices.Equal(gotRaw, rawCalls) {
+		t.Errorf("symbols.raw_calls = %v, want %v", gotRaw, rawCalls)
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status, reason)
+		VALUES ('function', $1, NULL, 'qwen2.5-coder:7b', 'fn-v1', 'hash-1', 'failed', 'too_large')`,
+		symbolID); err != nil {
+		t.Fatalf("insert summary with reason: %v", err)
+	}
+
+	var gotReason string
+	if err := tx.QueryRow(ctx, `SELECT reason FROM summaries WHERE target_id = $1`, symbolID).Scan(&gotReason); err != nil {
+		t.Fatalf("read reason: %v", err)
+	}
+	if gotReason != "too_large" {
+		t.Errorf("summaries.reason = %q, want %q", gotReason, "too_large")
+	}
+
+	_, err = tx.Exec(ctx, `INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status)
+		VALUES ('function', $1, 'duplicate', 'qwen2.5-coder:7b', 'fn-v1', 'hash-2', 'done')`, symbolID)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("duplicate summary error = %v, want unique violation (23505)", err)
 	}
 }
 
