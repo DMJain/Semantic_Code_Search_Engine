@@ -277,7 +277,7 @@ func TestProbeHTTPError(t *testing.T) {
 	}
 }
 
-func TestProbeOversizedInputSendsTruncateFalse(t *testing.T) {
+func TestProbeInputSendsTruncateFalse(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -290,7 +290,7 @@ func TestProbeOversizedInputSendsTruncateFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = e.ProbeOversizedInput(context.Background(), "x")
+	err = e.ProbeInput(context.Background(), "x")
 	if err == nil || !strings.Contains(err.Error(), "input length exceeds context window") {
 		t.Fatalf("err = %v, want the server error", err)
 	}

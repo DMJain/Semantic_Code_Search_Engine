@@ -6,15 +6,15 @@ Run in order: `make reset-db` (ticket 02's emptiness guard first), `go vet ./...
 
 **Blocked by:** 07 (Doctor live pass/fail), 08 (CI Postgres and draft PR), 05 (Docs housekeeping)
 
-**Status:** ready-for-agent
+**Status:** done locally; the CI run URL is deferred by the owner (D-061)
 
 **Spec user stories:** 39, 40, 41
 
-- [ ] Every command above exits 0
-- [ ] Results is filled with all the evidence listed above
+- [x] Every command above exits 0
+- [x] Results is filled with all the evidence listed above
 - [ ] CI run URL recorded and green on the final commit
-- [ ] D-003 outcome, D-060 and D-061 exist in the decision log
-- [ ] Roadmap S0 status updated
+- [x] D-003 outcome, D-060 and D-061 exist in the decision log
+- [x] Roadmap S0 status updated
 - [ ] Report: command summaries, CI URL, PR URL
 
 Out of scope: new features.

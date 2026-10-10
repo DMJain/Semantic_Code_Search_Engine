@@ -32,19 +32,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      # One run of every test. Postgres tests must run, not skip: the job
-      # fails if REQUIRE_TEST_DB is unmet or any test reports --- SKIP.
+      # `make test` is the single definition of "run every test": one uncached
+      # run that fails if the database URL is missing or any test skips.
       - name: Test (no skips allowed)
-        shell: bash
-        env:
-          REQUIRE_TEST_DB: "1"
-        run: |
-          set -o pipefail
-          go test -v -count=1 ./... 2>&1 | tee test.log
-          if grep -q -- '--- SKIP' test.log; then
-            echo "ERROR: a test was skipped; tests must run, not skip"
-            exit 1
-          fi
+        run: make test
 
   lint:
     runs-on: ubuntu-latest

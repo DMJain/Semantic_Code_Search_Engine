@@ -4,15 +4,15 @@
 
 **Blocked by:** 02 (Migrations proven from a fresh volume)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 9, 10, 11
 
-- [ ] After a fresh reset (tables empty, ticket 02's guard applies), the chunks table description shows `search_tsv | tsvector | not null default ''::tsvector` with no `generated` clause
-- [ ] Down once then up once succeeds
-- [ ] An integration test inserts a symbol and a chunk with an explicit `search_tsv`, matches it with `@@ to_tsquery('simple','foo')`, and asserts the column's `is_generated` is `NEVER`
-- [ ] `make test` shows PASS, no SKIP
-- [ ] One commit `S0-T03: ...`; nothing pushed
-- [ ] Report: table description excerpt, test output, commit hash
+- [x] After a fresh reset (tables empty, ticket 02's guard applies), the chunks table description shows `search_tsv | tsvector | not null default ''::tsvector` with no `generated` clause
+- [x] Down once then up once succeeds
+- [x] An integration test inserts a symbol and a chunk with an explicit `search_tsv`, matches it with `@@ to_tsquery('simple','foo')`, and asserts the column's `is_generated` is `NEVER`
+- [x] `make test` shows PASS, no SKIP
+- [x] One commit `S0-T03: ...`; nothing pushed
+- [x] Report: table description excerpt, test output, commit hash
 
 Out of scope: populating the column.

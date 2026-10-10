@@ -78,8 +78,13 @@ func usage() {
 // parseFlags parses a subcommand's flags. None of the current subcommands
 // take flags yet, but this keeps -h working consistently.
 func parseFlags(name string, args []string) error {
-	fs := flag.NewFlagSet("indexer "+name, flag.ContinueOnError)
-	return fs.Parse(args)
+	return newFlagSet(name).Parse(args)
+}
+
+// newFlagSet returns the flag set every subcommand uses, so help text and
+// error handling stay the same everywhere.
+func newFlagSet(name string) *flag.FlagSet {
+	return flag.NewFlagSet("indexer "+name, flag.ContinueOnError)
 }
 
 func stub(name string) func(context.Context, []string) error {

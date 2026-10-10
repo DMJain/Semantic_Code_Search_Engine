@@ -6,16 +6,16 @@ Also do the process setup if not yet done: create branch `s0-setup-verification`
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 1, 2, 3, 4, 40, 42
 
-- [ ] `make test` run twice in a row prints no `(cached)` and no `--- SKIP`
-- [ ] Output shows `--- PASS: TestMigrateCreatesTables` with Postgres up
-- [ ] With the URL unset, `make test` fails with a clear message; a skipped test also fails the command
-- [ ] No connection string is hard-coded in the Makefile
-- [ ] `go vet ./...` and `make lint` report 0 issues
-- [ ] D-061 recorded; one commit `S0-T01: ...` on the branch; nothing pushed
-- [ ] Report: both `make test` outputs (trimmed) and the commit hash
+- [x] `make test` run twice in a row prints no `(cached)` and no `--- SKIP`
+- [x] Output shows `--- PASS: TestMigrateCreatesTables` with Postgres up
+- [x] With the URL unset, `make test` fails with a clear message; a skipped test also fails the command
+- [x] No connection string is hard-coded in the Makefile
+- [x] `go vet ./...` and `make lint` report 0 issues
+- [x] D-061 recorded; one commit `S0-T01: ...` on the branch; nothing pushed
+- [x] Report: both `make test` outputs (trimmed) and the commit hash
 
 Out of scope: race flag, new test targets, CI changes.

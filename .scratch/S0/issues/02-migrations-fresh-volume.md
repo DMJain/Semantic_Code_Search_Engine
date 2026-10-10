@@ -4,16 +4,16 @@
 
 **Blocked by:** 01 (Strict, uncached `make test`)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 5, 6, 7, 8, 44
 
-- [ ] Before any wipe: row counts for every table (including an exact count of `summaries`) were checked; if anything other than the migration-version table is non-empty, work stopped and was reported
-- [ ] `make reset-db` exits 0
-- [ ] `make migrate-down migrate-up` exits 0 and the table list is identical before and after
-- [ ] `psql "$DATABASE_URL" -c '\dt'` lists files, symbols, chunks, edges, summaries, embeddings, llm_cache, traces and the migration-version table; `\dx` shows `vector` and `pg_trgm`
-- [ ] The integration test covers Up/Down/Up in a throwaway database and shows PASS (no SKIP) in `make test`
-- [ ] One commit `S0-T02: ...`; nothing pushed
-- [ ] Report: guard output, `\dt` and `\dx` output, commit hash
+- [x] Before any wipe: row counts for every table (including an exact count of `summaries`) were checked; if anything other than the migration-version table is non-empty, work stopped and was reported
+- [x] `make reset-db` exits 0
+- [x] `make migrate-down migrate-up` exits 0 and the table list is identical before and after
+- [x] `psql "$DATABASE_URL" -c '\dt'` lists files, symbols, chunks, edges, summaries, embeddings, llm_cache, traces and the migration-version table; `\dx` shows `vector` and `pg_trgm`
+- [x] The integration test covers Up/Down/Up in a throwaway database and shows PASS (no SKIP) in `make test`
+- [x] One commit `S0-T02: ...`; nothing pushed
+- [x] Report: guard output, `\dt` and `\dx` output, commit hash
 
 Out of scope: new schema (ticket 03).

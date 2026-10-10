@@ -10,15 +10,15 @@ Procedure:
 
 **Blocked by:** 06 (Live probe, `--probe-all` and `--ollama-checks`)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 33, 34, 35, 44
 
-- [ ] State A exits 0 with every check PASS: config, postgres, vector, pg_trgm, ollama reachable, summary model, embed model, embedding probe (8/8)
-- [ ] State B exits non-zero, names the failing check, prints `start Ollama: ollama serve`, and still reports the Postgres checks
-- [ ] A test with a closed fake server asserts the Ollama-unreachable path and its fix message
-- [ ] Ollama is restored and confirmed running at the end
-- [ ] One commit `S0-T08: ...` (even if only Results changed); nothing pushed
-- [ ] Report: both transcripts, install method detected, restart confirmation, commit hash
+- [x] State A exits 0 with every check PASS: config, postgres, vector, pg_trgm, ollama reachable, summary model, embed model, embedding probe (8/8)
+- [x] State B exits non-zero, names the failing check, prints `start Ollama: ollama serve`, and still reports the Postgres checks
+- [x] A test with a closed fake server asserts the Ollama-unreachable path and its fix message
+- [x] Ollama is restored and confirmed running at the end
+- [x] One commit `S0-T08: ...` (even if only Results changed); nothing pushed
+- [x] Report: both transcripts, install method detected, restart confirmation, commit hash
 
 Out of scope: new doctor checks.

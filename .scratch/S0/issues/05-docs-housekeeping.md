@@ -6,16 +6,16 @@ The instruction file's "Domain docs" line becomes: ``Domain docs: glossary `docs
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 36, 37, 38
 
-- [ ] `grep -rn "@" AGENTS.md | grep -v "@latest"` shows no import lines (include `CLAUDE.md` only if it exists)
-- [ ] `grep -rn "CONTEXT.md\|docs/adr" docs/agents/` and `grep -n "CONTEXT.md\|docs/adr" AGENTS.md` return nothing
-- [ ] `test ! -e docs/architecture.md && test ! -e eval/queries.jsonl`
-- [ ] `grep -rn "docs/architecture.md\|queries.jsonl" --include=*.md --include=*.go --include=Makefile --exclude-dir=plan --exclude-dir=.scratch --exclude-dir=.git .` returns nothing
-- [ ] `go build ./...` passes; D-017 outcome recorded
-- [ ] One commit `S0-T09: ...`; nothing pushed
-- [ ] Report: grep outputs, diff stat, commit hash
+- [x] `grep -rn "@" AGENTS.md | grep -v "@latest"` shows no import lines (include `CLAUDE.md` only if it exists)
+- [x] `grep -rn "CONTEXT.md\|docs/adr" docs/agents/` and `grep -n "CONTEXT.md\|docs/adr" AGENTS.md` return nothing
+- [x] `test ! -e docs/architecture.md && test ! -e eval/queries.jsonl`
+- [x] `grep -rn "docs/architecture.md\|queries.jsonl" --include=*.md --include=*.go --include=Makefile --exclude-dir=plan --exclude-dir=.scratch --exclude-dir=.git .` returns nothing
+- [x] `go build ./...` passes; D-017 outcome recorded
+- [x] One commit `S0-T09: ...`; nothing pushed
+- [x] Report: grep outputs, diff stat, commit hash
 
 Out of scope: the final README, any other docs rewrite.

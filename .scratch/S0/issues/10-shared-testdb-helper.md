@@ -6,6 +6,8 @@
 
 **Status:** done
 
+**Numbering:** this is issue 10 of the scratch folder; the sprint file's task S0-T10 (the sign-off run) is issue 09.
+
 **Found by:** S0 code review; needed by S1 (see `.scratch/S1/spec.md`, user stories on DB isolation).
 
 - [x] `make test`: 0 SKIP, `--- PASS` for the three store tests, dev table counts identical before and after

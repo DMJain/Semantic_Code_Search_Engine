@@ -9,7 +9,7 @@ Behaviour:
 
 **Blocked by:** 03 (Plain `search_tsv` column)
 
-**Status:** ready-for-agent
+**Status:** done, except the CI observation (deferred by the owner, D-061); the unchecked boxes below are exactly that
 
 **Spec user stories:** 12, 13, 14, 40, 41, 44
 
@@ -17,7 +17,7 @@ Behaviour:
 - [ ] `gh run view <id> --log` shows `--- PASS: TestMigrateCreatesTables` and no `--- SKIP` in the store test step; the matching log lines are pasted
 - [ ] The `on:` block and `gh auth status` were shown and approved before the push
 - [ ] A draft PR targeting `main` exists; `main` was never pushed to
-- [ ] One commit `S0-T04: ...` (plus labelled fix commits if needed)
+- [x] One commit `S0-T04: ...` (plus labelled fix commits if needed)
 - [ ] Report: run URL and id, PASS log lines, PR URL
 
 Out of scope: Ollama in CI.

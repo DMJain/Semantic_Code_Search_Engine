@@ -158,17 +158,11 @@ func (o *Ollama) ProbeNorms(ctx context.Context, query string, docs []Document) 
 	return norms, nil
 }
 
-// ProbeOversizedInput sends one input to /api/embed with truncate:false and
-// returns the server's error, or nil if it accepted the input. It measures
-// whether over-length input is rejected, which D-015's guard depends on.
-func (o *Ollama) ProbeOversizedInput(ctx context.Context, input string) error {
-	return o.ProbeInput(ctx, input)
-}
-
 // ProbeInput sends one input with truncate:false and the model's NumCtx and
-// returns the server's error, or nil if it accepted the input. The doctor uses
-// it to check that an input within 0.8 x NumCtx is accepted and one well over
-// NumCtx is rejected.
+// returns the server's error, or nil if it accepted the input. It measures
+// whether over-length input is rejected, which D-015's guard depends on: the
+// doctor checks that an input within 0.8 x NumCtx is accepted and one well
+// over NumCtx is rejected.
 func (o *Ollama) ProbeInput(ctx context.Context, input string) error {
 	truncate := false
 	_, err := o.embed(ctx, []string{input}, &truncate)

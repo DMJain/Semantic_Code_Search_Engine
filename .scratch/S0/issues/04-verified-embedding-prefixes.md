@@ -13,17 +13,17 @@ Decision log, append-only: add under D-003 an `Outcome (S0-T05, date, evidence)`
 
 **Blocked by:** 01 (Strict, uncached `make test`)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 15, 16, 17, 18, 19, 20, 21, 22, 23
 
-- [ ] A test asserts the known-model list is exactly `nomic-embed-text` and `qwen3-embedding:0.6b`
-- [ ] Table-driven tests drive the public embedding interface against a fake Ollama and assert the exact request-body bytes (whitespace and newlines included) for a query and a document, with and without a title, per model
-- [ ] A one-character mutation of any template makes a test fail (demonstrated once with a temporary mutation, then reverted)
-- [ ] `! grep -rniI 'g[e]mma' . --exclude-dir=.git --exclude-dir=plan --exclude-dir=.scratch` exits 0
-- [ ] With Ollama up, `make doctor` exits 0 and the probe prints query and doc norms of exactly `1.0000`
-- [ ] D-003 outcome line (and any superseding decision) recorded with URL, date, quoted strings, dim, MRL, context, embedding context size, hashes
-- [ ] `make test`, `go vet ./...`, `make lint` clean; one commit `S0-T05: ...`; nothing pushed
-- [ ] Report: evidence table per model, hashes, any supersession, probe output, commit hash
+- [x] A test asserts the known-model list is exactly `nomic-embed-text` and `qwen3-embedding:0.6b`
+- [x] Table-driven tests drive the public embedding interface against a fake Ollama and assert the exact request-body bytes (whitespace and newlines included) for a query and a document, with and without a title, per model
+- [x] A one-character mutation of any template makes a test fail (demonstrated once with a temporary mutation, then reverted)
+- [x] `! grep -rniI 'g[e]mma' . --exclude-dir=.git --exclude-dir=plan --exclude-dir=.scratch` exits 0
+- [x] With Ollama up, `make doctor` exits 0 and the probe prints query and doc norms of exactly `1.0000`
+- [x] D-003 outcome line (and any superseding decision) recorded with URL, date, quoted strings, dim, MRL, context, embedding context size, hashes
+- [x] `make test`, `go vet ./...`, `make lint` clean; one commit `S0-T05: ...`; nothing pushed
+- [x] Report: evidence table per model, hashes, any supersession, probe output, commit hash
 
 Out of scope: the live probe-all (ticket 06).

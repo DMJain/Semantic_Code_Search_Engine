@@ -12,16 +12,16 @@ Record: Ollama model IDs and sizes for the three models, the probe table and the
 
 **Blocked by:** 04 (Verified embedding prefixes), and the human model pull (no ticket)
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Spec user stories:** 24, 25, 26, 27, 28, 29, 30, 31, 32
 
-- [ ] With Ollama up and both embedding models pulled, `go run ./cmd/indexer doctor --probe-all` exits 0 and prints PASS twice
-- [ ] After `ollama rm nomic-embed-text` it prints SKIP and still exits 0 (the configured model is the Qwen3 one); the model is then re-pulled to restore the state (say so in the report) and probe-all prints PASS twice again
-- [ ] `doctor --ollama-checks` exits 0 and prints `gen_count_1`, `gen_count_2` and `embed_oversized: error` per model
-- [ ] Tests against a fake Ollama cover: wrong-dimension vector (FAIL, both numbers), NaN vector (FAIL), good vector (PASS), oversized input error, two counts printed; the live run is guarded by `OLLAMA_URL`
-- [ ] Model IDs, probe table and check values are in Results; D-060 is recorded
-- [ ] `make test`, `go vet ./...`, `make lint` clean; one commit `S0-T07: ...`; nothing pushed
-- [ ] Report: probe table, ollama-checks output, model IDs, commit hash
+- [x] With Ollama up and both embedding models pulled, `go run ./cmd/indexer doctor --probe-all` exits 0 and prints PASS twice
+- [x] After `ollama rm nomic-embed-text` it prints SKIP and still exits 0 (the configured model is the Qwen3 one); the model is then re-pulled to restore the state (say so in the report) and probe-all prints PASS twice again
+- [x] `doctor --ollama-checks` exits 0 and prints `gen_count_1`, `gen_count_2` and `embed_oversized: error` per model
+- [x] Tests against a fake Ollama cover: wrong-dimension vector (FAIL, both numbers), NaN vector (FAIL), good vector (PASS), oversized input error, two counts printed; the live run is guarded by `OLLAMA_URL`
+- [x] Model IDs, probe table and check values are in Results; D-060 is recorded
+- [x] `make test`, `go vet ./...`, `make lint` clean; one commit `S0-T07: ...`; nothing pushed
+- [x] Report: probe table, ollama-checks output, model IDs, commit hash
 
 Out of scope: embedding quality comparison (S8).
