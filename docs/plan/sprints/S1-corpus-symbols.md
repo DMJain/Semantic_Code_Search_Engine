@@ -510,3 +510,19 @@ docker compose exec -T postgres psql ... | LC_ALL=C sort | shasum -a 256   # fro
 **Measurements to record (sprint).** Final slice size 876 files / 329 packages / 187,823 LOC; projected combined summarization run length 21.2 h at concurrency 1 (17.4 h at c2), function level alone 14.5 h.
 
 **Acceptance.** D-070 holds every required field; D-005 unedited. `internal/walk/slice.sha256` equals the shell recomputation. `--check` exits 0. `yield_12m + yield_18m_extension = 150 >= 30`. Eligible count below 15,000 but deviation justified in D-070. `CGO_ENABLED=1 go test -count=1 ./...` passes; `CGO_ENABLED=1 make test` exits 0 with 0 `--- SKIP`; `CGO_ENABLED=1 go vet ./...` clean; `make lint` -> `0 issues.`. Fixture updates: `internal/walk/walk_test.go` `TestWalkGoldenFixture` now expects `InSlice = 1` (the fixture's client-go file stays indexed but is no longer in the slice); `slice_test.go` pins the frozen drop list and the client-go `InSlice` cases as false.
+
+### S1-15 / T14 first half - run tooling and `verify-slice`
+
+`make summarize-run` = `go build -o bin/indexer ./cmd/indexer` + `caffeinate -i bin/indexer summarize --level function --concurrency 1`; `make summarize-pause` = `pkill -INT -f "bin/indexer summarize"` (finishes the in-flight item); `make summarize-status` = `indexer summarize --status`; `make verify-slice` = `indexer walk --verify-slice`.
+
+`walk --verify-slice` recomputes the sha256 of the sorted in-slice path list from the corpus and the CURRENT slice definition (`walk.Walk` + `InSlice`), then compares it with the embedded `internal/walk/slice.sha256` (D-070) — recomputing from the slice definition, not the database, is what makes a drop-list edit fail the check:
+
+```
+$ make verify-slice            -> in-slice paths 876; expected == computed 2738a003...; match; exit 0
+$ (temp: add pkg/scheduler to the drop list)
+$ make verify-slice            -> computed 4695e383...; slice hash drift; exit non-zero
+$ (reverted)
+$ make verify-slice            -> match; exit 0
+```
+
+`summarize --status` counts only the current prompt version (`fn-v1`): a `file`-level row and an `fn-v0` row are not counted (test). ETA is sampled over a wall-clock window (`--eta-window`, default 30s) because the frozen `summaries` table has no completion timestamp; it returns immediately when nothing is pending (`pending 0 done 28 failed 0`, `eta 0s`). Pause/resume is verified by counts on a small fake-Ollama run: cancel at request 6, exactly 6 `done`, no partial rows (no `done` with NULL text, no `failed` with text), resume completes, 0 duplicates. The keep-awake assertion is observable via `pmset -g assertions | grep -i caffeinate` while `caffeinate -i` runs; the owner starts the full run. `make test` 0 SKIP; `make lint` 0 issues.

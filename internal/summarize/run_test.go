@@ -213,10 +213,12 @@ func TestRunInterruptResume(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Cancel the run during the fourth request; the in-flight item still
-	// finishes because the write/request context is not the cancelled one.
+	// S1-15 pause/resume by counts: cancel once at least five items are done
+	// (request 6), mid-run. The in-flight item still finishes because the
+	// write/request context is not the cancelled one.
+	const pauseAt = 6
 	fake := newFakeOllama(t, func(n int64) {
-		if n == 4 {
+		if n == pauseAt {
 			cancel()
 		}
 	})
@@ -226,13 +228,23 @@ func TestRunInterruptResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("interrupted run: %v", err)
 	}
-	if st.Done != 4 {
-		t.Fatalf("interrupted run done = %d, want 4", st.Done)
+	if st.Done != pauseAt {
+		t.Fatalf("interrupted run done = %d, want exactly %d (cancel at request %d, concurrency 1)", st.Done, pauseAt, pauseAt)
 	}
-	for status := range statusCounts(t, pool) {
-		if status != "done" && status != "failed" && status != "pending" {
-			t.Fatalf("unexpected status %q after interrupt", status)
-		}
+	// No partial row survives an interrupt: a done row carries text, a failed
+	// row carries a reason and no text, a pending row carries no text.
+	var partial int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM summaries
+		WHERE (status = 'done' AND text IS NULL)
+		   OR (status = 'failed' AND (reason IS NULL OR text IS NOT NULL))
+		   OR (status = 'pending' AND text IS NOT NULL)`).Scan(&partial); err != nil {
+		t.Fatal(err)
+	}
+	if partial != 0 {
+		t.Fatalf("partial rows after interrupt = %d, want 0", partial)
+	}
+	if n := duplicateSummaries(t, pool); n != 0 {
+		t.Fatalf("duplicate rows after interrupt = %d, want 0", n)
 	}
 
 	st2, err := r.Run(context.Background(), RunOptions{})

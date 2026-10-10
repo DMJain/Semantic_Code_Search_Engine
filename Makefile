@@ -7,7 +7,7 @@ GOLANGCI_LINT_VERSION := v2.14.0
 ACTIONLINT_VERSION := v1.7.12
 WORKFLOW ?= .github/workflows/ci.yml
 
-.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean lint lint-ci ci-local build
+.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean lint lint-ci ci-local build summarize-run summarize-pause summarize-status verify-slice
 
 up: ## Start Postgres and wait until it is healthy
 	docker compose up -d --wait
@@ -89,3 +89,20 @@ ci-local: ## Mirror ci.yml locally against the compose Postgres (no skips allowe
 
 build: ## Build all binaries into bin/
 	CGO_ENABLED=1 go build -o bin/ ./cmd/...
+
+summarize-run: ## Build the indexer and run the function-summary level keep-awake (concurrency 1)
+	go build -o bin/indexer ./cmd/indexer
+	caffeinate -i bin/indexer summarize --level function --concurrency 1
+
+summarize-pause: ## Interrupt the running summarize; the in-flight item finishes before exit
+	@if pkill -INT -f "bin/indexer summarize"; then \
+		echo "summarize-pause: sent SIGINT; the in-flight item finishes before exit"; \
+	else \
+		echo "summarize-pause: no running 'bin/indexer summarize' process"; \
+	fi
+
+summarize-status: ## Print current-prompt-version summary counts and an ETA
+	go run ./cmd/indexer summarize --status
+
+verify-slice: ## Recompute the in-slice path hash and fail on drift (D-070)
+	go run ./cmd/indexer walk --verify-slice

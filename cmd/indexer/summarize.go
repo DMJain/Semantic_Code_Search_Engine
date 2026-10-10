@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"time"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
@@ -38,6 +40,8 @@ func runSummarize(ctx context.Context, args []string) error {
 	printSample := fs.Bool("print-sample", false, "print the sampled function ids and exit")
 	bench := fs.Bool("bench", false, "run the throughput benchmark (writes no summary rows) and exit")
 	out := fs.String("out", defaultBenchOutput, "benchmark results JSON path (--bench only)")
+	status := fs.Bool("status", false, "print current-prompt-version counts and an ETA, then exit")
+	etaWindow := fs.Duration("eta-window", summarize.DefaultStatusWindow, "wall-clock window used to measure the completion rate (--status only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -61,6 +65,15 @@ func runSummarize(ctx context.Context, args []string) error {
 		KubeDir: cfg.KubeDir,
 		Model:   cfg.OllamaSummaryModel,
 		Out:     os.Stdout,
+	}
+
+	if *status {
+		rep, err := runner.Status(ctx, *etaWindow)
+		if err != nil {
+			return err
+		}
+		printStatus(os.Stdout, rep)
+		return nil
 	}
 
 	if *bench {
@@ -90,4 +103,22 @@ func runSummarize(ctx context.Context, args []string) error {
 		PrintSample: *printSample,
 	})
 	return err
+}
+
+// printStatus prints the current-prompt-version counts and, when the sampling
+// window saw completions, the measured rate and ETA.
+func printStatus(w io.Writer, rep summarize.StatusReport) {
+	fmt.Fprintf(w, "prompt_version %s\n", rep.PromptVersion)
+	fmt.Fprintf(w, "pending %d done %d failed %d\n",
+		rep.Counts["pending"], rep.Counts["done"], rep.Counts["failed"])
+	fmt.Fprintf(w, "remaining %d\n", rep.Remaining)
+	switch {
+	case rep.Remaining == 0:
+		fmt.Fprintln(w, "eta 0s (nothing pending)")
+	case rep.Measured:
+		fmt.Fprintf(w, "rate %.1f fn/h (measured over %s)\n", rep.PerHour, rep.Window)
+		fmt.Fprintf(w, "eta %s\n", rep.ETA.Round(time.Second))
+	default:
+		fmt.Fprintln(w, "eta unknown (no completions observed in the sampling window)")
+	}
 }
