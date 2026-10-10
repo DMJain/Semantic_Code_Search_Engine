@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,11 @@ type Config struct {
 	OllamaURL          string
 	OllamaSummaryModel string
 	OllamaEmbedModel   string
+
+	// OllamaSummaryNumCtx is the explicit context size sent with every
+	// function-summary request (D-015). It is never zero: Load falls back to
+	// DefaultOllamaSummaryNumCtx on an unset or invalid value.
+	OllamaSummaryNumCtx int
 
 	// GroqAPIKey and GroqModel are optional until the Groq client exists.
 	GroqAPIKey string
@@ -40,7 +46,9 @@ const (
 	DefaultOllamaURL          = "http://localhost:11434"
 	DefaultOllamaSummaryModel = "qwen2.5-coder:7b"
 	DefaultOllamaEmbedModel   = "qwen3-embedding:0.6b"
-	DefaultKubeDir            = "./data/kubernetes"
+	// DefaultOllamaSummaryNumCtx is the summary request context size (D-015).
+	DefaultOllamaSummaryNumCtx = 4096
+	DefaultKubeDir             = "./data/kubernetes"
 )
 
 // Load reads the configuration from the process environment.
@@ -83,17 +91,32 @@ func loadEnv(getenv func(string) string) Config {
 	}
 
 	return Config{
-		DatabaseURL:        get("DATABASE_URL", ""),
-		HTTPAddr:           get("HTTP_ADDR", DefaultHTTPAddr),
-		OllamaURL:          strings.TrimRight(get("OLLAMA_URL", DefaultOllamaURL), "/"),
-		OllamaSummaryModel: get("OLLAMA_SUMMARY_MODEL", DefaultOllamaSummaryModel),
-		OllamaEmbedModel:   get("OLLAMA_EMBED_MODEL", DefaultOllamaEmbedModel),
-		GroqAPIKey:         get("GROQ_API_KEY", ""),
-		GroqModel:          get("GROQ_MODEL", ""),
-		GithubToken:        get("GITHUB_TOKEN", ""),
-		KubeTag:            get("KUBE_TAG", ""),
-		KubeDir:            get("KUBE_DIR", DefaultKubeDir),
+		DatabaseURL:         get("DATABASE_URL", ""),
+		HTTPAddr:            get("HTTP_ADDR", DefaultHTTPAddr),
+		OllamaURL:           strings.TrimRight(get("OLLAMA_URL", DefaultOllamaURL), "/"),
+		OllamaSummaryModel:  get("OLLAMA_SUMMARY_MODEL", DefaultOllamaSummaryModel),
+		OllamaEmbedModel:    get("OLLAMA_EMBED_MODEL", DefaultOllamaEmbedModel),
+		OllamaSummaryNumCtx: getInt(getenv, "OLLAMA_SUMMARY_NUM_CTX", DefaultOllamaSummaryNumCtx),
+		GroqAPIKey:          get("GROQ_API_KEY", ""),
+		GroqModel:           get("GROQ_MODEL", ""),
+		GithubToken:         get("GITHUB_TOKEN", ""),
+		KubeTag:             get("KUBE_TAG", ""),
+		KubeDir:             get("KUBE_DIR", DefaultKubeDir),
 	}
+}
+
+// getInt returns the positive integer in key, or def when the variable is
+// unset, not an integer, or not positive.
+func getInt(getenv func(string) string, key string, def int) int {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 // ErrMissing is returned when a required environment variable is unset.

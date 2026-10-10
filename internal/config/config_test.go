@@ -15,12 +15,13 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	want := Config{
-		DatabaseURL:        "postgres://x",
-		HTTPAddr:           DefaultHTTPAddr,
-		OllamaURL:          DefaultOllamaURL,
-		OllamaSummaryModel: DefaultOllamaSummaryModel,
-		OllamaEmbedModel:   DefaultOllamaEmbedModel,
-		KubeDir:            DefaultKubeDir,
+		DatabaseURL:         "postgres://x",
+		HTTPAddr:            DefaultHTTPAddr,
+		OllamaURL:           DefaultOllamaURL,
+		OllamaSummaryModel:  DefaultOllamaSummaryModel,
+		OllamaEmbedModel:    DefaultOllamaEmbedModel,
+		OllamaSummaryNumCtx: DefaultOllamaSummaryNumCtx,
+		KubeDir:             DefaultKubeDir,
 	}
 	if cfg != want {
 		t.Errorf("got %+v\nwant %+v", cfg, want)
@@ -29,16 +30,17 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadOverrides(t *testing.T) {
 	cfg, err := load(env(map[string]string{
-		"DATABASE_URL":         "postgres://x",
-		"HTTP_ADDR":            ":9000",
-		"OLLAMA_URL":           "http://ollama:11434/",
-		"OLLAMA_SUMMARY_MODEL": "llama3",
-		"OLLAMA_EMBED_MODEL":   "nomic-embed-text",
-		"GROQ_API_KEY":         "key",
-		"GROQ_MODEL":           "m",
-		"GITHUB_TOKEN":         "tok",
-		"KUBE_TAG":             "v1.0.0",
-		"KUBE_DIR":             "/tmp/k",
+		"DATABASE_URL":           "postgres://x",
+		"HTTP_ADDR":              ":9000",
+		"OLLAMA_URL":             "http://ollama:11434/",
+		"OLLAMA_SUMMARY_MODEL":   "llama3",
+		"OLLAMA_EMBED_MODEL":     "nomic-embed-text",
+		"OLLAMA_SUMMARY_NUM_CTX": "8192",
+		"GROQ_API_KEY":           "key",
+		"GROQ_MODEL":             "m",
+		"GITHUB_TOKEN":           "tok",
+		"KUBE_TAG":               "v1.0.0",
+		"KUBE_DIR":               "/tmp/k",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -47,9 +49,20 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("OllamaURL = %q, want trailing slash trimmed", cfg.OllamaURL)
 	}
 	if cfg.HTTPAddr != ":9000" || cfg.OllamaSummaryModel != "llama3" || cfg.OllamaEmbedModel != "nomic-embed-text" ||
+		cfg.OllamaSummaryNumCtx != 8192 ||
 		cfg.GroqAPIKey != "key" || cfg.GroqModel != "m" || cfg.GithubToken != "tok" ||
 		cfg.KubeTag != "v1.0.0" || cfg.KubeDir != "/tmp/k" {
 		t.Errorf("overrides not applied: %+v", cfg)
+	}
+}
+
+func TestLoadInvalidNumCtxFallsBack(t *testing.T) {
+	cfg, err := load(env(map[string]string{"DATABASE_URL": "postgres://x", "OLLAMA_SUMMARY_NUM_CTX": "not-a-number"}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.OllamaSummaryNumCtx != DefaultOllamaSummaryNumCtx {
+		t.Errorf("OllamaSummaryNumCtx = %d, want default %d", cfg.OllamaSummaryNumCtx, DefaultOllamaSummaryNumCtx)
 	}
 }
 

@@ -1,5 +1,4 @@
-// Package summarize will produce function, file and package summaries with
-// a local LLM, bottom-up, caching responses in llm_cache.
-//
-// Not implemented yet.
+// Package summarize produces function summaries with a local LLM. This file
+// covers the pure part (prompt, input hash, eligibility, request guards);
+// file- and package-level summaries plus database persistence arrive later.
 package summarize
