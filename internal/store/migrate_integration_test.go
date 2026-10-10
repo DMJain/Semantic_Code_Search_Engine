@@ -35,6 +35,65 @@ func TestMigrateCreatesTables(t *testing.T) {
 	assertExtensions(ctx, t, conn)
 }
 
+// TestSearchTSVIsPlainColumn proves the second migration replaced the
+// generated full-text column on chunks with a plain tsvector column: it is not
+// generated, and a value inserted explicitly is matched by a text query. The
+// inserts run in a transaction that is rolled back, so no rows are left behind.
+func TestSearchTSVIsPlainColumn(t *testing.T) {
+	dbURL := testURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	var generated string
+	if err := conn.QueryRow(ctx, `SELECT is_generated FROM information_schema.columns
+		WHERE table_name = 'chunks' AND column_name = 'search_tsv'`).Scan(&generated); err != nil {
+		t.Fatalf("read is_generated: %v", err)
+	}
+	if generated != "NEVER" {
+		t.Errorf("chunks.search_tsv is_generated = %q, want NEVER (plain column)", generated)
+	}
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var fileID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc)
+		VALUES ('a.go', 'pkg', 'deadbeef', 10) RETURNING id`).Scan(&fileID); err != nil {
+		t.Fatalf("insert file: %v", err)
+	}
+	var symbolID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line)
+		VALUES ($1, 'func', 'Foo', 'pkg.Foo', 1, 3) RETURNING id`, fileID).Scan(&symbolID); err != nil {
+		t.Fatalf("insert symbol: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO chunks (symbol_id, file_id, part_idx, content, content_hash, token_count, search_tsv)
+		VALUES ($1, $2, 0, 'unrelated text', 'hash', 2, to_tsvector('simple', 'foo bar'))`,
+		symbolID, fileID); err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	var matched int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM chunks WHERE search_tsv @@ to_tsquery('simple', 'foo')`).Scan(&matched); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if matched != 1 {
+		t.Errorf("chunks matching search_tsv @@ to_tsquery('simple','foo') = %d, want 1", matched)
+	}
+}
+
 // TestMigrateUpDownUpInThrowawayDatabase exercises goose Up, Down (one step),
 // then Up again in a throwaway database, so a rollback never touches dev data.
 // The codesearch role is a superuser, so it can CREATE DATABASE.
