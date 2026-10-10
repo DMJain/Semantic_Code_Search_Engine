@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
@@ -31,6 +32,37 @@ const (
 // with an unusually long type-parameter list.
 const maxSignature = 200
 
+const (
+	// maxRawCall is the per-call length cap: the callee text is truncated to
+	// this many runes (not bytes), so a multi-byte identifier is never split.
+	maxRawCall = 80
+	// maxRawCalls is the per-symbol size cap, applied after dedup in source
+	// order.
+	maxRawCalls = 40
+)
+
+// builtins is the fixed set of predeclared identifiers dropped from raw calls:
+// the builtin functions (len, append, make, ...) and the predeclared type names
+// used as conversions (int, string, any, ...). A call is dropped when the whole
+// function-operand text is exactly one of these bare names. A conversion to a
+// user-defined type, for example MyType(x), is kept because without type
+// information it is syntactically identical to a function call. error is
+// deliberately absent (it cannot be used as a conversion). It is the single
+// source of truth for the T06 drop rule.
+var builtins = map[string]bool{
+	// Builtin functions.
+	"len": true, "cap": true, "make": true, "new": true, "append": true,
+	"copy": true, "delete": true, "real": true, "imag": true, "close": true,
+	"panic": true, "recover": true, "print": true, "println": true,
+	"min": true, "max": true, "clear": true, "complex": true,
+	// Predeclared types (conversions).
+	"string": true, "bool": true, "byte": true, "rune": true, "any": true,
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"uintptr": true, "float32": true, "float64": true,
+	"complex64": true, "complex128": true,
+}
+
 // ErrSyntax reports that tree-sitter found ERROR nodes in a file. [File] still
 // returns the symbols it managed to extract; the caller counts the file as a
 // parse error and stores it anyway.
@@ -49,6 +81,11 @@ type Symbol struct {
 	StartLine     int    `json:"start_line"`
 	EndLine       int    `json:"end_line"`
 	Doc           string `json:"doc,omitempty"`
+	// RawCalls is the deduplicated, source-ordered list of callee texts for a
+	// function or method (S1-T06), capped at [maxRawCalls] entries of at most
+	// [maxRawCall] runes each. It is summary-prompt input only and never feeds
+	// the call graph (D-019). It is empty for struct and interface symbols.
+	RawCalls []string `json:"raw_calls,omitempty"`
 }
 
 // File parses src as the Go file at repo-root-relative slash path relPath and
@@ -97,6 +134,7 @@ func symbol(n *sitter.Node, src []byte, pkg, kind string) Symbol {
 		StartLine: int(n.StartPoint().Row) + 1,
 		EndLine:   int(n.EndPoint().Row) + 1,
 		Doc:       doc(src, int(n.StartPoint().Row)),
+		RawCalls:  rawCalls(n.ChildByFieldName("body"), src),
 	}
 	if kind == KindMethod {
 		sym.Receiver = receiverType(n, src)
@@ -187,6 +225,48 @@ func receiverType(n *sitter.Node, src []byte) string {
 		return ""
 	}
 	return typ.Content(src)
+}
+
+// rawCalls walks a function or method body (including any nested func_literal)
+// in pre-order and collects each call_expression's function-operand source text:
+// the callee as written, for example `sched.cache.AssumePod` or `klog.V(2).InfoS`.
+// For a chain the outer call is seen before its operands, so `a.B().C()` yields
+// `a.B().C` then `a.B` (the inner call is itself a call_expression). The text is
+// trimmed, truncated to [maxRawCall] runes, dropped if it is a bare [builtins]
+// name, deduplicated keeping the first occurrence, and capped at [maxRawCalls].
+// A declaration without a body (for example an external func) yields nil.
+func rawCalls(body *sitter.Node, src []byte) []string {
+	if body == nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]bool)
+	var visit func(n *sitter.Node)
+	visit = func(n *sitter.Node) {
+		if n.Type() == "call_expression" {
+			fn := n.ChildByFieldName("function")
+			if fn != nil {
+				text := truncateRunes(strings.TrimSpace(fn.Content(src)), maxRawCall)
+				if text != "" && !builtins[text] && !seen[text] && len(out) < maxRawCalls {
+					seen[text] = true
+					out = append(out, text)
+				}
+			}
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			visit(n.NamedChild(i))
+		}
+	}
+	visit(body)
+	return out
+}
+
+// truncateRunes cuts s to at most limit runes, never splitting a multi-byte rune.
+func truncateRunes(s string, limit int) string {
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	return string([]rune(s)[:limit])
 }
 
 // doc returns the contiguous // comment lines immediately above the

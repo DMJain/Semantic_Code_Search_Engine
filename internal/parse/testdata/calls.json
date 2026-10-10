@@ -1,0 +1,36 @@
+[
+  {
+    "kind": "func",
+    "name": "Calls",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.Calls",
+    "signature": "func Calls(a, b int, x any)",
+    "start_line": 8,
+    "end_line": 24,
+    "doc": "// Calls covers raw-call extraction (S1-T06): a method chain, a builtin\n// (len/append/string/make), a conversion, a nested function literal and a\n// repeated call. The golden pins the exact list, its source order and dedup.\n// The tree-sitter parser does not type-check, so the identifiers need not\n// resolve.",
+    "raw_calls": [
+      "sched.cache.AssumePod",
+      "a.B().C",
+      "a.B",
+      "klog.V(2).InfoS",
+      "klog.V",
+      "helper",
+      "f",
+      "MyType",
+      "Always"
+    ]
+  },
+  {
+    "kind": "method",
+    "name": "Chain",
+    "qualified_name": "k8s.io/kubernetes/pkg/scheduler.(*Scheduler).Chain",
+    "receiver": "*Scheduler",
+    "signature": "func (s *Scheduler) Chain()",
+    "start_line": 29,
+    "end_line": 32,
+    "doc": "// Chain is a method with a deeper chain and a conversion. A conversion to a\n// predeclared type (int64) is dropped; the chain's outer and inner calls are\n// both kept, outer first.",
+    "raw_calls": [
+      "stringer.For(s).Handle",
+      "stringer.For"
+    ]
+  }
+]

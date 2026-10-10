@@ -213,8 +213,8 @@ func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
 	for _, s := range pf.symbols {
 		var id int64
 		err := tx.QueryRow(ctx, `
-			INSERT INTO symbols (file_id, kind, name, qualified_name, receiver, signature, start_line, end_line, doc)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO symbols (file_id, kind, name, qualified_name, receiver, signature, start_line, end_line, doc, raw_calls)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (qualified_name) DO UPDATE SET
 				file_id = EXCLUDED.file_id,
 				kind = EXCLUDED.kind,
@@ -223,10 +223,12 @@ func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
 				signature = EXCLUDED.signature,
 				start_line = EXCLUDED.start_line,
 				end_line = EXCLUDED.end_line,
-				doc = EXCLUDED.doc
+				doc = EXCLUDED.doc,
+				raw_calls = EXCLUDED.raw_calls
 			RETURNING id`,
 			pf.id, s.Kind, s.Name, s.QualifiedName,
 			nullIfEmpty(s.Receiver), s.Signature, s.StartLine, s.EndLine, nullIfEmpty(s.Doc),
+			rawCallsOrEmpty(s.RawCalls),
 		).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("upsert symbol %s: %w", s.QualifiedName, err)
@@ -283,4 +285,13 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// rawCallsOrEmpty maps a nil slice to an empty one, because raw_calls is
+// NOT NULL DEFAULT '{}' and pgx would otherwise send NULL.
+func rawCallsOrEmpty(calls []string) []string {
+	if calls == nil {
+		return []string{}
+	}
+	return calls
 }

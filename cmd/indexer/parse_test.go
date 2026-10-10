@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,6 +84,55 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// TestParseCorpusStoresRawCalls proves raw_calls are written with the symbol,
+// that a symbol with no calls stores an empty array rather than NULL, and that
+// a re-parse leaves the stored list unchanged (deterministic upsert).
+func TestParseCorpusStoresRawCalls(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	writeSrc(t, root, "pkg/a/a.go",
+		"package a\n\nfunc A() {\n\tsched.cache.AssumePod()\n\tlen(0)\n}\nfunc Clean() {}\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+
+	const qn = "k8s.io/kubernetes/pkg/a.A"
+	var before []string
+	if err := pool.QueryRow(ctx, `SELECT raw_calls FROM symbols WHERE qualified_name = $1`, qn).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sched.cache.AssumePod"}; !slices.Equal(before, want) {
+		t.Fatalf("raw_calls = %v, want %v", before, want)
+	}
+
+	var empty []string
+	if err := pool.QueryRow(ctx,
+		`SELECT raw_calls FROM symbols WHERE qualified_name = 'k8s.io/kubernetes/pkg/a.Clean'`).Scan(&empty); err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("Clean raw_calls = %v, want empty", empty)
+	}
+
+	// Pre-seed a different value so the re-parse must overwrite it through the
+	// ON CONFLICT DO UPDATE path, not merely leave the first insert's value.
+	if _, err := pool.Exec(ctx,
+		`UPDATE symbols SET raw_calls = '{STALE}' WHERE qualified_name = $1`, qn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE files SET parsed_sha = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	runParseCorpus(t, pool, root, 0)
+	var after []string
+	if err := pool.QueryRow(ctx, `SELECT raw_calls FROM symbols WHERE qualified_name = $1`, qn).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(after, before) {
+		t.Errorf("re-parse did not overwrite raw_calls: got %v, want %v", after, before)
+	}
 }
 
 // TestParseCorpusIdempotent proves a second run finds nothing stale and that no

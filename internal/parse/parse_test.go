@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,83 @@ func TestFileTypesGolden(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("golden mismatch for types.go (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFileRawCallsGolden pins the raw_calls list for testdata/calls.go: method
+// chains (outer call before its inner operand), builtins and a predeclared-type
+// conversion dropped, a call inside a nested func_literal included, and a
+// repeated call deduplicated. Source order is preserved.
+func TestFileRawCallsGolden(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("testdata", "calls.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	syms, err := parse.File("pkg/scheduler/calls.go", src)
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	got, err := json.MarshalIndent(syms, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, '\n')
+
+	golden := filepath.Join("testdata", "calls.json")
+	if *update {
+		if err := os.WriteFile(golden, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("golden mismatch for calls.go (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestRawCallCaps proves the per-symbol cap is 40 and the per-call cap is 80
+// runes, never splitting a multi-byte rune.
+func TestRawCallCaps(t *testing.T) {
+	var many strings.Builder
+	many.WriteString("package p\n\nfunc F() {\n")
+	for i := 0; i < 45; i++ {
+		fmt.Fprintf(&many, "\tf%d()\n", i)
+	}
+	many.WriteString("}\n")
+	syms, err := parse.File("pkg/p/cap.go", []byte(many.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := syms[0].RawCalls
+	if len(got) != 40 {
+		t.Fatalf("raw call count = %d, want 40", len(got))
+	}
+	if got[0] != "f0" || got[39] != "f39" {
+		t.Errorf("capped list = first %q last %q, want first f0 last f39", got[0], got[39])
+	}
+
+	long := "x" + strings.Repeat("a", 90)
+	ascii, err := parse.File("pkg/p/long.go", []byte("package p\n\nfunc G() {\n\t"+long+"()\n}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := ascii[0].RawCalls; len(c) != 1 || c[0] != long[:80] {
+		t.Errorf("ascii truncation = %q, want %q", c, long[:80])
+	}
+
+	uni := "x" + strings.Repeat("é", 90)
+	multi, err := parse.File("pkg/p/uni.go", []byte("package p\n\nfunc H() {\n\t"+uni+"()\n}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := multi[0].RawCalls; len(c) != 1 {
+		t.Fatalf("multi-byte raw calls = %v, want one", c)
+	} else if c[0] != string([]rune(uni)[:80]) || len([]rune(c[0])) != 80 {
+		t.Errorf("multi-byte truncation = %q (%d runes), want 80 runes", c[0], len([]rune(c[0])))
 	}
 }
 

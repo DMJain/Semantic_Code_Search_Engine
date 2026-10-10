@@ -325,3 +325,7 @@ rerun: 0 HTTP calls (cache under eval/candidates/cache/, gitignored)
 ```
 
 Deviations recorded: changed non-`.go` files are ignored (Go-only corpus), so a PR touching only non-Go files in the slice counts 0; "exists at the tag" is an `os.Stat` against the checkout, valid because `fetch-repo` is pinned to the tag; `by_prefix` counts a PR once per slice prefix it touches (overlaps, so the sum may exceed the yield). Fake-GitHub tests cover pagination, cap halving, the `/rate_limit` search bucket waited out on an injected clock (no real sleeps), cache reuse (second run 0 HTTP), the missing-token gate before any network call, and the token absent from captured logs.
+
+### S1-07 / T06 - raw calls per function
+
+Each function/method stores the call-expression function-operand text as written (trimmed, truncated to 80 runes, deduplicated in source order, capped at 40, nested `func_literal` calls included), written in the same transaction as the symbol. Builtins and predeclared-type conversions are dropped by one fixed list (`builtins`); a user-defined-type conversion `MyType(x)` is kept (syntactically indistinguishable without type info). On the real tree `schedulePod`'s raw_calls is non-empty (e.g. `utiltrace.New`, `sched.findNodesThatFitPod`, `framework.NewSortedScoredNodes`). Goldens cover method chains, builtins, closures and both dropped (`any`, `string`) and kept (`MyType`) conversions. A re-parse overwrites the stored list through the upsert. Raw calls are never written to `edges`.
