@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately). Owner approved stopping and restarting Ollama.
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Found by:** S0 code review (stop was simulated).
 

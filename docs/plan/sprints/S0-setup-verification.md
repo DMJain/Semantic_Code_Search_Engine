@@ -202,3 +202,11 @@ Sign-off note (deferral): the exit criterion "CI runs the migration integration 
   embed_ctx_over: error (qwen3-embedding:0.6b, num_ctx 4096)
   ```
   Tests: `TestNumCtxIsSentOnEveryEmbedRequest`, request-body tests with `options.num_ctx`, and `TestOllamaChecksFailsWhenRegistryContextSizeIsWrong` (fake Ollama that accepts more than the registry says makes the doctor exit non-zero). Consequence for S3 (nomic request ceiling 1,638 estimated tokens) recorded in D-003 and on the S3 entry checklist.
+- S0-13 (real stopped-Ollama doctor run, 2026-10-10): before: Ollama 0.40.1 ran as a manually started `ollama serve` (pid 42323, parent a shell, no `brew services` unit, no `OLLAMA_*` environment overrides); `ollama list` showed `nomic-embed-text:latest`, `qwen3-embedding:0.6b`, `qwen2.5-coder:7b`; its llama-server children ran with `-c 2048` (nomic) and `-c 4096` (qwen3), matching S0-12. Stopped with `kill -TERM 42323`; `pgrep -lf ollama` empty and port 11434 closed. `make doctor` exit non-zero (`indexer doctor: 1 check(s) failed`):
+  ```
+  PASS  config / postgres connection / extension vector / extension pg_trgm
+  FAIL  ollama reachable             Get "http://localhost:11434/api/tags": dial tcp 127.0.0.1:11434: connect: connection refused
+        fix: install Ollama natively (brew install ollama, or https://ollama.com/download); start Ollama: ollama serve (or open the app); OLLAMA_URL is http://localhost:11434
+  SKIP  model qwen2.5-coder:7b / model qwen3-embedding:0.6b / embedding probe   ollama unreachable
+  ```
+  Restarted with `nohup ollama serve` (detached, pid 87368, log in the session scratchpad); `ollama list` shows the same three IDs as D-060 (`0a109f422b47`, `ac6da0dfba84`, `dae161e27b0e`); `make doctor` 8 of 8 PASS, exit 0. Note: the restarted process was started from the agent session; if the terminal that owns it is closed, start it again with `ollama serve`.
