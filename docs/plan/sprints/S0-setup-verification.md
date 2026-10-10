@@ -128,4 +128,11 @@ All ten tasks done; CI runs the migration integration test; D-003 outcome filled
 `make reset-db && make doctor && go run ./cmd/indexer doctor --probe-all` all green; stop Ollama and `make doctor` fails with the fix message.
 
 ## Results
-(empty)
+Status 2026-10-10: in progress. Only verified facts below; no task is closed.
+
+- S0-T06 (partial): Ollama client 0.40.1 installed; `ollama list` shows `qwen3-embedding:0.6b` (639 MB) and `qwen2.5-coder:7b` (4.7 GB). `nomic-embed-text` is NOT pulled, so T06 acceptance (all three) is not met.
+- State A doctor transcript (Postgres up via `make up`, Ollama up, two models pulled), exit 0:
+  PASS config; PASS postgres (PostgreSQL 17.11); PASS vector 0.8.7; PASS pg_trgm 1.6; PASS ollama reachable; PASS model qwen2.5-coder:7b; PASS model qwen3-embedding:0.6b; PASS embedding probe (dim 1024, query norm 1.0000, doc norm 1.0000).
+- Migrations: `goose_db_version` has versions 0 and 1 applied; tables: chunks, edges, embeddings, files, goose_db_version, llm_cache, summaries, symbols, traces. No 00002 (T03 not done).
+- `make lint`: 0 issues. `make test`: pass, but cached (T01 not done).
+- Not done: T01-T05, T07-T10; State B doctor transcript (T08); CI run URL (T10).
