@@ -13,3 +13,7 @@ Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 ### Domain docs
 
 Domain docs: glossary `docs/plan/glossary.md`, decisions `docs/plan/decisions.md`. See `docs/agents/domain.md`.
+
+## Working rules
+
+Work directly on `main` with local commits (one commit per ticket). Do not create feature branches. Never push, open pull requests or upload anything to a remote; CI is checked locally with `make ci-local` (D-069).

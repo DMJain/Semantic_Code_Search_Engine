@@ -4,7 +4,7 @@
 Pin the Kubernetes tag, walk and filter the corpus, extract symbols, benchmark summarization and probe the mining yield to fix the slice, then launch the overnight function-summary run (the critical path).
 
 ## Entry criteria
-S0 signed off locally (the branch is not pushed, D-061): Ollama running with `qwen2.5-coder:7b` pulled, `make doctor` passes, `make test` shows 0 SKIP. `make ci-local` (S1-T15) replaces "CI green" for S1; CI proof on a pushed branch is an owner decision on the sign-off checklist (D-063). A fine-grained read-only `GITHUB_TOKEN` is in `.env` (needed from S1-T12; checked only with `test -n "$GITHUB_TOKEN"`, never printed, logged or committed).
+S0 signed off locally (nothing is pushed, D-069): Ollama running with `qwen2.5-coder:7b` pulled, `make doctor` passes, `make test` shows 0 SKIP. `make ci-local` (S1-T15) replaces "CI green" for S1; CI proof on a pushed branch is an owner decision on the sign-off checklist (D-063). A fine-grained read-only `GITHUB_TOKEN` is in `.env` (needed from S1-T12; checked only with `test -n "$GITHUB_TOKEN"`, never printed, logged or committed).
 
 ## Links
 [architecture.md#corpus-and-slice](../architecture.md#corpus-and-slice), [#stage-walk](../architecture.md#stage-walk), [#stage-parse](../architecture.md#stage-parse), [#stage-summarize](../architecture.md#stage-summarize), [#ollama-requests](../architecture.md#ollama-requests), [#token-estimate](../architecture.md#token-estimate), [#resumability](../architecture.md#resumability). Decisions: D-005, D-006, D-014, D-015, D-058, D-063 to D-068.
@@ -154,7 +154,7 @@ S0 signed off locally (the branch is not pushed, D-061): Ollama running with `qw
 - Owner: agent, with the gate verdicts and the run start by the author
 
 ### S1-T15 - `make ci-local` and CGO-safe CI (new)
-- Why: CI cannot be observed without a push (D-061); a local mirror of `ci.yml` is the substitute, and tree-sitter needs CGO for building while the corpus build context stays `CGO_ENABLED=0` (D-063).
+- Why: CI is never observed remotely (D-069); a local mirror of `ci.yml` is the substitute, and tree-sitter needs CGO for building while the corpus build context stays `CGO_ENABLED=0` (D-063).
 - Depends on: none (blocks T04 only)
 - Touches: `Makefile`, `.github/workflows/ci.yml`
 - Details: `make ci-local` runs the commands and environment of `ci.yml` against the compose Postgres: `go vet ./...`, `REQUIRE_TEST_DB=1 go test -v -count=1 ./...` with the SKIP check, `make lint`, and `make lint-ci`. `make lint-ci` = `GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) $(WORKFLOW)` with `WORKFLOW ?= .github/workflows/ci.yml`; choose the version from `go list -m -versions github.com/rhysd/actionlint`, and if the newest does not build under `GOTOOLCHAIN=local`, take the newest that does and record why. actionlint's shellcheck integration is skipped when `shellcheck` is not on PATH; state that in Results. Set `CGO_ENABLED=1` on the build, vet and test steps of `ci.yml`, in `make ci-local` and in the Makefile `build` target (not job-wide, and never in the walk or `callgraph-gt` code paths).
@@ -180,10 +180,10 @@ Written to this file's Results and `eval/results/bench/summarize.json`:
 - Indexing metrics for `walk` and `parse` wall time ([eval-protocol.md#indexing-metrics](../eval-protocol.md#indexing-metrics)).
 
 ## Exit criteria / Definition of Done
-Tag pinned (D-006); walk and parse idempotent; `callgraph-gt --check` equal; slice FINAL with its hash recorded at T13; quality gate passed; the owner has started the function-summary run and two `summarize-status` readings show `done` strictly increasing; pause and resume verified by counts; `make ci-local` green with 0 SKIP; ROADMAP updated. Sign-off checklist (owner decisions): whether to push the branch and open a draft PR for CI proof of the CGO change (D-063); merging S0 and S1.
+Tag pinned (D-006); walk and parse idempotent; `callgraph-gt --check` equal; slice FINAL with its hash recorded at T13; quality gate passed; the owner has started the function-summary run and two `summarize-status` readings show `done` strictly increasing; pause and resume verified by counts; `make ci-local` green with 0 SKIP; ROADMAP updated. CI is checked only by `make ci-local` (nothing is pushed, D-069).
 
 ## Risks + mitigations
-- CGO/tree-sitter build issues on CI: `CGO_ENABLED=1` is set in T15 and exercised locally by `make ci-local` in T04; the first real CI observation happens only if the owner pushes (D-063). Fallback is `gotreesitter` bindings, not Python.
+- CGO/tree-sitter build issues on CI: `CGO_ENABLED=1` is set in T15 and exercised locally by `make ci-local` in T04; CI is never observed remotely (D-069). Fallback is `gotreesitter` bindings, not Python.
 - `go/packages` cannot load client-go from the clone's `vendor/` layout (Q-05): T08 exits 2, records the failure and stops for the owner before the freeze.
 - Throughput below 1k fn/h: the D-005 shrink order applies; do not start the run before T13.
 - Symbol ids changing under existing summaries: T07 upserts on `qualified_name` and cleans up per file (D-065).
