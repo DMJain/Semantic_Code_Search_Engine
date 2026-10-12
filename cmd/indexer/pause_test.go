@@ -49,9 +49,23 @@ func startStandIn(t *testing.T, ignoreInt bool, argv0 string) *standIn {
 			<-s.done
 		}
 	})
-	// Give bash time to exec so the command line is the stand-in's.
-	time.Sleep(300 * time.Millisecond)
+	waitForCommandLine(t, cmd.Process.Pid, argv0)
 	return s
+}
+
+// waitForCommandLine polls until the process's command line starts with want,
+// i.e. bash has exec'd the stand-in.
+func waitForCommandLine(t *testing.T, pid int, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out, _ := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+		if strings.HasPrefix(strings.TrimSpace(string(out)), want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pid %d never showed command line %q", pid, want)
 }
 
 func uniqueBin(t *testing.T) string {
@@ -66,7 +80,11 @@ func runPause(t *testing.T, bin string, timeout string) (string, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sh", "-c", `sh "$0"; exit $?  # `+bin+` summarize --level function`, script)
+	return runCmd(t, bin, timeout, exec.Command("sh", "-c", `sh "$0"; exit $?  # `+bin+` summarize --level function`, script))
+}
+
+func runCmd(t *testing.T, bin, timeout string, cmd *exec.Cmd) (string, int) {
+	t.Helper()
 	cmd.Env = append(os.Environ(),
 		"SUMMARIZE_PAUSE_PATTERN=^"+bin+" summarize( |$)",
 		"SUMMARIZE_PAUSE_TIMEOUT="+timeout,
@@ -127,5 +145,22 @@ func TestPauseDidNotExitWithinTimeout(t *testing.T) {
 	}
 	if !stuck.alive() {
 		t.Fatal("stand-in ignoring SIGINT should still be running")
+	}
+}
+
+// A grandparent of the script (pgrep itself already skips the direct parent) whose own command line matches the pattern must be
+// skipped: only the script's ancestor guard protects it.
+func TestPauseSkipsMatchingAncestor(t *testing.T) {
+	bin := uniqueBin(t)
+	script, err := filepath.Abs("../../scripts/summarize-pause.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c",
+		`exec -a "$0" bash -c 'sh -c '"'"'sh "$0"; exit $?'"'"' "$1"; exit $?' _ "$1"`,
+		bin+" summarize --level function", script)
+	out, code := runCmd(t, bin, "2", cmd)
+	if code != 2 || !strings.Contains(out, "nothing running") {
+		t.Fatalf("exit %d, want 2 'nothing running'; output:\n%s", code, out)
 	}
 }

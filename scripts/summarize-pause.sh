@@ -4,7 +4,19 @@
 # The target is matched by an anchored regex on the full command line, so it
 # cannot match this script's shell, make, or the keep-awake wrapper (their
 # command lines start with sh/make/caffeinate, not "bin/indexer summarize").
-# Own ancestors are also excluded as a second guard.
+# No separate ancestor guard: it could not be exercised (macOS pgrep already
+# omits its own ancestors), so the anchoring is the protection.
+#
+# Caveat: the default pattern assumes the run was launched as
+# `bin/indexer summarize ...` (as `make summarize-run` does). A run launched
+# any other way (absolute path, `go run`) is reported as "nothing running"
+# even though it is alive; set SUMMARIZE_PAUSE_PATTERN or stop it by hand.
+#
+# Stopping: SIGINT is turned into context cancellation by signal.NotifyContext
+# in cmd/indexer/main.go. The runner stops handing out new work and lets the
+# item already in flight finish (processItem uses a non-cancelled context and
+# writes its row done/failed) before the process exits. This script only
+# verifies the process exited, not row contents.
 #
 # Exit codes: 0 stopped, 2 nothing running, 3 did not exit within the timeout,
 # 4 more than one match (ambiguous; nothing is signalled).
@@ -14,20 +26,8 @@
 pattern=${SUMMARIZE_PAUSE_PATTERN:-'^bin/indexer summarize( |$)'}
 timeout=${SUMMARIZE_PAUSE_TIMEOUT:-120}
 
-# $$ and its ancestors, space-separated.
-ancestors=" $$ "
-p=$$
-while [ -n "$p" ] && [ "$p" -gt 1 ]; do
-	p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-	[ -n "$p" ] && ancestors="$ancestors$p "
-done
-
-pids=""
-for c in $(pgrep -f "$pattern"); do
-	case "$ancestors" in *" $c "*) continue ;; esac
-	pids="$pids $c"
-done
-pids=${pids# }
+pids=$(pgrep -f "$pattern" | tr '\n' ' ')
+pids=${pids% }
 
 if [ -z "$pids" ]; then
 	echo "summarize-pause: nothing running (no process matches '$pattern')"
@@ -52,5 +52,5 @@ while kill -0 "$pids" 2>/dev/null; do
 	sleep 1
 	waited=$((waited + 1))
 done
-echo "summarize-pause: pid $pids exited; no row is left half-written (the in-flight item finished first)"
+echo "summarize-pause: pid $pids exited (the runner finishes its in-flight item on SIGINT; row contents are not checked here)"
 exit 0

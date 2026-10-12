@@ -94,7 +94,7 @@ summarize-run: ## Build the indexer and run the function-summary level keep-awak
 	go build -o bin/indexer ./cmd/indexer
 	caffeinate -i bin/indexer summarize --level function --concurrency 1
 
-summarize-pause: ## Interrupt the running summarize (exit 0 stopped, 2 nothing running, 3 did not exit)
+summarize-pause: ## Interrupt the running summarize (exit 0 stopped, 2 nothing running, 3 did not exit, 4 ambiguous)
 	@sh scripts/summarize-pause.sh
 
 summarize-status: ## Print current-prompt-version summary counts and an ETA
