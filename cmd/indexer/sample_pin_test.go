@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"slices"
 	"testing"
 )
@@ -22,19 +21,5 @@ func TestAuditSampleSeed3Pinned(t *testing.T) {
 	}
 	if !slices.Equal(got, wantSeed3) {
 		t.Errorf("audit seed 3 = %q, want %q", got, wantSeed3)
-	}
-}
-
-func TestGateDrawSeed3Pinned(t *testing.T) {
-	var rows []gateEntry
-	for i := 0; i < 100; i++ {
-		rows = append(rows, gateEntry{QualifiedName: fmt.Sprintf("k8s.io/kubernetes/pkg/p.fn%03d", i)})
-	}
-	var got []string
-	for _, r := range drawGate(rows, 10, 3) {
-		got = append(got, r.QualifiedName)
-	}
-	if !slices.Equal(got, wantSeed3) {
-		t.Errorf("gate seed 3 = %q, want %q", got, wantSeed3)
 	}
 }

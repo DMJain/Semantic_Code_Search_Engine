@@ -529,7 +529,7 @@ $ make verify-slice            -> match; exit 0
 
 ### S1-16 / T14 second half - quality gate (PREPARED, awaiting the author)
 
-The gate sample was summarized: `bin/indexer summarize --level function --sample 200 --seed 3` -> `eligible 6673, selected 200, done 200, failed 0`; among the 200, `too_large = 0` and `truncated = 0` (all `fn-v1`). A reproducible helper `indexer gate` (`cmd/indexer/gate.go`, read-only, no Ollama) draws 30 of the done rows with seed 3 and writes the grading artifacts:
+The gate sample was summarized: `bin/indexer summarize --level function --sample 200 --seed 3` -> `eligible 6673, selected 200, done 200, failed 0`; among the 200, `too_large = 0` and `truncated = 0` (all `fn-v1`). A reproducible helper `tools gate` (`go run ./cmd/tools gate`, `cmd/tools/gate.go`; moved out of the indexer by S1C-06, D-071; read-only, no Ollama) draws 30 of the done rows with seed 3 and writes the grading artifacts:
 - `.scratch/S1/quality-gate-fn-v1.md` — 30 sections (qualified name, input_hash, code, summary, blank verdict).
 - `.scratch/S1/quality-gate-fn-v1.jsonl` — 30 lines `{qualified_name, input_hash, verdict:"", criterion:""}`.
 

@@ -24,7 +24,6 @@ var commands = []cli.Command{
 	{Name: "audit", Short: "check a seeded sample of stored symbols against the source", Run: runAudit},
 	{Name: "chunk", Short: "split symbols into chunks (not implemented)", Run: stub("chunk")},
 	{Name: "summarize", Short: "summarize in-slice functions with a local LLM", Run: runSummarize},
-	{Name: "gate", Short: "print the quality-gate sample with code and write the grade sheet (S1-T14)", Run: runGate},
 	{Name: "embed", Short: "embed chunks and summaries (not implemented)", Run: stub("embed")},
 }
 

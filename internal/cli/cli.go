@@ -1,5 +1,5 @@
-// Package cli is the command-dispatch boilerplate shared by the indexer and
-// eval binaries: a command table, usage text and flag-set creation, so a new
+// Package cli is the command-dispatch boilerplate shared by the indexer,
+// eval and tools binaries: a command table, usage text and flag-set creation, so a new
 // subcommand is one table entry.
 package cli
 

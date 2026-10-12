@@ -1,0 +1,36 @@
+// Command tools holds one-off author tooling that must not ship in the
+// production indexer binary (S1C-06, D-071). Its first command, gate,
+// reproduces the S1 quality-gate sample and writes the grading sheet.
+//
+// Usage:
+//
+//	tools <command> [flags]
+package main
+
+import (
+	"flag"
+	"log/slog"
+	"os"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/cli"
+)
+
+var commands = []cli.Command{
+	{Name: "gate", Short: "print the quality-gate sample with code and write the grade sheet (S1-T14)", Run: runGate},
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	os.Exit(run(os.Args[1:]))
+}
+
+// run dispatches to a subcommand and returns the process exit code.
+func run(args []string) int {
+	return cli.App{Name: "tools", Commands: commands}.Run(args)
+}
+
+// newFlagSet returns the flag set every subcommand uses, so help text and
+// error handling stay consistent.
+func newFlagSet(name string) *flag.FlagSet {
+	return cli.NewFlagSet("tools", name)
+}
