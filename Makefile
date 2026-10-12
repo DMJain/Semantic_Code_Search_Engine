@@ -94,12 +94,8 @@ summarize-run: ## Build the indexer and run the function-summary level keep-awak
 	go build -o bin/indexer ./cmd/indexer
 	caffeinate -i bin/indexer summarize --level function --concurrency 1
 
-summarize-pause: ## Interrupt the running summarize; the in-flight item finishes before exit
-	@if pkill -INT -f "bin/indexer summarize"; then \
-		echo "summarize-pause: sent SIGINT; the in-flight item finishes before exit"; \
-	else \
-		echo "summarize-pause: no running 'bin/indexer summarize' process"; \
-	fi
+summarize-pause: ## Interrupt the running summarize (exit 0 stopped, 2 nothing running, 3 did not exit)
+	@sh scripts/summarize-pause.sh
 
 summarize-status: ## Print current-prompt-version summary counts and an ETA
 	go run ./cmd/indexer summarize --status
