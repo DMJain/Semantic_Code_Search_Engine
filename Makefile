@@ -6,8 +6,9 @@ GOLANGCI_LINT_VERSION := v2.14.0
 # Newest actionlint that builds/runs under GOTOOLCHAIN=local (see S1 Results).
 ACTIONLINT_VERSION := v1.7.12
 WORKFLOW ?= .github/workflows/ci.yml
+SHELLCHECK ?= shellcheck
 
-.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean lint lint-ci ci-local build summarize-run summarize-pause summarize-status verify-slice
+.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean test-live lint lint-scripts lint-ci ci-local build summarize-run summarize-pause summarize-status verify-slice
 
 up: ## Start Postgres and wait until it is healthy
 	docker compose up -d --wait
@@ -65,6 +66,20 @@ test: ## Run every test fresh (uncached); fail if the Postgres integration test 
 		exit 1; \
 	fi
 
+# Opt-in live-model check (S1C-04). Not part of `make test`/`ci-local`: it needs
+# a running model server and must fail, never skip, when there is none.
+test-live: ## Run the live summarize test against OLLAMA_URL; fails (never skips) if the server is unreachable
+	@url=$${OLLAMA_URL:-}; \
+	if [ -z "$$url" ]; then echo "test-live: OLLAMA_URL is not set; the model server is unreachable"; exit 1; fi; \
+	if ! curl -fsS --max-time 5 -o /dev/null "$$url/api/tags"; then \
+		echo "test-live: model server unreachable at $$url (start Ollama, or fix OLLAMA_URL)"; exit 1; \
+	fi; \
+	tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	go test -tags live -count=1 -v -run '^TestLiveSummarize$$' ./internal/summarize >"$$tmp" 2>&1; status=$$?; \
+	cat "$$tmp"; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -q -- '--- SKIP' "$$tmp"; then echo "ERROR: the live test was skipped"; exit 1; fi
+
 test-db-clean: ## Drop leftover codesearch_test_* throwaway databases from interrupted test runs
 	@for db in $$(docker compose exec -T postgres psql -tA -v ON_ERROR_STOP=1 \
 		-U $${POSTGRES_USER:-codesearch} -d postgres \
@@ -78,6 +93,14 @@ lint: ## Run golangci-lint (brew install golangci-lint)
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint not found: brew install golangci-lint (CI uses $(GOLANGCI_LINT_VERSION))"; exit 1; }
 	golangci-lint run
 
+lint-scripts: ## shellcheck scripts/*.sh when installed; otherwise print an explicit "skipped" line
+	@if command -v $(SHELLCHECK) >/dev/null 2>&1; then \
+		echo "lint-scripts: running $(SHELLCHECK) on scripts/*.sh"; \
+		$(SHELLCHECK) scripts/*.sh; \
+	else \
+		echo "lint-scripts: skipped: not installed ($(SHELLCHECK); brew install shellcheck)"; \
+	fi
+
 lint-ci: ## Validate the workflow with a pinned actionlint (no install needed)
 	GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) $(WORKFLOW)
 
@@ -85,6 +108,7 @@ ci-local: ## Mirror ci.yml locally against the compose Postgres (no skips allowe
 	CGO_ENABLED=1 go vet ./...
 	CGO_ENABLED=1 $(MAKE) test
 	$(MAKE) lint
+	$(MAKE) lint-scripts
 	$(MAKE) lint-ci
 
 build: ## Build all binaries into bin/

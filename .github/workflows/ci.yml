@@ -54,3 +54,5 @@ jobs:
           version: v2.14.0
       - name: actionlint (pinned)
         run: make lint-ci
+      - name: shellcheck scripts
+        run: make lint-scripts
