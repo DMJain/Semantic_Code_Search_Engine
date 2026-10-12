@@ -544,3 +544,18 @@ Cause (verified): `Status` set `Remaining` from the `pending` count. Rows are wr
 Fix (commit 6971672): `Status` counted eligible rows with `r.eligible(ctx)` (the same query `Run` uses) and `statusReport` set `Remaining = max(0, eligible - done - failed)`, subtracting failed unless the status call was a `--retry-failed` run; the CLI passed the existing flag through and `pending` stayed printed as in-flight. Tests: `TestStatusReportETA` (eligible 6673, done 379, 600 fn/h gives remaining 6294 and an ETA of about 10.5 h), `TestStatusReportFailedRemaining` and `TestStatusReportNoProgress` (delta 0 and delta below 0 give no ETA). `bin/indexer` was not rebuilt, so the live run was untouched. The optional longer-window or run-start rate was left as it was.
 
 Superseded: S1C-12 replaced the 30-second sampled rate with a rate from the last 100 timestamped completions of the current prompt version, so the windowed-rate concern above no longer applies.
+
+### S1 close-out sign-off (2026-10-13)
+
+Checked locally only: `make ci-local` (vet, strict test run with 0 `--- SKIP`, `golangci-lint` "0 issues.", `lint-scripts: running shellcheck on scripts/*.sh`, actionlint) passes; nothing is pushed (D-069). `make verify-slice`: slice hash match. `select prompt_version, status, count(*) from summaries where level='function' group by 1,2` returns only `fn-v1|done|6694`; `make summarize-status` shows pending 0, done 6694, failed 0, remaining 0, so the overnight run is complete and no resume or second reading was needed (owner accepted recording this instead).
+
+Deviations from the original S1 spec, all accepted:
+- Slice has three roots; client-go is dropped (D-070). Eligible functions 6,673, below the 15,000-25,000 expectation (D-070).
+- Corrected mining yield is 25 against the 30 threshold; accepted, question set is finished in S4 (D-072). D-070's 150 was overstated.
+- The one-off gate command lives in `cmd/tools`; the workspace fallback in `callgraph-gt --check` and the retry-once on rate limiting are kept and documented (D-071).
+- `summarize --status` ETA is derived from the last 100 timestamped completions of the current prompt version (nullable `summaries.completed_at`, migration 00004), prints "ETA unknown" with a reason below two completions, and returns immediately.
+- Failed rows are refreshed when their input hash changes; a moved symbol keeps its summary; `make summarize-pause` signals only the real process; `make test-live` is the opt-in live-model target and the default run needs no model server.
+- Added `make mine-yield` so the probe reads `GITHUB_TOKEN` and `KUBE_TAG` from `.env`.
+
+The function-summary run is complete; later stages (S2 to S4) continue from these rows.
+
