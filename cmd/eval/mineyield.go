@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ type mineResult struct {
 	ByPrefix          map[string]int `json:"by_prefix"`
 	WindowsAtCap      int            `json:"windows_at_cap"`
 	PRsScanned        int            `json:"prs_scanned"`
+	Rejections        map[string]int `json:"rejections"`
 }
 
 // window is a closed date range (UTC, inclusive on both ends) used for a
@@ -97,6 +99,7 @@ func runMineYield(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("yield_12m=%d yield_18m_extension=%d windows_at_cap=%d\n",
 		res.Yield12m, res.Yield18mExtension, res.WindowsAtCap)
+	fmt.Println(formatRejections(res.Rejections))
 	return nil
 }
 
@@ -121,7 +124,7 @@ func kubeTagDate(ctx context.Context, kubeDir, tag string) (time.Time, error) {
 // mine walks the weekly windows (newest first), splitting any window at the
 // search cap, and counts qualifying merged PRs.
 func mine(ctx context.Context, client *github.Client, o mineOptions) (mineResult, error) {
-	res := mineResult{Tag: o.tag, WindowMonths: o.months, ByPrefix: map[string]int{}}
+	res := mineResult{Tag: o.tag, WindowMonths: o.months, ByPrefix: map[string]int{}, Rejections: map[string]int{}}
 	for _, p := range walk.SlicePrefixes {
 		res.ByPrefix[p] = 0
 	}
@@ -159,11 +162,16 @@ func mine(ctx context.Context, client *github.Client, o mineOptions) (mineResult
 			}
 			seen[it.Number] = true
 			res.PRsScanned++
-			ok, prefixes, err := qualifies(ctx, client, o, it.Number)
+			if !closesIssue(it.Body) {
+				res.Rejections[reasonNoClosingIssue]++
+				continue
+			}
+			reason, prefixes, err := qualifies(ctx, client, o, it.Number)
 			if err != nil {
 				return res, err
 			}
-			if !ok {
+			if reason != "" {
+				res.Rejections[reason]++
 				continue
 			}
 			if !mergedAt(it, w).Before(cutoff12) {
@@ -179,40 +187,87 @@ func mine(ctx context.Context, client *github.Client, o mineOptions) (mineResult
 	return res, nil
 }
 
-// qualifies reports whether a PR counts: 1-5 changed non-test non-generated
-// Go files, all inside the candidate slice and all present at the pinned tag.
-func qualifies(ctx context.Context, client *github.Client, o mineOptions, number int) (bool, []string, error) {
+// Rejection reasons, in the order they are printed.
+const (
+	reasonNonGo          = "non-Go file"
+	reasonTestFile       = "test file"
+	reasonGenerated      = "generated file"
+	reasonOutsideSlice   = "outside slice"
+	reasonTooManyFiles   = "too many files"
+	reasonNoClosingIssue = "no closing issue"
+)
+
+var rejectionReasons = []string{
+	reasonNonGo, reasonTestFile, reasonGenerated,
+	reasonOutsideSlice, reasonTooManyFiles, reasonNoClosingIssue,
+}
+
+// formatRejections renders the per-reason rejection counts on one line.
+func formatRejections(m map[string]int) string {
+	parts := make([]string, 0, len(rejectionReasons))
+	for _, r := range rejectionReasons {
+		parts = append(parts, fmt.Sprintf("%s=%d", r, m[r]))
+	}
+	return "rejections: " + strings.Join(parts, " ")
+}
+
+// closingRef matches a closing keyword followed by an issue reference, the
+// forms GitHub itself treats as closing ("Fixes #1", "closes org/repo#2").
+var closingRef = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:[\w.-]+/[\w.-]+)?#\d+`)
+
+// closesIssue reports whether a PR body carries a closing-issue reference. The
+// REST search can only express "links an issue" (linked:issue), not "closed
+// one", so the query stays as a coarse pre-filter and this check is applied
+// after fetching, on the body the search already returns (no extra call).
+func closesIssue(body string) bool { return closingRef.MatchString(body) }
+
+// qualifies reports why a PR does not count, or "" when it does: 1-5 changed
+// files, every one a non-test non-generated Go file inside the candidate slice
+// and present at the pinned tag. Any other file type rejects the whole PR.
+func qualifies(ctx context.Context, client *github.Client, o mineOptions, number int) (string, []string, error) {
 	files, err := client.AllPullFiles(ctx, o.repo, number)
 	if err != nil {
-		return false, nil, err
+		return "", nil, err
 	}
-	kept := 0
+	if len(files) < 1 || len(files) > 5 {
+		return reasonTooManyFiles, nil, nil
+	}
 	var prefixes []string
 	for _, f := range files {
 		p := f.Filename
 		if !strings.HasSuffix(p, ".go") {
-			continue
+			return reasonNonGo, nil, nil
 		}
-		if _, excluded := walk.Excluded(o.kubeDir, p); excluded {
-			continue // test, generated, vendor or build-constraint file
+		if rule, excluded := walk.Excluded(o.kubeDir, p); excluded {
+			return exclusionReason(rule), nil, nil
 		}
 		if _, err := os.Stat(filepath.Join(o.kubeDir, filepath.FromSlash(p))); err != nil {
-			return false, nil, nil // must exist at the pinned tag
+			return reasonOutsideSlice, nil, nil // must exist at the pinned tag
 		}
 		if !walk.InSlice(p) {
-			return false, nil, nil // every kept file must be in the slice
+			return reasonOutsideSlice, nil, nil
 		}
-		kept++
 		for _, pre := range walk.SlicePrefixes {
 			if p == pre || strings.HasPrefix(p, pre+"/") {
 				prefixes = append(prefixes, pre)
 			}
 		}
 	}
-	if kept < 1 || kept > 5 {
-		return false, nil, nil
+	return "", dedupe(prefixes), nil
+}
+
+// exclusionReason maps a walk exclusion rule to a probe rejection reason.
+// Vendor and build-constraint files are not part of the corpus, so they count
+// as outside the slice.
+func exclusionReason(rule string) string {
+	switch rule {
+	case "test_go", "testdata":
+		return reasonTestFile
+	case "zz_generated", "pb_go", "client_go_generated":
+		return reasonGenerated
+	default:
+		return reasonOutsideSlice
 	}
-	return true, dedupe(prefixes), nil
 }
 
 // weeklyWindows returns closed 7-day windows covering [tag-<months>, tag],

@@ -97,6 +97,7 @@ type SearchItem struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
 	HTMLURL     string `json:"html_url"`
+	Body        string `json:"body"`
 	PullRequest *struct {
 		MergedAt *time.Time `json:"merged_at"`
 	} `json:"pull_request"`

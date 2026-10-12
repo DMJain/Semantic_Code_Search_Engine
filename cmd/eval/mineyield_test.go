@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -77,13 +78,13 @@ func TestMineYieldCountsEligiblePR(t *testing.T) {
 			atomic.AddInt32(&searchCalls, 1)
 			_, end, ok := rangeFromQuery(r.URL.Query().Get("q"))
 			if ok && !end.Before(time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)) {
-				fmt.Fprint(w, `{"total_count":1,"items":[{"number":42,"title":"fix","pull_request":{"merged_at":"2026-08-25T00:00:00Z"}}]}`)
+				fmt.Fprint(w, `{"total_count":1,"items":[{"number":42,"title":"fix","body":"Fixes #10","pull_request":{"merged_at":"2026-08-25T00:00:00Z"}}]}`)
 				return
 			}
 			fmt.Fprint(w, `{"total_count":0,"items":[]}`)
 		case "/repos/kubernetes/kubernetes/pulls/42/files":
 			atomic.AddInt32(&fileCalls, 1)
-			fmt.Fprint(w, `[{"filename":"pkg/scheduler/sched.go","status":"modified"},{"filename":"pkg/scheduler/sched_test.go","status":"modified"}]`)
+			fmt.Fprint(w, `[{"filename":"pkg/scheduler/sched.go","status":"modified"}]`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -125,7 +126,7 @@ func TestMineYieldRejectsOutOfSlicePR(t *testing.T) {
 		case "/search/issues":
 			_, end, _ := rangeFromQuery(r.URL.Query().Get("q"))
 			if !end.Before(time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)) {
-				fmt.Fprint(w, `{"total_count":1,"items":[{"number":9,"pull_request":{"merged_at":"2026-08-25T00:00:00Z"}}]}`)
+				fmt.Fprint(w, `{"total_count":1,"items":[{"number":9,"body":"Closes #3","pull_request":{"merged_at":"2026-08-25T00:00:00Z"}}]}`)
 				return
 			}
 			fmt.Fprint(w, `{"total_count":0,"items":[]}`)
@@ -253,5 +254,100 @@ func TestMineYieldTokenNotLogged(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "mine-yield start") {
 		t.Errorf("expected a start log line, got %q", logged.String())
+	}
+}
+
+// minePR runs the probe over one recorded merged PR (number 7, merged inside
+// the window) with the given search-item body and changed files.
+func minePR(t *testing.T, kubeDir, body, filesJSON string) mineResult {
+	t.Helper()
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rate_limit":
+			fmt.Fprint(w, `{"resources":{"search":{"limit":30,"remaining":30,"reset":0}}}`)
+		case "/search/issues":
+			_, end, _ := rangeFromQuery(r.URL.Query().Get("q"))
+			if !end.Before(time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)) {
+				fmt.Fprintf(w, `{"total_count":1,"items":[{"number":7,"body":%s,"pull_request":{"merged_at":"2026-08-25T00:00:00Z"}}]}`, bodyJSON)
+				return
+			}
+			fmt.Fprint(w, `{"total_count":0,"items":[]}`)
+		case "/repos/kubernetes/kubernetes/pulls/7/files":
+			fmt.Fprint(w, filesJSON)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := github.NewClient("tok", github.WithBaseURL(srv.URL))
+	res, err := mine(context.Background(), c, mineOptions{
+		repo: kubeRepo, tag: "v1.37.0", tagDate: testTag, months: 12, kubeDir: kubeDir,
+	})
+	if err != nil {
+		t.Fatalf("mine: %v", err)
+	}
+	return res
+}
+
+func TestMineYieldRejectsPRWithNonGoFile(t *testing.T) {
+	kubeDir := t.TempDir()
+	writeFixture(t, kubeDir, "pkg/scheduler/sched.go", "package scheduler\n")
+	res := minePR(t, kubeDir, "Fixes #1",
+		`[{"filename":"pkg/scheduler/sched.go"},{"filename":".github/workflows/ci.yaml"}]`)
+	if res.Yield12m != 0 {
+		t.Errorf("yield_12m = %d, want 0 (workflow file changed)", res.Yield12m)
+	}
+	if res.Rejections["non-Go file"] != 1 {
+		t.Errorf("rejections = %v, want non-Go file=1", res.Rejections)
+	}
+}
+
+func TestMineYieldRejectsPRThatOnlyLinksIssue(t *testing.T) {
+	kubeDir := t.TempDir()
+	writeFixture(t, kubeDir, "pkg/scheduler/sched.go", "package scheduler\n")
+	files := `[{"filename":"pkg/scheduler/sched.go"}]`
+
+	linked := minePR(t, kubeDir, "Related to #123, see also #456", files)
+	if linked.Yield12m != 0 || linked.Rejections["no closing issue"] != 1 {
+		t.Errorf("link-only: yield=%d rejections=%v, want 0 and no closing issue=1", linked.Yield12m, linked.Rejections)
+	}
+	closed := minePR(t, kubeDir, "This change\n\nFixes #123", files)
+	if closed.Yield12m != 1 {
+		t.Errorf("closing PR: yield=%d rejections=%v, want 1", closed.Yield12m, closed.Rejections)
+	}
+}
+
+func TestMineYieldCountsEachRejectionReason(t *testing.T) {
+	kubeDir := t.TempDir()
+	writeFixture(t, kubeDir, "pkg/scheduler/sched.go", "package scheduler\n")
+	writeFixture(t, kubeDir, "pkg/scheduler/sched_test.go", "package scheduler\n")
+	writeFixture(t, kubeDir, "pkg/scheduler/zz_generated.deepcopy.go", "package scheduler\n")
+	writeFixture(t, kubeDir, "pkg/api/types.go", "package api\n")
+	cases := []struct {
+		reason string
+		files  string
+	}{
+		{"test file", `[{"filename":"pkg/scheduler/sched.go"},{"filename":"pkg/scheduler/sched_test.go"}]`},
+		{"generated file", `[{"filename":"pkg/scheduler/zz_generated.deepcopy.go"}]`},
+		{"outside slice", `[{"filename":"pkg/api/types.go"}]`},
+		{"too many files", `[{"filename":"pkg/scheduler/a.go"},{"filename":"pkg/scheduler/b.go"},{"filename":"pkg/scheduler/c.go"},{"filename":"pkg/scheduler/d.go"},{"filename":"pkg/scheduler/e.go"},{"filename":"pkg/scheduler/f.go"}]`},
+	}
+	for _, tc := range cases {
+		res := minePR(t, kubeDir, "Closes #9", tc.files)
+		if res.Yield12m != 0 || res.Rejections[tc.reason] != 1 {
+			t.Errorf("%s: yield=%d rejections=%v, want 0 and %s=1", tc.reason, res.Yield12m, res.Rejections, tc.reason)
+		}
+	}
+}
+
+func TestFormatRejectionsPrintsEveryReason(t *testing.T) {
+	got := formatRejections(map[string]int{"test file": 2, "no closing issue": 5})
+	want := "rejections: non-Go file=0 test file=2 generated file=0 outside slice=0 too many files=0 no closing issue=5"
+	if got != want {
+		t.Errorf("formatRejections = %q, want %q", got, want)
 	}
 }
