@@ -227,7 +227,7 @@ func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
 				raw_calls = EXCLUDED.raw_calls
 			RETURNING id`,
 			pf.id, s.Kind, s.Name, s.QualifiedName,
-			nullIfEmpty(s.Receiver), s.Signature, s.StartLine, s.EndLine, nullIfEmpty(s.Doc),
+			store.NullIfEmpty(s.Receiver), s.Signature, s.StartLine, s.EndLine, store.NullIfEmpty(s.Doc),
 			rawCallsOrEmpty(s.RawCalls),
 		).Scan(&id)
 		if err != nil {
@@ -277,14 +277,6 @@ func deleteVanished(ctx context.Context, tx pgx.Tx, fileID int64, seen []int64) 
 		deleted = append(deleted, id)
 	}
 	return deleted, rows.Err()
-}
-
-// nullIfEmpty maps an empty string to SQL NULL.
-func nullIfEmpty(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
 
 // rawCallsOrEmpty maps a nil slice to an empty one, because raw_calls is

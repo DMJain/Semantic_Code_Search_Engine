@@ -5,16 +5,16 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/seeded"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/walk"
 )
 
@@ -332,7 +332,7 @@ func (r *Runner) finalize(ctx context.Context, id int64, status, text, reason st
 	if _, err := tx.Exec(ctx, `
 		UPDATE summaries SET status = $1, text = $2, reason = $3
 		WHERE level = 'function' AND target_id = $4 AND prompt_version = $5`,
-		status, nullIfEmpty(text), nullIfEmpty(reason), id, PromptVersion); err != nil {
+		status, store.NullIfEmpty(text), store.NullIfEmpty(reason), id, PromptVersion); err != nil {
 		return fmt.Errorf("finalize %d: %w", id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -371,15 +371,6 @@ func (r *Runner) out() io.Writer {
 	return r.Out
 }
 
-// nullIfEmpty maps an empty string to SQL NULL, so a done row stores its text
-// and a failed row stores only its reason (the other column stays NULL).
-func nullIfEmpty(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
 // Candidate is one eligible function offered to [Sample]: its symbol id, its
 // qualified name (the deterministic ordering key) and its slice root.
 type Candidate struct {
@@ -389,7 +380,7 @@ type Candidate struct {
 }
 
 // Sample selects at most n candidate ids deterministically. Candidates are
-// grouped by Root in walk.SlicePrefixes order; the n slots are allocated across
+// grouped by Root in walk.SliceRoots order; the n slots are allocated across
 // the roots in proportion to each root's eligible count by the largest-
 // remainder (Hare quota) method; within a root the candidates, sorted by
 // QualifiedName, are shuffled with a math/rand generator seeded by seed and the
@@ -419,15 +410,14 @@ func Sample(cands []Candidate, n int, seed int64) []int64 {
 	}
 	quotas := allocate(n, byRoot, roots)
 
-	rng := rand.New(rand.NewSource(seed))
+	groups := make([][]Candidate, len(roots))
+	qs := make([]int, len(roots))
+	for i, root := range roots {
+		groups[i], qs[i] = byRoot[root], quotas[root]
+	}
 	var ids []int64
-	for _, root := range roots {
-		group := byRoot[root]
-		rng.Shuffle(len(group), func(i, j int) { group[i], group[j] = group[j], group[i] })
-		q := min(quotas[root], len(group))
-		for _, c := range group[:q] {
-			ids = append(ids, c.ID)
-		}
+	for _, c := range seeded.Stratified(groups, qs, seed) {
+		ids = append(ids, c.ID)
 	}
 	return ids
 }
@@ -484,7 +474,7 @@ func allocateCounts(n int, sizes map[string]int, order []string) map[string]int 
 	return quotas
 }
 
-// rootOrder returns the roots present in ordered, walk.SlicePrefixes first in
+// rootOrder returns the roots present in ordered, walk.SliceRoots first in
 // their configured order, then any other roots (there should be none) sorted by
 // name so the result is independent of map iteration.
 func rootOrder(ordered []Candidate) []string {
@@ -493,8 +483,9 @@ func rootOrder(ordered []Candidate) []string {
 		seen[c.Root] = true
 	}
 	var roots []string
-	known := make(map[string]bool, len(walk.SlicePrefixes))
-	for _, p := range walk.SlicePrefixes {
+	sliceRoots := walk.SliceRoots()
+	known := make(map[string]bool, len(sliceRoots))
+	for _, p := range sliceRoots {
 		known[p] = true
 		if seen[p] {
 			roots = append(roots, p)
@@ -515,7 +506,7 @@ func rootOrder(ordered []Candidate) []string {
 func sampleCandidates(rows []symbolRow) []Candidate {
 	out := make([]Candidate, len(rows))
 	for i, sr := range rows {
-		out[i] = Candidate{ID: sr.id, QualifiedName: sr.qualifiedName, Root: SliceRoot(sr.path)}
+		out[i] = Candidate{ID: sr.id, QualifiedName: sr.qualifiedName, Root: walk.SliceRootOf(sr.path)}
 	}
 	return out
 }
@@ -533,15 +524,4 @@ func filterByID(rows []symbolRow, ids []int64) []symbolRow {
 		}
 	}
 	return out
-}
-
-// SliceRoot returns the walk.SlicePrefixes entry path belongs to, or "" when
-// the path is outside the slice.
-func SliceRoot(path string) string {
-	for _, p := range walk.SlicePrefixes {
-		if path == p || strings.HasPrefix(path, p+"/") {
-			return p
-		}
-	}
-	return ""
 }

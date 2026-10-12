@@ -63,12 +63,6 @@ func LoadEnv() Config {
 	return loadEnv(os.Getenv)
 }
 
-// LoadOllama reads the Ollama-related settings without requiring DATABASE_URL;
-// it is LoadEnv kept as a named alias for the Ollama-only doctor probe modes.
-func LoadOllama() Config {
-	return LoadEnv()
-}
-
 func load(getenv func(string) string) (Config, error) {
 	cfg := loadEnv(getenv)
 

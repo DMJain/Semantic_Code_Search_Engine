@@ -29,7 +29,7 @@ const (
 // (prompt caching), and whether over-length embed input is rejected with
 // truncation disabled.
 func runOllamaChecks(ctx context.Context) error {
-	cfg := config.LoadOllama()
+	cfg := config.LoadEnv()
 
 	models, err := llm.ListOllamaModels(ctx, http.DefaultClient, cfg.OllamaURL)
 	if err != nil {

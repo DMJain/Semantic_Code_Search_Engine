@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/seeded"
 )
 
 // Draft prompt versions used only by the throughput benchmark (S1-T11). File-
@@ -168,15 +169,12 @@ func SampleFiles(files []FileCandidate, n int, seed int64) []FileCandidate {
 	}
 	quotas := allocateCounts(n, sizes, present)
 
-	rng := rand.New(rand.NewSource(seed))
-	var out []FileCandidate
-	for _, s := range present {
-		group := byStratum[s]
-		rng.Shuffle(len(group), func(i, j int) { group[i], group[j] = group[j], group[i] })
-		q := min(quotas[s], len(group))
-		out = append(out, group[:q]...)
+	groups := make([][]FileCandidate, len(present))
+	qs := make([]int, len(present))
+	for i, s := range present {
+		groups[i], qs[i] = byStratum[s], quotas[s]
 	}
-	return out
+	return seeded.Stratified(groups, qs, seed)
 }
 
 // Bench measures summarization throughput without writing any summary row

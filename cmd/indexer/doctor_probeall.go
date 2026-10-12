@@ -24,7 +24,7 @@ var probeDocs = []embed.Document{
 // line per model. It fails only on a bad probe or a skipped configured model,
 // so an optional model that is not pulled does not break the run.
 func runProbeAll(ctx context.Context) error {
-	cfg := config.LoadOllama()
+	cfg := config.LoadEnv()
 
 	models, err := llm.ListOllamaModels(ctx, http.DefaultClient, cfg.OllamaURL)
 	if err != nil {

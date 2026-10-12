@@ -21,10 +21,8 @@ import (
 // dropped root such as client-go is never loaded.
 func slicePatterns() []string {
 	var patterns []string
-	for _, prefix := range walk.SlicePrefixes {
-		if walk.InSlice(prefix) {
-			patterns = append(patterns, "./"+prefix+"/...")
-		}
+	for _, root := range walk.SliceRoots() {
+		patterns = append(patterns, "./"+root+"/...")
 	}
 	return patterns
 }

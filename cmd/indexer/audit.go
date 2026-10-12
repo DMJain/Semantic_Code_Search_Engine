@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/seeded"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/source"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/summarize"
 )
@@ -90,16 +90,7 @@ func selectAuditRows(ctx context.Context, pool *pgxpool.Pool) ([]auditRow, error
 // already be ordered by qualified name, and the seeded shuffle then makes the
 // same (rows, seed) pair always yield the same sample.
 func sampleRows(rows []auditRow, n int, seed int64) []auditRow {
-	shuffled := slices.Clone(rows)
-	rng := rand.New(rand.NewSource(seed))
-	rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-	if n < 0 {
-		n = 0
-	}
-	if n > len(shuffled) {
-		n = len(shuffled)
-	}
-	return shuffled[:n]
+	return seeded.Draw(rows, n, seed)
 }
 
 // auditSymbols samples in-slice symbols, checks each against its source lines,
@@ -159,7 +150,7 @@ func checkSymbol(r auditRow, src []byte) string {
 		return fmt.Sprintf("first line %q does not declare name %q", first, r.Name)
 	}
 	if r.Receiver != "" {
-		got, ok := receiverFromDecl(strings.Join(lines[r.StartLine-1:], "\n"))
+		got, ok := receiverFromDecl(source.Range(lines, r.StartLine, len(lines)))
 		if !ok || got != r.Receiver {
 			return fmt.Sprintf("receiver mismatch: stored %q, source %q", r.Receiver, got)
 		}

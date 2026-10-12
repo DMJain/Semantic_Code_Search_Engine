@@ -9,30 +9,23 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/cli"
 )
 
-type command struct {
-	name  string
-	short string
-	run   func(ctx context.Context, args []string) error
-}
-
-var commands = []command{
-	{"migrate", "apply database migrations", runMigrate},
-	{"doctor", "check Postgres, extensions, Ollama and models", runDoctor},
-	{"fetch-repo", "shallow-clone Kubernetes at KUBE_TAG into KUBE_DIR", runFetchRepo},
-	{"walk", "walk the corpus and fill the files table", runWalk},
-	{"parse", "parse Go files into function and method symbols", runParse},
-	{"audit", "check a seeded sample of stored symbols against the source", runAudit},
-	{"chunk", "split symbols into chunks (not implemented)", stub("chunk")},
-	{"summarize", "summarize in-slice functions with a local LLM", runSummarize},
-	{"gate", "print the quality-gate sample with code and write the grade sheet (S1-T14)", runGate},
-	{"embed", "embed chunks and summaries (not implemented)", stub("embed")},
+var commands = []cli.Command{
+	{Name: "migrate", Short: "apply database migrations", Run: runMigrate},
+	{Name: "doctor", Short: "check Postgres, extensions, Ollama and models", Run: runDoctor},
+	{Name: "fetch-repo", Short: "shallow-clone Kubernetes at KUBE_TAG into KUBE_DIR", Run: runFetchRepo},
+	{Name: "walk", Short: "walk the corpus and fill the files table", Run: runWalk},
+	{Name: "parse", Short: "parse Go files into function and method symbols", Run: runParse},
+	{Name: "audit", Short: "check a seeded sample of stored symbols against the source", Run: runAudit},
+	{Name: "chunk", Short: "split symbols into chunks (not implemented)", Run: stub("chunk")},
+	{Name: "summarize", Short: "summarize in-slice functions with a local LLM", Run: runSummarize},
+	{Name: "gate", Short: "print the quality-gate sample with code and write the grade sheet (S1-T14)", Run: runGate},
+	{Name: "embed", Short: "embed chunks and summaries (not implemented)", Run: stub("embed")},
 }
 
 func main() {
@@ -42,40 +35,7 @@ func main() {
 
 // run dispatches to a subcommand and returns the process exit code.
 func run(args []string) int {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		usage()
-		return 2
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	name := args[0]
-	for _, c := range commands {
-		if c.name != name {
-			continue
-		}
-		err := c.run(ctx, args[1:])
-		switch {
-		case err == nil:
-			return 0
-		case errors.Is(err, flag.ErrHelp):
-			return 2
-		default:
-			fmt.Fprintf(os.Stderr, "indexer %s: %v\n", name, err)
-			return 1
-		}
-	}
-	fmt.Fprintf(os.Stderr, "indexer: unknown command %q\n\n", name)
-	usage()
-	return 2
-}
-
-func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: indexer <command> [flags]\n\nCommands:")
-	for _, c := range commands {
-		fmt.Fprintf(os.Stderr, "  %-12s %s\n", c.name, c.short)
-	}
+	return cli.App{Name: "indexer", Commands: commands}.Run(args)
 }
 
 // parseFlags parses a subcommand's flags with the shared flag set, so -h
@@ -87,7 +47,7 @@ func parseFlags(name string, args []string) error {
 // newFlagSet returns the flag set every subcommand uses, so help text and
 // error handling stay the same everywhere.
 func newFlagSet(name string) *flag.FlagSet {
-	return flag.NewFlagSet("indexer "+name, flag.ContinueOnError)
+	return cli.NewFlagSet("indexer", name)
 }
 
 func stub(name string) func(context.Context, []string) error {

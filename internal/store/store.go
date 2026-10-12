@@ -80,3 +80,12 @@ func newProvider(databaseURL string) (*goose.Provider, error) {
 	}
 	return provider, nil
 }
+
+// NullIfEmpty maps an empty string to SQL NULL, so an optional text column
+// stores NULL rather than an empty string.
+func NullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

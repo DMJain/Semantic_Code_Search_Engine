@@ -38,3 +38,29 @@ func hasAnyPrefix(path string, prefixes []string) bool {
 	}
 	return false
 }
+
+// SliceRoots returns the slice's roots: SlicePrefixes in order, without any
+// prefix the drop list removes whole. Samples are stratified by these roots.
+func SliceRoots() []string {
+	var roots []string
+	for _, p := range SlicePrefixes {
+		if InSlice(p) {
+			roots = append(roots, p)
+		}
+	}
+	return roots
+}
+
+// SliceRootOf returns the slice root path belongs to, or "" when the path is
+// outside the slice.
+func SliceRootOf(path string) string {
+	if !InSlice(path) {
+		return ""
+	}
+	for _, p := range SlicePrefixes {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return p
+		}
+	}
+	return ""
+}

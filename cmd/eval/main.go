@@ -4,24 +4,15 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/cli"
 )
 
-type command struct {
-	name  string
-	short string
-	run   func(ctx context.Context, args []string) error
-}
-
-var commands = []command{
-	{"mine-yield", "probe GitHub for minable merged PRs in the candidate slice", runMineYield},
+var commands = []cli.Command{
+	{Name: "mine-yield", Short: "probe GitHub for minable merged PRs in the candidate slice", Run: runMineYield},
 }
 
 func main() {
@@ -29,50 +20,14 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-// run dispatches to a subcommand and returns the process exit code.
+// run dispatches to a subcommand and returns the process exit code. The
+// no-token error prints as its bare message, the exact text the ticket requires.
 func run(args []string) int {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		usage()
-		return 2
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	name := args[0]
-	for _, c := range commands {
-		if c.name != name {
-			continue
-		}
-		err := c.run(ctx, args[1:])
-		switch {
-		case err == nil:
-			return 0
-		case errors.Is(err, flag.ErrHelp):
-			return 2
-		case errors.Is(err, errNoToken):
-			// The exact message the ticket requires, with no prefix.
-			fmt.Fprintln(os.Stderr, errNoToken.Error())
-			return 1
-		default:
-			fmt.Fprintf(os.Stderr, "eval %s: %v\n", name, err)
-			return 1
-		}
-	}
-	fmt.Fprintf(os.Stderr, "eval: unknown command %q\n\n", name)
-	usage()
-	return 2
-}
-
-func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: eval <command> [flags]\n\nCommands:")
-	for _, c := range commands {
-		fmt.Fprintf(os.Stderr, "  %-12s %s\n", c.name, c.short)
-	}
+	return cli.App{Name: "eval", Commands: commands, Bare: []error{errNoToken}}.Run(args)
 }
 
 // newFlagSet returns the flag set every subcommand uses, so help text and
 // error handling stay consistent.
 func newFlagSet(name string) *flag.FlagSet {
-	return flag.NewFlagSet("eval "+name, flag.ContinueOnError)
+	return cli.NewFlagSet("eval", name)
 }

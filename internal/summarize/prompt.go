@@ -3,12 +3,11 @@ package summarize
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/source"
 )
 
 // PromptVersion is the current function-summary prompt version. It is the only
@@ -81,21 +80,10 @@ func (in Input) Hash() string {
 // readCode returns lines start..end (1-based, inclusive) of relPath under
 // kubeDir, cut to maxCodeBytes and marked with truncatedMarker when cut.
 func readCode(kubeDir, relPath string, start, end int) (string, error) {
-	src, err := os.ReadFile(filepath.Join(kubeDir, relPath))
+	code, err := source.ReadRange(kubeDir, relPath, start, end)
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(string(src), "\n")
-	if start < 1 {
-		start = 1
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
-	if start > end {
-		return "", nil
-	}
-	code := strings.Join(lines[start-1:end], "\n")
 	if utf8.RuneCountInString(code) > maxCodeChars {
 		code = string([]rune(code)[:maxCodeChars]) + "\n" + truncatedMarker
 	}

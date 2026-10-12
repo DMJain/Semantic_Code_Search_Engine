@@ -4,17 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/seeded"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/source"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/summarize"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/walk"
 )
 
 // gateEntry is one eligible in-slice function in the quality-gate sample: its
@@ -141,7 +142,7 @@ func gateRows(ctx context.Context, pool *pgxpool.Pool) ([]gateEntry, error) {
 			&e.Status, &e.InputHash, &e.Text); err != nil {
 			return nil, fmt.Errorf("scan gate row: %w", err)
 		}
-		e.Root = summarize.SliceRoot(e.Path)
+		e.Root = walk.SliceRootOf(e.Path)
 		out = append(out, e)
 	}
 	return out, rows.Err()
@@ -151,37 +152,13 @@ func gateRows(ctx context.Context, pool *pgxpool.Pool) ([]gateEntry, error) {
 // be ordered by qualified_name, and the seeded shuffle then makes the same
 // (rows, n, seed) always yield the same sample.
 func drawGate(rows []gateEntry, n int, seed int64) []gateEntry {
-	out := slices.Clone(rows)
-	rng := rand.New(rand.NewSource(seed))
-	rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
-	if n < 0 {
-		n = 0
-	}
-	if n > len(out) {
-		n = len(out)
-	}
-	return out[:n]
+	return seeded.Draw(rows, n, seed)
 }
 
 // readGateCode returns lines start_line..end_line (1-based, inclusive) of the
 // symbol's file under root, the exact source span the author grades against.
 func readGateCode(root string, e gateEntry) (string, error) {
-	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(e.Path)))
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", e.Path, err)
-	}
-	lines := strings.Split(string(src), "\n")
-	start, end := e.StartLine, e.EndLine
-	if start < 1 {
-		start = 1
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
-	if start > end {
-		return "", nil
-	}
-	return strings.Join(lines[start-1:end], "\n"), nil
+	return source.ReadRange(root, e.Path, e.StartLine, e.EndLine)
 }
 
 // writeGateSheet writes the human-readable sheet: one section per sampled row
