@@ -1,0 +1,24 @@
+{
+  "tag": "v1.37.0",
+  "window_months": 18,
+  "window_start": "2025-02-26",
+  "window_end": "2026-08-26",
+  "yield_12m": 20,
+  "yield_18m_extension": 5,
+  "by_prefix": {
+    "pkg/controller": 7,
+    "pkg/kubelet": 10,
+    "pkg/scheduler": 8,
+    "staging/src/k8s.io/client-go": 0
+  },
+  "windows_at_cap": 0,
+  "prs_scanned": 938,
+  "rejections": {
+    "generated file": 6,
+    "no closing issue": 21,
+    "non-Go file": 69,
+    "outside slice": 353,
+    "test file": 237,
+    "too many files": 227
+  }
+}
