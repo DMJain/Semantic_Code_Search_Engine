@@ -49,9 +49,11 @@ func TestFixtureWalkEqualsPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
-	walkSet := make([]string, len(files))
-	for i, f := range files {
-		walkSet[i] = f.Path
+	var walkSet []string
+	for _, f := range files {
+		if f.InSlice {
+			walkSet = append(walkSet, f.Path)
+		}
 	}
 
 	fixtureMode := loadMode{
@@ -59,6 +61,7 @@ func TestFixtureWalkEqualsPackages(t *testing.T) {
 		over: []string{"GOOS=linux", "GOARCH=amd64", "GOWORK=off", "GOTOOLCHAIN=local"},
 	}
 	res, err := loadSlice(root, []string{"./pkg/scheduler/..."}, fixtureMode, os.Environ())
+	walkSet = slices.DeleteFunc(walkSet, func(p string) bool { return !strings.HasPrefix(p, "pkg/scheduler/") })
 	if err != nil {
 		t.Fatalf("loadSlice: %v", err)
 	}
@@ -78,15 +81,11 @@ func TestFixtureWalkEqualsPackages(t *testing.T) {
 	}
 }
 
-// fixtureLoader loads the fixture module's scheduler root the way the real
-// check loads the slice roots, so the check runs end to end without a clone.
+// fixtureLoader is the production loader (slice patterns, pinned load with the
+// workspace fallback) pointed at the fixture module. The fixture has no vendor
+// directory, so the pinned attempt fails and the fallback loads it.
 func fixtureLoader(root string) (loadResult, string, error) {
-	mode := loadMode{
-		name: "fixture",
-		over: []string{"GOOS=linux", "GOARCH=amd64", "GOWORK=off", "GOTOOLCHAIN=local"},
-	}
-	res, err := loadSlice(root, []string{"./pkg/scheduler/..."}, mode, os.Environ())
-	return res, mode.name, err
+	return realLoader(root)
 }
 
 // copyFixture copies the fixture module into a temp dir so a test can change
@@ -127,10 +126,10 @@ func TestCheckPassesOnEqualFixture(t *testing.T) {
 	}
 }
 
-// TestCheckWalksTheTreeFreshly: the walk side is computed from the tree at
-// check time. A file added after the type-checker side was captured (what a
-// stale files table would also miss) makes the check fail.
-func TestCheckWalksTheTreeFreshly(t *testing.T) {
+// TestCheckWalkSideIsComputedFromTheTreeNotCaptured proves the walk side is a
+// fresh walk of the tree at check time and involves no database: a file added
+// after the type-checker side was captured shows up as "only in walk".
+func TestCheckWalkSideIsComputedFromTheTreeNotCaptured(t *testing.T) {
 	root := copyFixture(t)
 	captured, name, err := fixtureLoader(root)
 	if err != nil {
@@ -178,11 +177,47 @@ func TestCheckLoadErrorExitsTwo(t *testing.T) {
 	}
 }
 
-// TestSlicePatternsLoadOnlyFrozenSliceRoots: the dropped client-go root is
-// not among the patterns handed to go/packages.
-func TestSlicePatternsLoadOnlyFrozenSliceRoots(t *testing.T) {
-	want := []string{"./pkg/scheduler/...", "./pkg/kubelet/...", "./pkg/controller/..."}
-	if got := slicePatterns(); !slices.Equal(got, want) {
-		t.Errorf("slicePatterns() = %v, want %v", got, want)
+// TestRealLoaderLoadsOnlyFrozenSliceRoots runs the production wiring
+// (realLoader -> slicePatterns) on the fixture, whose dropped client-go root
+// holds a package that fails to type-check. If that root were loaded the load
+// would carry its error; it must not, and the check must pass.
+func TestRealLoaderLoadsOnlyFrozenSliceRoots(t *testing.T) {
+	root := copyFixture(t)
+	res, _, err := realLoader(root)
+	if err != nil {
+		t.Fatalf("realLoader: %v", err)
+	}
+	if len(res.errs) > 0 {
+		t.Fatalf("a root outside the slice was loaded: %v", res.errs)
+	}
+	for _, p := range res.kept {
+		if !walk.InSlice(p) {
+			t.Errorf("kept %q, which is outside the slice", p)
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := checkSlice(root, realLoader, &out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0; out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+// TestSlicePatternsAreTheSliceRootsOnly: every pattern is a slice root and the
+// dropped root is absent.
+func TestSlicePatternsAreTheSliceRootsOnly(t *testing.T) {
+	roots := map[string]bool{}
+	for _, prefix := range walk.SlicePrefixes {
+		roots["./"+prefix+"/..."] = true
+	}
+	got := slicePatterns()
+	for _, p := range got {
+		if !roots[p] {
+			t.Errorf("pattern %q is not a slice root", p)
+		}
+		if strings.Contains(p, "client-go") {
+			t.Errorf("dropped root loaded: %q", p)
+		}
+	}
+	if len(got) != len(walk.SlicePrefixes)-len(walk.SliceDropPrefixes) {
+		t.Errorf("patterns = %v, want one per undropped root", got)
 	}
 }
