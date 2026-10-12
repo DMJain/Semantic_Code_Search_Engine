@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/DMJain/Semantic_Code_Search_Engine/internal/seeded"
 )
 
 // Draft prompt versions used only by the throughput benchmark (S1-T11). File-
@@ -116,65 +114,6 @@ type BenchPkgResult struct {
 	LatencyMs    float64 `json:"latency_ms"`
 	OutputTokens int     `json:"output_tokens"`
 	OK           bool    `json:"ok"`
-}
-
-// FileStratum buckets a file by its eligible-function count. The boundaries
-// roughly double so each stratum is a distinct size class.
-func FileStratum(eligible int) string {
-	switch {
-	case eligible <= 2:
-		return "1-2"
-	case eligible <= 5:
-		return "3-5"
-	case eligible <= 11:
-		return "6-11"
-	case eligible <= 23:
-		return "12-23"
-	default:
-		return "24+"
-	}
-}
-
-// fileStrataOrder is the smallest-to-largest stratum order used by [SampleFiles].
-var fileStrataOrder = []string{"1-2", "3-5", "6-11", "12-23", "24+"}
-
-// SampleFiles selects at most n files deterministically, stratified by
-// [FileStratum]. Files are sorted by Path; the n slots are allocated across the
-// strata in proportion to each stratum's size by the largest-remainder method,
-// and within a stratum the files are shuffled with a math/rand generator seeded
-// by seed before the first allocation are taken. The same (files, n, seed)
-// always returns the same paths in the same order.
-func SampleFiles(files []FileCandidate, n int, seed int64) []FileCandidate {
-	if n <= 0 || len(files) == 0 {
-		return nil
-	}
-	ordered := slices.Clone(files)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
-	if n >= len(ordered) {
-		return ordered
-	}
-
-	byStratum := make(map[string][]FileCandidate)
-	for _, f := range ordered {
-		s := FileStratum(f.Eligible)
-		byStratum[s] = append(byStratum[s], f)
-	}
-	sizes := make(map[string]int, len(byStratum))
-	var present []string
-	for _, s := range fileStrataOrder {
-		if len(byStratum[s]) > 0 {
-			sizes[s] = len(byStratum[s])
-			present = append(present, s)
-		}
-	}
-	quotas := allocateCounts(n, sizes, present)
-
-	groups := make([][]FileCandidate, len(present))
-	qs := make([]int, len(present))
-	for i, s := range present {
-		groups[i], qs[i] = byStratum[s], quotas[s]
-	}
-	return seeded.Stratified(groups, qs, seed)
 }
 
 // Bench measures summarization throughput without writing any summary row

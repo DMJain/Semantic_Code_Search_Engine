@@ -14,7 +14,7 @@ import (
 
 // onlyFunctionLevel is the one summary level this command implements; file and
 // package levels arrive in S5.
-const onlyFunctionLevel = "function"
+const onlyFunctionLevel = summarize.LevelFunction
 
 // defaultBenchOutput is where `indexer summarize --bench` writes its results.
 const defaultBenchOutput = "eval/results/bench/summarize.json"
@@ -31,7 +31,7 @@ const (
 
 func runSummarize(ctx context.Context, args []string) error {
 	fs := newFlagSet("summarize")
-	level := fs.String("level", onlyFunctionLevel, `summary level (only "function" is implemented)`)
+	level := fs.String("level", onlyFunctionLevel.String(), `summary level (only "function" is implemented)`)
 	limit := fs.Int("limit", 0, "summarize at most N functions after sampling (0 = no limit)")
 	sample := fs.Int("sample", 0, "draw a stratified sample of N eligible functions (0 = all)")
 	seed := fs.Int64("seed", 0, "sampling seed")
@@ -45,7 +45,7 @@ func runSummarize(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *level != onlyFunctionLevel {
+	if summarize.Level(*level) != onlyFunctionLevel {
 		return fmt.Errorf("level %q is not supported; only %q is implemented", *level, onlyFunctionLevel)
 	}
 
@@ -110,7 +110,7 @@ func runSummarize(ctx context.Context, args []string) error {
 func printStatus(w io.Writer, rep summarize.StatusReport) {
 	fmt.Fprintf(w, "prompt_version %s\n", rep.PromptVersion)
 	fmt.Fprintf(w, "pending %d done %d failed %d\n",
-		rep.Counts["pending"], rep.Counts["done"], rep.Counts["failed"])
+		rep.Counts[summarize.StatusPending.String()], rep.Counts[summarize.StatusDone.String()], rep.Counts[summarize.StatusFailed.String()])
 	fmt.Fprintf(w, "remaining %d\n", rep.Remaining)
 	switch {
 	case rep.Remaining == 0:

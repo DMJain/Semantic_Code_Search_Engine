@@ -14,6 +14,7 @@ import (
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/summarize"
 )
 
 func runParse(ctx context.Context, args []string) error {
@@ -242,8 +243,8 @@ func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
 	}
 	if len(deleted) > 0 {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM summaries WHERE level = 'function' AND target_id = ANY($1::bigint[])`,
-			deleted); err != nil {
+			`DELETE FROM summaries WHERE level = $2 AND target_id = ANY($1::bigint[])`,
+			deleted, summarize.LevelFunction); err != nil {
 			return fmt.Errorf("delete orphan summaries: %w", err)
 		}
 	}

@@ -27,7 +27,7 @@ type gateEntry struct {
 	StartLine     int
 	EndLine       int
 	Root          string
-	Status        string
+	Status        summarize.Status
 	InputHash     string
 	Text          string
 }
@@ -92,7 +92,7 @@ func runGate(ctx context.Context, args []string) error {
 
 	done := make([]gateEntry, 0, len(gate))
 	for _, e := range gate {
-		if e.Status == "done" {
+		if e.Status == summarize.StatusDone {
 			done = append(done, e)
 		}
 	}
@@ -127,9 +127,9 @@ func gateRows(ctx context.Context, pool *pgxpool.Pool) ([]gateEntry, error) {
 		FROM symbols s
 		JOIN files f ON f.id = s.file_id
 		LEFT JOIN summaries sm
-		  ON sm.level = 'function' AND sm.target_id = s.id AND sm.prompt_version = $1
+		  ON sm.level = $2 AND sm.target_id = s.id AND sm.prompt_version = $1
 		WHERE `+summarize.EligibleWhere()+`
-		ORDER BY s.qualified_name`, summarize.PromptVersion)
+		ORDER BY s.qualified_name`, summarize.PromptVersion, summarize.LevelFunction)
 	if err != nil {
 		return nil, fmt.Errorf("list gate rows: %w", err)
 	}

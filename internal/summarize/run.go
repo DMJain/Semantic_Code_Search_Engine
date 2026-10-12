@@ -6,16 +6,12 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
-	"github.com/DMJain/Semantic_Code_Search_Engine/internal/seeded"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
-	"github.com/DMJain/Semantic_Code_Search_Engine/internal/walk"
 )
 
 // Runner summarizes eligible in-slice functions into the summaries table. It is
@@ -72,17 +68,6 @@ type workItem struct {
 	row   symbolRow
 	input Input
 	hash  string
-}
-
-// symbolRow is one in-slice symbol as read from the database together with its
-// stored summary status and hash (empty when there is no current row).
-type symbolRow struct {
-	id            int64
-	qualifiedName string
-	path          string
-	sym           parse.Symbol
-	storedStatus  string
-	storedHash    string
 }
 
 // Run selects eligible functions, applies sampling, skipping and the limit,
@@ -143,50 +128,10 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Stats, error) {
 	if err != nil {
 		return st, err
 	}
-	st.Pending = counts["pending"]
+	st.Pending = counts[StatusPending.String()]
 	fmt.Fprintf(out, "eligible %d, selected %d, skipped %d, done %d, failed %d, pending %d\n",
 		st.Eligible, st.Selected, st.Skipped, st.Done, st.Failed, st.Pending)
 	return st, nil
-}
-
-// eligible returns every in-slice function or method whose body is at least
-// [MinBodyLines] lines, with its current function-summary status and hash, ordered by
-// qualified_name (the sampling order).
-func (r *Runner) eligible(ctx context.Context) ([]symbolRow, error) {
-	rows, err := r.Pool.Query(ctx, `
-		SELECT s.id, s.qualified_name, f.path, s.kind, f.in_slice,
-		       s.start_line, s.end_line, coalesce(s.signature, ''),
-		       coalesce(s.doc, ''), s.raw_calls,
-		       coalesce(sm.status, ''), coalesce(sm.input_hash, '')
-		FROM symbols s
-		JOIN files f ON f.id = s.file_id
-		LEFT JOIN summaries sm
-		  ON sm.level = 'function' AND sm.target_id = s.id AND sm.prompt_version = $1
-		WHERE f.in_slice
-		ORDER BY s.qualified_name`, PromptVersion)
-	if err != nil {
-		return nil, fmt.Errorf("list eligible symbols: %w", err)
-	}
-	defer rows.Close()
-
-	var out []symbolRow
-	for rows.Next() {
-		var sr symbolRow
-		var kind string
-		var inSlice bool
-		if err := rows.Scan(&sr.id, &sr.qualifiedName, &sr.path, &kind, &inSlice,
-			&sr.sym.StartLine, &sr.sym.EndLine, &sr.sym.Signature,
-			&sr.sym.Doc, &sr.sym.RawCalls, &sr.storedStatus, &sr.storedHash); err != nil {
-			return nil, fmt.Errorf("scan symbol: %w", err)
-		}
-		sr.sym.Kind = kind
-		sr.sym.QualifiedName = sr.qualifiedName
-		if !Eligible(sr.sym, inSlice) {
-			continue
-		}
-		out = append(out, sr)
-	}
-	return out, rows.Err()
 }
 
 // work builds the prompt input and input hash for each row and returns the rows
@@ -201,11 +146,11 @@ func (r *Runner) work(rows []symbolRow, retryFailed bool) ([]workItem, int, erro
 			return nil, 0, fmt.Errorf("read %s: %w", sr.path, err)
 		}
 		hash := in.Hash()
-		if sr.storedStatus == "done" && sr.storedHash == hash {
+		if sr.storedStatus == StatusDone && sr.storedHash == hash {
 			skipped++
 			continue
 		}
-		if sr.storedStatus == "failed" && !retryFailed {
+		if sr.storedStatus == StatusFailed && !retryFailed {
 			skipped++
 			continue
 		}
@@ -233,10 +178,10 @@ func (r *Runner) process(ctx context.Context, dbCtx context.Context, work []work
 		}
 		stopped.Store(true)
 	}
-	record := func(status string) {
+	record := func(status Status) {
 		mu.Lock()
 		defer mu.Unlock()
-		if status == "done" {
+		if status == StatusDone {
 			done++
 		} else {
 			failed++
@@ -282,14 +227,14 @@ produce:
 // processItem writes the row pending in its own transaction, sends the request
 // (with the non-cancelled context so an interrupt finishes the in-flight item)
 // and finalizes the row done or failed in a second transaction.
-func (r *Runner) processItem(ctx context.Context, it workItem) (string, error) {
+func (r *Runner) processItem(ctx context.Context, it workItem) (Status, error) {
 	if err := r.markPending(ctx, it); err != nil {
 		return "", err
 	}
 	res := r.Client.Summarize(ctx, SystemPrompt, it.input.UserMessage())
-	status, reason, text := "done", "", res.Text
+	status, reason, text := StatusDone, "", res.Text
 	if !res.OK() {
-		status, reason, text = "failed", res.Reason, ""
+		status, reason, text = StatusFailed, res.Reason, ""
 	}
 	if err := r.finalize(ctx, it.row.id, status, text, reason); err != nil {
 		return "", err
@@ -308,11 +253,11 @@ func (r *Runner) markPending(ctx context.Context, it workItem) error {
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status, reason)
-		VALUES ('function', $1, NULL, $2, $3, $4, 'pending', NULL)
+		VALUES ($5, $1, NULL, $2, $3, $4, $6, NULL)
 		ON CONFLICT (level, target_id, prompt_version) DO UPDATE SET
-			status = 'pending', text = NULL, reason = NULL,
+			status = $6, text = NULL, reason = NULL,
 			model = EXCLUDED.model, input_hash = EXCLUDED.input_hash`,
-		it.row.id, r.Model, PromptVersion, it.hash); err != nil {
+		it.row.id, r.Model, PromptVersion, it.hash, LevelFunction, StatusPending); err != nil {
 		return fmt.Errorf("mark pending %d: %w", it.row.id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -322,7 +267,7 @@ func (r *Runner) markPending(ctx context.Context, it workItem) error {
 }
 
 // finalize sets the row's terminal status, text and reason in one transaction.
-func (r *Runner) finalize(ctx context.Context, id int64, status, text, reason string) error {
+func (r *Runner) finalize(ctx context.Context, id int64, status Status, text, reason string) error {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -331,8 +276,8 @@ func (r *Runner) finalize(ctx context.Context, id int64, status, text, reason st
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE summaries SET status = $1, text = $2, reason = $3
-		WHERE level = 'function' AND target_id = $4 AND prompt_version = $5`,
-		status, store.NullIfEmpty(text), store.NullIfEmpty(reason), id, PromptVersion); err != nil {
+		WHERE level = $6 AND target_id = $4 AND prompt_version = $5`,
+		status, store.NullIfEmpty(text), store.NullIfEmpty(reason), id, PromptVersion, LevelFunction); err != nil {
 		return fmt.Errorf("finalize %d: %w", id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -341,187 +286,9 @@ func (r *Runner) finalize(ctx context.Context, id int64, status, text, reason st
 	return nil
 }
 
-// statusCounts returns the number of current-version function rows per status.
-func (r *Runner) statusCounts(ctx context.Context) (map[string]int, error) {
-	rows, err := r.Pool.Query(ctx, `
-		SELECT status, count(*) FROM summaries
-		WHERE level = 'function' AND prompt_version = $1
-		GROUP BY status`, PromptVersion)
-	if err != nil {
-		return nil, fmt.Errorf("count summaries: %w", err)
-	}
-	defer rows.Close()
-
-	counts := make(map[string]int, 3)
-	for rows.Next() {
-		var status string
-		var n int
-		if err := rows.Scan(&status, &n); err != nil {
-			return nil, fmt.Errorf("scan count: %w", err)
-		}
-		counts[status] = n
-	}
-	return counts, rows.Err()
-}
-
 func (r *Runner) out() io.Writer {
 	if r.Out == nil {
 		return io.Discard
 	}
 	return r.Out
-}
-
-// Candidate is one eligible function offered to [Sample]: its symbol id, its
-// qualified name (the deterministic ordering key) and its slice root.
-type Candidate struct {
-	ID            int64
-	QualifiedName string
-	Root          string
-}
-
-// Sample selects at most n candidate ids deterministically. Candidates are
-// grouped by Root in walk.SliceRoots order; the n slots are allocated across
-// the roots in proportion to each root's eligible count by the largest-
-// remainder (Hare quota) method; within a root the candidates, sorted by
-// QualifiedName, are shuffled with a math/rand generator seeded by seed and the
-// first allocation are taken. The same (candidates, n, seed) always returns the
-// same ids in the same order. The result is smaller than n only when fewer
-// candidates exist.
-func Sample(cands []Candidate, n int, seed int64) []int64 {
-	if n <= 0 || len(cands) == 0 {
-		return nil
-	}
-	ordered := slices.Clone(cands)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return ordered[i].QualifiedName < ordered[j].QualifiedName
-	})
-	if n >= len(ordered) {
-		ids := make([]int64, len(ordered))
-		for i, c := range ordered {
-			ids[i] = c.ID
-		}
-		return ids
-	}
-
-	roots := rootOrder(ordered)
-	byRoot := make(map[string][]Candidate, len(roots))
-	for _, c := range ordered {
-		byRoot[c.Root] = append(byRoot[c.Root], c)
-	}
-	quotas := allocate(n, byRoot, roots)
-
-	groups := make([][]Candidate, len(roots))
-	qs := make([]int, len(roots))
-	for i, root := range roots {
-		groups[i], qs[i] = byRoot[root], quotas[root]
-	}
-	var ids []int64
-	for _, c := range seeded.Stratified(groups, qs, seed) {
-		ids = append(ids, c.ID)
-	}
-	return ids
-}
-
-// allocate distributes n slots over the strata in proportion to their sizes by
-// the largest-remainder method: each root gets floor(n*size/total) slots, and
-// the leftover slots go to the roots with the largest remainders, ties broken
-// by roots order.
-func allocate(n int, byRoot map[string][]Candidate, roots []string) map[string]int {
-	sizes := make(map[string]int, len(roots))
-	for _, root := range roots {
-		sizes[root] = len(byRoot[root])
-	}
-	return allocateCounts(n, sizes, roots)
-}
-
-// allocateCounts distributes n slots over the keys in order in proportion to
-// their sizes by the largest-remainder (Hare quota) method: each key gets
-// floor(n*size/total) slots, and the leftover slots go to the keys with the
-// largest remainders, ties broken by order. Every size is assumed present in
-// sizes; a zero total returns empty quotas.
-func allocateCounts(n int, sizes map[string]int, order []string) map[string]int {
-	total := 0
-	for _, key := range order {
-		total += sizes[key]
-	}
-	quotas := make(map[string]int, len(order))
-	if total == 0 {
-		return quotas
-	}
-	type remainder struct {
-		key   string
-		value int
-		rank  int
-	}
-	rems := make([]remainder, 0, len(order))
-	assigned := 0
-	for i, key := range order {
-		size := sizes[key]
-		q := n * size / total
-		quotas[key] = q
-		assigned += q
-		rems = append(rems, remainder{key: key, value: n*size - q*total, rank: i})
-	}
-	sort.SliceStable(rems, func(i, j int) bool {
-		if rems[i].value != rems[j].value {
-			return rems[i].value > rems[j].value
-		}
-		return rems[i].rank < rems[j].rank
-	})
-	for i := 0; i < n-assigned && i < len(rems); i++ {
-		quotas[rems[i].key]++
-	}
-	return quotas
-}
-
-// rootOrder returns the roots present in ordered, walk.SliceRoots first in
-// their configured order, then any other roots (there should be none) sorted by
-// name so the result is independent of map iteration.
-func rootOrder(ordered []Candidate) []string {
-	seen := make(map[string]bool)
-	for _, c := range ordered {
-		seen[c.Root] = true
-	}
-	var roots []string
-	sliceRoots := walk.SliceRoots()
-	known := make(map[string]bool, len(sliceRoots))
-	for _, p := range sliceRoots {
-		known[p] = true
-		if seen[p] {
-			roots = append(roots, p)
-		}
-	}
-	var extra []string
-	for root := range seen {
-		if !known[root] {
-			extra = append(extra, root)
-		}
-	}
-	sort.Strings(extra)
-	return append(roots, extra...)
-}
-
-// sampleCandidates maps eligible rows to [Candidate], assigning each its slice
-// root.
-func sampleCandidates(rows []symbolRow) []Candidate {
-	out := make([]Candidate, len(rows))
-	for i, sr := range rows {
-		out[i] = Candidate{ID: sr.id, QualifiedName: sr.qualifiedName, Root: walk.SliceRootOf(sr.path)}
-	}
-	return out
-}
-
-// filterByID keeps the rows whose id is in ids.
-func filterByID(rows []symbolRow, ids []int64) []symbolRow {
-	set := make(map[int64]bool, len(ids))
-	for _, id := range ids {
-		set[id] = true
-	}
-	out := make([]symbolRow, 0, len(ids))
-	for _, sr := range rows {
-		if set[sr.id] {
-			out = append(out, sr)
-		}
-	}
-	return out
 }

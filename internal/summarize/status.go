@@ -2,6 +2,7 @@ package summarize
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -48,7 +49,7 @@ func (r *Runner) Status(ctx context.Context, window time.Duration, retryFailed b
 		return StatusReport{}, err
 	}
 	// Nothing in flight means no rate can be measured; report at once.
-	if before["pending"] == 0 {
+	if before[StatusPending.String()] == 0 {
 		return statusReport(eligible, before, before, retryFailed, window), nil
 	}
 	timer := time.NewTimer(window)
@@ -67,17 +68,17 @@ func (r *Runner) Status(ctx context.Context, window time.Duration, retryFailed b
 // statusReport derives the report from two done-count samples; it is pure so
 // the ETA arithmetic is testable without waiting on a real window.
 func statusReport(eligible int, before, after map[string]int, retryFailed bool, window time.Duration) StatusReport {
-	failed := after["failed"]
+	failed := after[StatusFailed.String()]
 	if retryFailed {
 		failed = 0 // a retry run re-picks failed rows, so they are still remaining
 	}
 	rep := StatusReport{
 		PromptVersion: PromptVersion,
 		Counts:        after,
-		Remaining:     max(0, eligible-after["done"]-failed),
+		Remaining:     max(0, eligible-after[StatusDone.String()]-failed),
 		Window:        window,
 	}
-	delta := after["done"] - before["done"]
+	delta := after[StatusDone.String()] - before[StatusDone.String()]
 	if delta <= 0 || window <= 0 {
 		return rep
 	}
@@ -86,4 +87,27 @@ func statusReport(eligible int, before, after map[string]int, retryFailed bool, 
 	rep.PerHour = rate * 3600
 	rep.ETA = time.Duration(float64(rep.Remaining) / rate * float64(time.Second))
 	return rep
+}
+
+// statusCounts returns the number of current-version function rows per status.
+func (r *Runner) statusCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := r.Pool.Query(ctx, `
+		SELECT status, count(*) FROM summaries
+		WHERE level = $2 AND prompt_version = $1
+		GROUP BY status`, PromptVersion, LevelFunction)
+	if err != nil {
+		return nil, fmt.Errorf("count summaries: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int, 3)
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("scan count: %w", err)
+		}
+		counts[status] = n
+	}
+	return counts, rows.Err()
 }
