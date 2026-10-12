@@ -307,3 +307,117 @@ func TestParseCorpusResumeMatchesUninterrupted(t *testing.T) {
 		t.Errorf("resumed symbol count = %d, want %d (uninterrupted)", got, want)
 	}
 }
+
+// addDoneSummary stores a done function summary for a symbol.
+func addDoneSummary(t *testing.T, pool *pgxpool.Pool, id int64, text string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status)
+		 VALUES ('function', $1, $2, 'm', 'fn-v1', 'hash', 'done')`, id, text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestParseCorpusSymbolMoveKeepsSummary proves a symbol moved between files of
+// one package keeps its id and summary whichever of the two files is parsed
+// first (files are parsed in path order, so both directions are exercised).
+func TestParseCorpusSymbolMoveKeepsSummary(t *testing.T) {
+	const qn = "k8s.io/kubernetes/pkg/p.Moved"
+	for _, tc := range []struct{ name, from, to string }{
+		{"old file parsed first", "a.go", "b.go"},
+		{"new file parsed first", "b.go", "a.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testdb.New(t)
+			root := t.TempDir()
+			writeSrc(t, root, "pkg/p/"+tc.from, "package p\n\nfunc Moved() {}\n")
+			writeSrc(t, root, "pkg/p/"+tc.to, "package p\n\nfunc Other() {}\n")
+			seedFiles(t, pool, root)
+			runParseCorpus(t, pool, root, 0)
+
+			id := scalarInt(t, pool, `SELECT id FROM symbols WHERE qualified_name = $1`, qn)
+			addDoneSummary(t, pool, id, "summary of Moved")
+
+			writeSrc(t, root, "pkg/p/"+tc.from, "package p\n\nfunc Stay() {}\n")
+			writeSrc(t, root, "pkg/p/"+tc.to, "package p\n\nfunc Other() {}\nfunc Moved() {}\n")
+			seedFiles(t, pool, root)
+			runParseCorpus(t, pool, root, 0)
+
+			if got := scalarInt(t, pool, `SELECT id FROM symbols WHERE qualified_name = $1`, qn); got != id {
+				t.Errorf("moved symbol id = %d, want %d", got, id)
+			}
+			if n := scalarInt(t, pool,
+				`SELECT count(*) FROM summaries WHERE level = 'function' AND target_id = $1 AND text = 'summary of Moved'`, id); n != 1 {
+				t.Errorf("summary rows for moved symbol = %d, want 1", n)
+			}
+			if n := scalarInt(t, pool,
+				`SELECT count(*) FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.qualified_name = $1 AND f.path = $2`,
+				qn, "pkg/p/"+tc.to); n != 1 {
+				t.Errorf("moved symbol not attached to %s", tc.to)
+			}
+		})
+	}
+}
+
+// TestParseCorpusDeletedSymbolLosesSummaryAcrossFiles proves that in a
+// multi-file package a symbol absent from the whole parse loses its symbol row
+// and summary while a sibling symbol keeps both.
+func TestParseCorpusDeletedSymbolLosesSummaryAcrossFiles(t *testing.T) {
+	pool := testdb.New(t)
+	root := t.TempDir()
+	writeSrc(t, root, "pkg/p/a.go", "package p\n\nfunc Gone() {}\n")
+	writeSrc(t, root, "pkg/p/b.go", "package p\n\nfunc Kept() {}\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+
+	gone := scalarInt(t, pool, `SELECT id FROM symbols WHERE qualified_name = 'k8s.io/kubernetes/pkg/p.Gone'`)
+	kept := scalarInt(t, pool, `SELECT id FROM symbols WHERE qualified_name = 'k8s.io/kubernetes/pkg/p.Kept'`)
+	addDoneSummary(t, pool, gone, "summary of Gone")
+	addDoneSummary(t, pool, kept, "summary of Kept")
+
+	writeSrc(t, root, "pkg/p/a.go", "package p\n\nvar X = 1\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+
+	if n := scalarInt(t, pool, `SELECT count(*) FROM symbols WHERE id = $1`, gone); n != 0 {
+		t.Errorf("deleted symbol still present: %d", n)
+	}
+	if n := scalarInt(t, pool, `SELECT count(*) FROM summaries WHERE target_id = $1`, gone); n != 0 {
+		t.Errorf("summary of deleted symbol still present: %d", n)
+	}
+	if n := scalarInt(t, pool, `SELECT count(*) FROM summaries WHERE target_id = $1`, kept); n != 1 {
+		t.Errorf("summary of kept symbol = %d rows, want 1", n)
+	}
+}
+
+// TestParseCorpusReparseChangesNoRows proves re-parsing an unchanged tree
+// leaves every symbol and summary row exactly as it was.
+func TestParseCorpusReparseChangesNoRows(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	writeSrc(t, root, "pkg/p/a.go", "package p\n\nfunc A() { B() }\nfunc init() {}\n")
+	writeSrc(t, root, "pkg/p/b.go", "package p\n\nfunc B() {}\nfunc init() {}\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	addDoneSummary(t, pool, scalarInt(t, pool, `SELECT id FROM symbols WHERE name = 'A'`), "summary of A")
+
+	snapshot := func() string {
+		var s string
+		err := pool.QueryRow(ctx, `
+			SELECT coalesce((SELECT string_agg(y::text, ';' ORDER BY y.id) FROM symbols y), '') || '#' ||
+			       coalesce((SELECT string_agg(m::text, ';' ORDER BY m.id) FROM summaries m), '')`).Scan(&s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	before := snapshot()
+	if _, err := pool.Exec(ctx, `UPDATE files SET parsed_sha = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	runParseCorpus(t, pool, root, 0)
+	if after := snapshot(); after != before {
+		t.Errorf("rows changed by re-parse:\nbefore %s\nafter  %s", before, after)
+	}
+}

@@ -63,9 +63,9 @@ type parseStats struct {
 
 // parseCorpus parses every file whose parsed_sha differs from sha. Any package
 // with a stale file is re-parsed completely, so #n suffixes are reassigned
-// correctly. Each file is written in its own transaction; an interrupt lets
-// the current file finish, then stops and exits 0, leaving the remaining files
-// stale for the next run.
+// correctly. Each package is written in one transaction; an interrupt lets
+// the current package finish, then stops and exits 0, leaving the remaining
+// packages stale for the next run.
 func parseCorpus(ctx context.Context, pool *pgxpool.Pool, root string, limit int, showKinds bool, out io.Writer) error {
 	// DB work uses a context that a signal does not cancel, so the in-flight
 	// file always commits; ctx is checked only at file and package boundaries.
@@ -91,10 +91,10 @@ groups:
 		if err != nil {
 			return err
 		}
+		if err := writePackage(dbCtx, pool, parsed); err != nil {
+			return err
+		}
 		for _, pf := range parsed {
-			if err := writeFile(dbCtx, pool, pf); err != nil {
-				return err
-			}
 			st.filesParsed++
 			for _, s := range pf.symbols {
 				switch s.Kind {
@@ -108,9 +108,9 @@ groups:
 					st.interfaces++
 				}
 			}
-			if ctx.Err() != nil {
-				break groups
-			}
+		}
+		if ctx.Err() != nil {
+			break groups
 		}
 	}
 
@@ -199,45 +199,51 @@ func parsePackage(root string, files []staleFile, st *parseStats) ([]parsedFile,
 	return parsed, nil
 }
 
-// writeFile writes one file's symbols in a single transaction: upsert on
-// qualified_name (keeping the row id stable across re-parses), delete symbols
-// of this file that vanished together with their function summaries, and mark
-// the file parsed.
-func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
+// writePackage writes every file of one package in a single transaction. New
+// and changed symbols are upserted first (on qualified_name, keeping row ids
+// stable across re-parses and across moves between files); only afterwards are
+// symbols of the package's files that are absent from the whole package parse
+// deleted together with their function summaries (D-065, S1C-11). Files are
+// marked parsed last.
+func writePackage(ctx context.Context, pool *pgxpool.Pool, files []parsedFile) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	seen := make([]int64, 0, len(pf.symbols))
-	for _, s := range pf.symbols {
-		var id int64
-		err := tx.QueryRow(ctx, `
-			INSERT INTO symbols (file_id, kind, name, qualified_name, receiver, signature, start_line, end_line, doc, raw_calls)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (qualified_name) DO UPDATE SET
-				file_id = EXCLUDED.file_id,
-				kind = EXCLUDED.kind,
-				name = EXCLUDED.name,
-				receiver = EXCLUDED.receiver,
-				signature = EXCLUDED.signature,
-				start_line = EXCLUDED.start_line,
-				end_line = EXCLUDED.end_line,
-				doc = EXCLUDED.doc,
-				raw_calls = EXCLUDED.raw_calls
-			RETURNING id`,
-			pf.id, s.Kind, s.Name, s.QualifiedName,
-			store.NullIfEmpty(s.Receiver), s.Signature, s.StartLine, s.EndLine, store.NullIfEmpty(s.Doc),
-			rawCallsOrEmpty(s.RawCalls),
-		).Scan(&id)
-		if err != nil {
-			return fmt.Errorf("upsert symbol %s: %w", s.QualifiedName, err)
+	fileIDs := make([]int64, 0, len(files))
+	seen := []int64{}
+	for _, pf := range files {
+		fileIDs = append(fileIDs, pf.id)
+		for _, s := range pf.symbols {
+			var id int64
+			err := tx.QueryRow(ctx, `
+				INSERT INTO symbols (file_id, kind, name, qualified_name, receiver, signature, start_line, end_line, doc, raw_calls)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				ON CONFLICT (qualified_name) DO UPDATE SET
+					file_id = EXCLUDED.file_id,
+					kind = EXCLUDED.kind,
+					name = EXCLUDED.name,
+					receiver = EXCLUDED.receiver,
+					signature = EXCLUDED.signature,
+					start_line = EXCLUDED.start_line,
+					end_line = EXCLUDED.end_line,
+					doc = EXCLUDED.doc,
+					raw_calls = EXCLUDED.raw_calls
+				RETURNING id`,
+				pf.id, s.Kind, s.Name, s.QualifiedName,
+				store.NullIfEmpty(s.Receiver), s.Signature, s.StartLine, s.EndLine, store.NullIfEmpty(s.Doc),
+				rawCallsOrEmpty(s.RawCalls),
+			).Scan(&id)
+			if err != nil {
+				return fmt.Errorf("upsert symbol %s: %w", s.QualifiedName, err)
+			}
+			seen = append(seen, id)
 		}
-		seen = append(seen, id)
 	}
 
-	deleted, err := deleteVanished(ctx, tx, pf.id, seen)
+	deleted, err := deleteVanished(ctx, tx, fileIDs, seen)
 	if err != nil {
 		return err
 	}
@@ -249,8 +255,8 @@ func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
 		}
 	}
 
-	if _, err := tx.Exec(ctx, `UPDATE files SET parsed_sha = sha WHERE id = $1`, pf.id); err != nil {
-		return fmt.Errorf("mark file parsed: %w", err)
+	if _, err := tx.Exec(ctx, `UPDATE files SET parsed_sha = sha WHERE id = ANY($1::bigint[])`, fileIDs); err != nil {
+		return fmt.Errorf("mark files parsed: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
@@ -258,12 +264,12 @@ func writeFile(ctx context.Context, pool *pgxpool.Pool, pf parsedFile) error {
 	return nil
 }
 
-// deleteVanished removes this file's symbols that were not seen and returns
-// their ids.
-func deleteVanished(ctx context.Context, tx pgx.Tx, fileID int64, seen []int64) ([]int64, error) {
+// deleteVanished removes symbols of the given files that were not seen in the
+// whole package parse and returns their ids.
+func deleteVanished(ctx context.Context, tx pgx.Tx, fileIDs, seen []int64) ([]int64, error) {
 	rows, err := tx.Query(ctx,
-		`DELETE FROM symbols WHERE file_id = $1 AND id <> ALL($2::bigint[]) RETURNING id`,
-		fileID, seen)
+		`DELETE FROM symbols WHERE file_id = ANY($1::bigint[]) AND id <> ALL($2::bigint[]) RETURNING id`,
+		fileIDs, seen)
 	if err != nil {
 		return nil, fmt.Errorf("delete vanished symbols: %w", err)
 	}
