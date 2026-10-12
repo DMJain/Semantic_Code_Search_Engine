@@ -68,8 +68,17 @@ type parseStats struct {
 // packages stale for the next run.
 func parseCorpus(ctx context.Context, pool *pgxpool.Pool, root string, limit int, showKinds bool, out io.Writer) error {
 	// DB work uses a context that a signal does not cancel, so the in-flight
-	// file always commits; ctx is checked only at file and package boundaries.
+	// package always commits; ctx is checked only at package boundaries.
 	dbCtx := context.WithoutCancel(ctx)
+
+	// Symbols of files removed from the tree cascade away in walk, which cannot
+	// delete their summaries (no foreign key); sweep those orphans first.
+	if _, err := pool.Exec(dbCtx,
+		`DELETE FROM summaries s WHERE s.level = $1
+		   AND NOT EXISTS (SELECT 1 FROM symbols y WHERE y.id = s.target_id)`,
+		summarize.LevelFunction); err != nil {
+		return fmt.Errorf("delete orphan summaries: %w", err)
+	}
 
 	stale, err := selectStaleFiles(dbCtx, pool)
 	if err != nil {

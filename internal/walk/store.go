@@ -36,6 +36,9 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, files []File) (changed, delet
 	for i, f := range files {
 		paths[i] = f.Path
 	}
+	if err := rehomeVanishedSymbols(ctx, tx, paths); err != nil {
+		return 0, 0, err
+	}
 	tag, err := tx.Exec(ctx, `DELETE FROM files WHERE path <> ALL($1::text[])`, paths)
 	if err != nil {
 		return 0, 0, fmt.Errorf("delete vanished files: %w", err)
@@ -46,6 +49,34 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, files []File) (changed, delet
 		return 0, 0, fmt.Errorf("commit: %w", err)
 	}
 	return changed, deleted, nil
+}
+
+// rehomeVanishedSymbols keeps symbol ids (and so their summaries) alive across
+// the delete of vanished files, which would otherwise cascade the symbols away
+// while summaries have no foreign key. Symbols of a vanished file move to the
+// first surviving file of the same package, and that file's parsed marker is
+// cleared so the parse stage re-parses the package and deletes, by its
+// whole-package seen set, the symbols that really are gone (S1C-11). Symbols
+// of a package with no surviving file cascade away; the parse stage then
+// deletes the function summaries left without a symbol.
+func rehomeVanishedSymbols(ctx context.Context, tx pgx.Tx, paths []string) error {
+	if _, err := tx.Exec(ctx, `
+		WITH moved AS (
+			UPDATE symbols s SET file_id = t.tid
+			FROM (
+				SELECT g.id AS gid,
+				       (SELECT f.id FROM files f
+				         WHERE f.package = g.package AND f.path = ANY($1::text[])
+				         ORDER BY f.path LIMIT 1) AS tid
+				FROM files g WHERE g.path <> ALL($1::text[])
+			) t
+			WHERE s.file_id = t.gid AND t.tid IS NOT NULL
+			RETURNING t.tid
+		)
+		UPDATE files SET parsed_sha = NULL WHERE id IN (SELECT tid FROM moved)`, paths); err != nil {
+		return fmt.Errorf("rehome symbols of vanished files: %w", err)
+	}
+	return nil
 }
 
 // upsertBatch writes one multi-row upsert and returns the rows it changed

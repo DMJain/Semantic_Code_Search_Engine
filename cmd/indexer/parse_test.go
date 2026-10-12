@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/walk"
 )
@@ -419,5 +420,111 @@ func TestParseCorpusReparseChangesNoRows(t *testing.T) {
 	runParseCorpus(t, pool, root, 0)
 	if after := snapshot(); after != before {
 		t.Errorf("rows changed by re-parse:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// removeSrc deletes a fixture file from the tree.
+func removeSrc(t *testing.T, root, rel string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestParseCorpusMoveToOtherFileWhileOldFileRemoved proves a symbol moved to
+// another file of its package keeps id and summary when the old file leaves
+// the tree, with walk and parse run in their real order.
+func TestParseCorpusMoveToOtherFileWhileOldFileRemoved(t *testing.T) {
+	for _, tc := range []struct{ name, from, to string }{
+		{"old file sorts first", "a.go", "b.go"},
+		{"old file sorts last", "b.go", "a.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testdb.New(t)
+			root := t.TempDir()
+			const qn = "k8s.io/kubernetes/pkg/p.Moved"
+			writeSrc(t, root, "pkg/p/"+tc.from, "package p\n\nfunc Moved() {}\n")
+			writeSrc(t, root, "pkg/p/"+tc.to, "package p\n\nfunc Other() {}\n")
+			seedFiles(t, pool, root)
+			runParseCorpus(t, pool, root, 0)
+			id := scalarInt(t, pool, `SELECT id FROM symbols WHERE qualified_name = $1`, qn)
+			addDoneSummary(t, pool, id, "summary of Moved")
+
+			removeSrc(t, root, "pkg/p/"+tc.from)
+			writeSrc(t, root, "pkg/p/"+tc.to, "package p\n\nfunc Other() {}\nfunc Moved() {}\n")
+			seedFiles(t, pool, root)
+			runParseCorpus(t, pool, root, 0)
+
+			if got := scalarInt(t, pool, `SELECT id FROM symbols WHERE qualified_name = $1`, qn); got != id {
+				t.Errorf("moved symbol id = %d, want %d", got, id)
+			}
+			if n := scalarInt(t, pool, `SELECT count(*) FROM summaries WHERE level = 'function' AND target_id = $1`, id); n != 1 {
+				t.Errorf("summary rows for moved symbol = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestParseCorpusRemovedFileLosesSymbolsAndSummaries proves symbols of a file
+// removed from the tree with no successor lose their summaries, both when a
+// sibling file keeps the package alive and when the whole package vanishes,
+// leaving no orphan function summaries.
+func TestParseCorpusRemovedFileLosesSymbolsAndSummaries(t *testing.T) {
+	pool := testdb.New(t)
+	root := t.TempDir()
+	writeSrc(t, root, "pkg/p/a.go", "package p\n\nfunc Gone() {}\n")
+	writeSrc(t, root, "pkg/p/b.go", "package p\n\nfunc Kept() {}\n")
+	writeSrc(t, root, "pkg/q/q.go", "package q\n\nfunc Lone() {}\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	for _, name := range []string{"Gone", "Kept", "Lone"} {
+		addDoneSummary(t, pool, scalarInt(t, pool, `SELECT id FROM symbols WHERE name = $1`, name), "summary of "+name)
+	}
+
+	removeSrc(t, root, "pkg/p/a.go")
+	removeSrc(t, root, "pkg/q/q.go")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+
+	if n := scalarInt(t, pool, `SELECT count(*) FROM symbols WHERE name IN ('Gone', 'Lone')`); n != 0 {
+		t.Errorf("symbols of removed files still present: %d", n)
+	}
+	if n := scalarInt(t, pool, `SELECT count(*) FROM summaries`); n != 1 {
+		t.Errorf("summaries = %d, want 1 (Kept only)", n)
+	}
+	if orphans := scalarInt(t, pool,
+		`SELECT count(*) FROM summaries s WHERE s.level = 'function'
+		   AND NOT EXISTS (SELECT 1 FROM symbols y WHERE y.id = s.target_id)`); orphans != 0 {
+		t.Errorf("orphan function summaries = %d, want 0", orphans)
+	}
+}
+
+// TestWritePackageRollsBackOnError proves a package whose later symbol cannot
+// be written leaves nothing behind: no symbols and no file marked parsed.
+func TestWritePackageRollsBackOnError(t *testing.T) {
+	pool := testdb.New(t)
+	root := t.TempDir()
+	writeSrc(t, root, "pkg/p/a.go", "package p\n\nfunc A() {}\n")
+	writeSrc(t, root, "pkg/p/b.go", "package p\n\nfunc B() {}\n")
+	seedFiles(t, pool, root)
+	files, err := packageFiles(context.Background(), pool, "k8s.io/kubernetes/pkg/p")
+	if err != nil || len(files) != 2 {
+		t.Fatalf("package files = %v, err %v", files, err)
+	}
+	good := parse.Symbol{Kind: parse.KindFunc, Name: "A", QualifiedName: "pkg.A", Signature: "func A()", StartLine: 1, EndLine: 1}
+	bad := good
+	bad.Name, bad.QualifiedName = "B", "pkg.B\x00" // NUL is rejected by Postgres text
+	err = writePackage(context.Background(), pool, []parsedFile{
+		{staleFile: files[0], symbols: []parse.Symbol{good}},
+		{staleFile: files[1], symbols: []parse.Symbol{bad}},
+	})
+	if err == nil {
+		t.Fatal("writePackage succeeded, want an error")
+	}
+	if n := scalarInt(t, pool, `SELECT count(*) FROM symbols`); n != 0 {
+		t.Errorf("symbols after failed write = %d, want 0", n)
+	}
+	if n := scalarInt(t, pool, `SELECT count(*) FROM files WHERE parsed_sha IS NOT DISTINCT FROM sha`); n != 0 {
+		t.Errorf("files marked parsed after failed write = %d, want 0", n)
 	}
 }
