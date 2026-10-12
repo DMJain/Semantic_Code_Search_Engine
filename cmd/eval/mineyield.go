@@ -64,6 +64,13 @@ type mineOptions struct {
 	kubeDir string
 }
 
+// Test seams: the GitHub client options and the tag-date lookup, so the command
+// can run end to end against a recorded server without git or the network.
+var (
+	mineClientOptions []github.Option
+	tagDateFn         = kubeTagDate
+)
+
 func runMineYield(ctx context.Context, args []string) error {
 	fs := newFlagSet("mine-yield")
 	months := fs.Int("window-months", 12, "how far back to mine, in months")
@@ -78,12 +85,12 @@ func runMineYield(ctx context.Context, args []string) error {
 		return errNoToken
 	}
 
-	tagDate, err := kubeTagDate(ctx, cfg.KubeDir, cfg.KubeTag)
+	tagDate, err := tagDateFn(ctx, cfg.KubeDir, cfg.KubeTag)
 	if err != nil {
 		return err
 	}
 
-	client := github.NewClient(cfg.GithubToken, github.WithCacheDir(*cacheDir))
+	client := github.NewClient(cfg.GithubToken, append([]github.Option{github.WithCacheDir(*cacheDir)}, mineClientOptions...)...)
 	res, err := mine(ctx, client, mineOptions{
 		repo:    kubeRepo,
 		tag:     cfg.KubeTag,
@@ -187,19 +194,26 @@ func mine(ctx context.Context, client *github.Client, o mineOptions) (mineResult
 	return res, nil
 }
 
-// Rejection reasons, in the order they are printed.
+// Rejection reasons, in the order they are printed. Reasons are exclusive:
+// each rejected PR is counted once, under the first rule it fails (closing
+// issue, then file count, then its files in order), so the counts sum to the
+// number of rejected PRs. "outside slice" also covers vendor and
+// build-constraint files and files absent at the pinned tag. "no changed
+// files" is not one of the ticket's six reasons; a PR with an empty file list
+// is reported separately rather than mislabelled "too many files".
 const (
 	reasonNonGo          = "non-Go file"
 	reasonTestFile       = "test file"
 	reasonGenerated      = "generated file"
 	reasonOutsideSlice   = "outside slice"
 	reasonTooManyFiles   = "too many files"
+	reasonNoFiles        = "no changed files"
 	reasonNoClosingIssue = "no closing issue"
 )
 
 var rejectionReasons = []string{
 	reasonNonGo, reasonTestFile, reasonGenerated,
-	reasonOutsideSlice, reasonTooManyFiles, reasonNoClosingIssue,
+	reasonOutsideSlice, reasonTooManyFiles, reasonNoFiles, reasonNoClosingIssue,
 }
 
 // formatRejections renders the per-reason rejection counts on one line.
@@ -212,14 +226,25 @@ func formatRejections(m map[string]int) string {
 }
 
 // closingRef matches a closing keyword followed by an issue reference, the
-// forms GitHub itself treats as closing ("Fixes #1", "closes org/repo#2").
-var closingRef = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:[\w.-]+/[\w.-]+)?#\d+`)
+// forms GitHub itself treats as closing: "Fixes #1", "Fixes: #1",
+// "closes org/repo#2" and "Resolves https://github.com/o/r/issues/3".
+var closingRef = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:#\d+|[\w.-]+/[\w.-]+#\d+|https?://github\.com/[\w.-]+/[\w.-]+/issues/\d+)`)
 
-// closesIssue reports whether a PR body carries a closing-issue reference. The
-// REST search can only express "links an issue" (linked:issue), not "closed
+var (
+	htmlComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+	fencedCode  = regexp.MustCompile("(?s)```.*?```")
+)
+
+// closesIssue reports whether a PR body carries a closing-issue reference,
+// ignoring text inside HTML comments (the PR template) and fenced code blocks.
+// The REST search can only express "links an issue" (linked:issue), not "closed
 // one", so the query stays as a coarse pre-filter and this check is applied
 // after fetching, on the body the search already returns (no extra call).
-func closesIssue(body string) bool { return closingRef.MatchString(body) }
+func closesIssue(body string) bool {
+	body = htmlComment.ReplaceAllString(body, "")
+	body = fencedCode.ReplaceAllString(body, "")
+	return closingRef.MatchString(body)
+}
 
 // qualifies reports why a PR does not count, or "" when it does: 1-5 changed
 // files, every one a non-test non-generated Go file inside the candidate slice
@@ -229,7 +254,10 @@ func qualifies(ctx context.Context, client *github.Client, o mineOptions, number
 	if err != nil {
 		return "", nil, err
 	}
-	if len(files) < 1 || len(files) > 5 {
+	if len(files) == 0 {
+		return reasonNoFiles, nil, nil
+	}
+	if len(files) > 5 {
 		return reasonTooManyFiles, nil, nil
 	}
 	var prefixes []string
