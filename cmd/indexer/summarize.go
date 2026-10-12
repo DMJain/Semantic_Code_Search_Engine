@@ -68,7 +68,7 @@ func runSummarize(ctx context.Context, args []string) error {
 	}
 
 	if *status {
-		rep, err := runner.Status(ctx, *etaWindow)
+		rep, err := runner.Status(ctx, *etaWindow, *retryFailed)
 		if err != nil {
 			return err
 		}

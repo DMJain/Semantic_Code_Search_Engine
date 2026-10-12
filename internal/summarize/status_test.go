@@ -70,7 +70,7 @@ func TestStatusCountsCurrentVersionOnly(t *testing.T) {
 	insertSummary(t, pool, "file", ids[0], PromptVersion, "done")
 
 	r := newRunner(pool, "http://127.0.0.1:0", dir, 4096, io.Discard)
-	rep, err := r.Status(ctx, time.Millisecond)
+	rep, err := r.Status(ctx, time.Millisecond, false)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -83,48 +83,65 @@ func TestStatusCountsCurrentVersionOnly(t *testing.T) {
 			t.Errorf("count[%s] = %d, want %d (all counts: %v)", status, rep.Counts[status], n, rep.Counts)
 		}
 	}
+	// Three eligible symbols, one done and one failed: one still remains.
 	if rep.Remaining != 1 {
 		t.Errorf("remaining = %d, want 1", rep.Remaining)
 	}
 }
 
-// TestStatusReportETA pins the ETA arithmetic: a 10-row increase over 5s is
-// 2 rows/s; 200 pending rows then take 100s.
+// TestStatusReportETA pins the ETA arithmetic against the real run: eligible
+// 6673, done 379 leaves 6294 remaining; a rate of 600 fn/h makes that ~10.5h.
 func TestStatusReportETA(t *testing.T) {
-	before := map[string]int{"done": 100, "pending": 0}
-	after := map[string]int{"done": 110, "pending": 200}
-	rep := statusReport(before, after, 5*time.Second)
+	before := map[string]int{"done": 378}
+	after := map[string]int{"done": 379}
+	rep := statusReport(6673, before, after, false, 6*time.Second)
 	if !rep.Measured {
 		t.Fatal("report not measured despite progress")
 	}
-	if rep.PerHour != 7200 {
-		t.Errorf("per hour = %v, want 7200", rep.PerHour)
+	if rep.PerHour != 600 {
+		t.Errorf("per hour = %v, want 600", rep.PerHour)
 	}
-	if rep.ETA != 100*time.Second {
-		t.Errorf("eta = %s, want 100s", rep.ETA)
+	if rep.Remaining != 6294 {
+		t.Errorf("remaining = %d, want 6294", rep.Remaining)
 	}
-	if rep.Remaining != 200 {
-		t.Errorf("remaining = %d, want 200", rep.Remaining)
-	}
-	if rep.Counts["done"] != 110 {
-		t.Errorf("counts done = %d, want 110", rep.Counts["done"])
+	if want := 6294 * 6 * time.Second; rep.ETA != want {
+		t.Errorf("eta = %s, want %s", rep.ETA, want)
 	}
 }
 
-// TestStatusReportNoProgress proves a window without completions reports an
-// unknown ETA rather than dividing by zero.
+// TestStatusReportFailedRemaining proves failed rows are excluded from
+// remaining (they are terminal) unless a retry run will re-pick them.
+func TestStatusReportFailedRemaining(t *testing.T) {
+	counts := map[string]int{"done": 100, "failed": 5, "pending": 1}
+	if got := statusReport(200, counts, counts, false, time.Second).Remaining; got != 95 {
+		t.Errorf("remaining without retry = %d, want 95", got)
+	}
+	if got := statusReport(200, counts, counts, true, time.Second).Remaining; got != 100 {
+		t.Errorf("remaining with retry = %d, want 100", got)
+	}
+}
+
+// TestStatusReportNoProgress proves a window without completions (or with a
+// shrinking done count) reports an unknown ETA rather than dividing by zero.
 func TestStatusReportNoProgress(t *testing.T) {
-	rep := statusReport(
-		map[string]int{"done": 100},
-		map[string]int{"done": 100, "pending": 5},
-		time.Second)
-	if rep.Measured {
-		t.Fatal("report measured with no completions")
-	}
-	if rep.ETA != 0 {
-		t.Errorf("eta = %s, want 0", rep.ETA)
-	}
-	if rep.Remaining != 5 {
-		t.Errorf("remaining = %d, want 5", rep.Remaining)
+	for _, before := range []map[string]int{
+		{"done": 100},
+		{"done": 101},
+	} {
+		rep := statusReport(
+			105,
+			before,
+			map[string]int{"done": 100, "pending": 5},
+			false,
+			time.Second)
+		if rep.Measured {
+			t.Fatal("report measured without progress")
+		}
+		if rep.ETA != 0 {
+			t.Errorf("eta = %s, want 0", rep.ETA)
+		}
+		if rep.Remaining != 5 {
+			t.Errorf("remaining = %d, want 5", rep.Remaining)
+		}
 	}
 }

@@ -14,7 +14,7 @@ const DefaultStatusWindow = 30 * time.Second
 
 // StatusReport is the summarize status for the current prompt version only
 // (D-068). Counts holds pending/done/failed; ETA is the estimate to clear the
-// pending rows at the measured rate and is zero (Measured false) when the
+// remaining rows at the measured rate and is zero (Measured false) when the
 // sampling window saw no completion.
 type StatusReport struct {
 	PromptVersion string
@@ -28,18 +28,28 @@ type StatusReport struct {
 
 // Status counts the current-version function summary rows by status, then
 // counts again after window to measure how many rows completed in that
-// wall-clock span, and derives an ETA for the pending rows.
-func (r *Runner) Status(ctx context.Context, window time.Duration) (StatusReport, error) {
+// wall-clock span, and derives an ETA for the rows that still need work.
+// Remaining is eligible minus done (minus failed unless retryFailed, since a
+// retry run re-picks failed rows), not just the in-flight pending count, so the
+// ETA reflects the whole queue.
+func (r *Runner) Status(ctx context.Context, window time.Duration, retryFailed bool) (StatusReport, error) {
 	if window <= 0 {
 		window = DefaultStatusWindow
 	}
+	// Count eligible rows so remaining reflects the whole queue, not just the
+	// in-flight pending rows.
+	rows, err := r.eligible(ctx)
+	if err != nil {
+		return StatusReport{}, err
+	}
+	eligible := len(rows)
 	before, err := r.statusCounts(ctx)
 	if err != nil {
 		return StatusReport{}, err
 	}
-	// Nothing pending means there is nothing to estimate; report at once.
+	// Nothing in flight means no rate can be measured; report at once.
 	if before["pending"] == 0 {
-		return statusReport(before, before, window), nil
+		return statusReport(eligible, before, before, retryFailed, window), nil
 	}
 	timer := time.NewTimer(window)
 	defer timer.Stop()
@@ -51,16 +61,20 @@ func (r *Runner) Status(ctx context.Context, window time.Duration) (StatusReport
 	if err != nil {
 		return StatusReport{}, err
 	}
-	return statusReport(before, after, window), nil
+	return statusReport(eligible, before, after, retryFailed, window), nil
 }
 
 // statusReport derives the report from two done-count samples; it is pure so
 // the ETA arithmetic is testable without waiting on a real window.
-func statusReport(before, after map[string]int, window time.Duration) StatusReport {
+func statusReport(eligible int, before, after map[string]int, retryFailed bool, window time.Duration) StatusReport {
+	failed := after["failed"]
+	if retryFailed {
+		failed = 0 // a retry run re-picks failed rows, so they are still remaining
+	}
 	rep := StatusReport{
 		PromptVersion: PromptVersion,
 		Counts:        after,
-		Remaining:     after["pending"],
+		Remaining:     max(0, eligible-after["done"]-failed),
 		Window:        window,
 	}
 	delta := after["done"] - before["done"]
