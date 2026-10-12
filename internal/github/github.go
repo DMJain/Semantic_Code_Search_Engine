@@ -3,6 +3,9 @@
 // and rate-limit endpoints, uses the standard library, waits on an injected
 // clock (tests never sleep) and caches every raw response on disk keyed by
 // request URL, so a second run makes no HTTP calls.
+//
+// A rate-limited response (403/429) is waited out and retried once (D-071); the
+// mine-yield probe depends on it to survive a long run.
 package github
 
 import (
