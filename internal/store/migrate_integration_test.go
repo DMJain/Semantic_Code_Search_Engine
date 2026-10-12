@@ -282,3 +282,72 @@ func gooseVersion(ctx context.Context, t *testing.T, dbURL string) int64 {
 	}
 	return version
 }
+
+// TestSummariesCompletedAtMigrationKeepsRows proves the completion-timestamp
+// migration is reversible and non-destructive: summaries rows present before
+// Down survive Down and the following Up, the column exists only while the
+// migration is applied, and rows written before it have a NULL timestamp.
+func TestSummariesCompletedAtMigrationKeepsRows(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if !summariesHasCompletedAt(ctx, t, conn) {
+		t.Fatal("summaries.completed_at missing after up")
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status)
+		VALUES ('function', 1, 'x', 'm', 'fn-v1', 'h', 'done')`); err != nil {
+		t.Fatalf("insert summary: %v", err)
+	}
+	var nullTS bool
+	if err := conn.QueryRow(ctx, `SELECT completed_at IS NULL FROM summaries WHERE target_id = 1`).Scan(&nullTS); err != nil || !nullTS {
+		t.Fatalf("completed_at default null = %v (err %v), want true", nullTS, err)
+	}
+
+	if _, err := store.MigrateDown(ctx, dbURL); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if summariesHasCompletedAt(ctx, t, conn) {
+		t.Error("summaries.completed_at still present after down")
+	}
+	assertSummaryRowCount(ctx, t, conn, 1)
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	if !summariesHasCompletedAt(ctx, t, conn) {
+		t.Error("summaries.completed_at missing after re-up")
+	}
+	assertSummaryRowCount(ctx, t, conn, 1)
+}
+
+func summariesHasCompletedAt(ctx context.Context, t *testing.T, conn *pgx.Conn) bool {
+	t.Helper()
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = 'summaries' AND column_name = 'completed_at' AND is_nullable = 'YES'
+		AND data_type = 'timestamp with time zone')`).Scan(&ok); err != nil {
+		t.Fatalf("check completed_at: %v", err)
+	}
+	return ok
+}
+
+func assertSummaryRowCount(ctx context.Context, t *testing.T, conn *pgx.Conn, want int) {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM summaries`).Scan(&n); err != nil {
+		t.Fatalf("count summaries: %v", err)
+	}
+	if n != want {
+		t.Errorf("summaries rows = %d, want %d", n, want)
+	}
+}

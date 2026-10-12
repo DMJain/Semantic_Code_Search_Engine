@@ -6,87 +6,77 @@ import (
 	"time"
 )
 
-// DefaultStatusWindow is the wall-clock interval between the two done-count
-// samples `summarize --status` uses to measure the current completion rate.
-// The summaries table has no timestamp column and the migrations are frozen
-// (D-070), so the rate is measured live over this window (the ticket's
-// "wall-clock" method) instead of from stored completion times.
-const DefaultStatusWindow = 30 * time.Second
+// RateSamples is how many of the most recent timestamped completions of the
+// current prompt version the ETA rate is computed from.
+const RateSamples = 100
+
+// minRateSamples is the fewest timestamped completions that give a rate (two
+// completions bound one interval).
+const minRateSamples = 2
 
 // StatusReport is the summarize status for the current prompt version only
 // (D-068). Counts holds pending/done/failed; ETA is the estimate to clear the
-// remaining rows at the measured rate and is zero (Measured false) when the
-// sampling window saw no completion.
+// whole remaining queue at the recent rate. When the rate cannot be computed
+// Measured is false, ETA is zero and Reason says why.
 type StatusReport struct {
 	PromptVersion string
 	Counts        map[string]int
 	Remaining     int
-	Window        time.Duration
 	PerHour       float64
 	ETA           time.Duration
 	Measured      bool
+	Reason        string
 }
 
-// Status counts the current-version function summary rows by status, then
-// counts again after window to measure how many rows completed in that
-// wall-clock span, and derives an ETA for the rows that still need work.
-// Remaining is eligible minus done (minus failed unless retryFailed, since a
-// retry run re-picks failed rows), not just the in-flight pending count, so the
-// ETA reflects the whole queue.
-func (r *Runner) Status(ctx context.Context, window time.Duration, retryFailed bool) (StatusReport, error) {
-	if window <= 0 {
-		window = DefaultStatusWindow
-	}
-	// Count eligible rows so remaining reflects the whole queue, not just the
-	// in-flight pending rows.
+// Status counts the current-version function summary rows by status and
+// derives an ETA from the stored completion times of the most recent
+// [RateSamples] done rows. It never waits. Remaining is eligible minus done
+// (minus failed unless retryFailed, since a retry run re-picks failed rows),
+// not just the in-flight pending count, so the ETA covers the whole queue.
+func (r *Runner) Status(ctx context.Context, retryFailed bool) (StatusReport, error) {
 	rows, err := r.eligible(ctx)
 	if err != nil {
 		return StatusReport{}, err
 	}
-	eligible := len(rows)
-	before, err := r.statusCounts(ctx)
+	counts, err := r.statusCounts(ctx)
 	if err != nil {
 		return StatusReport{}, err
 	}
-	// Nothing in flight means no rate can be measured; report at once.
-	if before[StatusPending.String()] == 0 {
-		return statusReport(eligible, before, before, retryFailed, window), nil
-	}
-	timer := time.NewTimer(window)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
-	}
-	after, err := r.statusCounts(ctx)
-	if err != nil {
-		return StatusReport{}, err
-	}
-	return statusReport(eligible, before, after, retryFailed, window), nil
-}
-
-// statusReport derives the report from two done-count samples; it is pure so
-// the ETA arithmetic is testable without waiting on a real window.
-func statusReport(eligible int, before, after map[string]int, retryFailed bool, window time.Duration) StatusReport {
-	failed := after[StatusFailed.String()]
+	failed := counts[StatusFailed.String()]
 	if retryFailed {
-		failed = 0 // a retry run re-picks failed rows, so they are still remaining
+		failed = 0
 	}
 	rep := StatusReport{
 		PromptVersion: PromptVersion,
-		Counts:        after,
-		Remaining:     max(0, eligible-after[StatusDone.String()]-failed),
-		Window:        window,
+		Counts:        counts,
+		Remaining:     max(0, len(rows)-counts[StatusDone.String()]-failed),
 	}
-	delta := after[StatusDone.String()] - before[StatusDone.String()]
-	if delta <= 0 || window <= 0 {
-		return rep
+
+	var n int
+	var span float64
+	if err := r.Pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM max(completed_at) - min(completed_at)), 0)
+		FROM (
+			SELECT completed_at FROM summaries
+			WHERE level = $1 AND prompt_version = $2 AND status = $3 AND completed_at IS NOT NULL
+			ORDER BY completed_at DESC
+			LIMIT $4) recent`,
+		LevelFunction, PromptVersion, StatusDone, RateSamples).Scan(&n, &span); err != nil {
+		return StatusReport{}, fmt.Errorf("read completion times: %w", err)
 	}
-	rate := float64(delta) / window.Seconds()
-	rep.Measured = true
-	rep.PerHour = rate * 3600
-	rep.ETA = time.Duration(float64(rep.Remaining) / rate * float64(time.Second))
-	return rep
+	switch {
+	case n < minRateSamples:
+		rep.Reason = fmt.Sprintf("only %d timestamped completion(s) for %s, need at least %d (rows done before timestamps existed are not used)",
+			n, PromptVersion, minRateSamples)
+	case span <= 0:
+		rep.Reason = fmt.Sprintf("the %d most recent timestamped completions share one instant", n)
+	default:
+		rate := float64(n-1) / span // completions per second
+		rep.Measured = true
+		rep.PerHour = rate * 3600
+		rep.ETA = time.Duration(float64(rep.Remaining) / rate * float64(time.Second))
+	}
+	return rep, nil
 }
 
 // statusCounts returns the number of current-version function rows per status.

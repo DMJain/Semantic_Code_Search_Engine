@@ -41,7 +41,6 @@ func runSummarize(ctx context.Context, args []string) error {
 	bench := fs.Bool("bench", false, "run the throughput benchmark (writes no summary rows) and exit")
 	out := fs.String("out", defaultBenchOutput, "benchmark results JSON path (--bench only)")
 	status := fs.Bool("status", false, "print current-prompt-version counts and an ETA, then exit")
-	etaWindow := fs.Duration("eta-window", summarize.DefaultStatusWindow, "wall-clock window used to measure the completion rate (--status only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -68,7 +67,7 @@ func runSummarize(ctx context.Context, args []string) error {
 	}
 
 	if *status {
-		rep, err := runner.Status(ctx, *etaWindow, *retryFailed)
+		rep, err := runner.Status(ctx, *retryFailed)
 		if err != nil {
 			return err
 		}
@@ -105,8 +104,8 @@ func runSummarize(ctx context.Context, args []string) error {
 	return err
 }
 
-// printStatus prints the current-prompt-version counts and, when the sampling
-// window saw completions, the measured rate and ETA.
+// printStatus prints the current-prompt-version counts and the ETA from the
+// recent completion rate, or "ETA unknown" with the reason.
 func printStatus(w io.Writer, rep summarize.StatusReport) {
 	fmt.Fprintf(w, "prompt_version %s\n", rep.PromptVersion)
 	fmt.Fprintf(w, "pending %d done %d failed %d\n",
@@ -116,9 +115,9 @@ func printStatus(w io.Writer, rep summarize.StatusReport) {
 	case rep.Remaining == 0:
 		fmt.Fprintln(w, "eta 0s (nothing pending)")
 	case rep.Measured:
-		fmt.Fprintf(w, "rate %.1f fn/h (measured over %s)\n", rep.PerHour, rep.Window)
+		fmt.Fprintf(w, "rate %.1f fn/h (last %d timestamped completions)\n", rep.PerHour, summarize.RateSamples)
 		fmt.Fprintf(w, "eta %s\n", rep.ETA.Round(time.Second))
 	default:
-		fmt.Fprintln(w, "eta unknown (no completions observed in the sampling window)")
+		fmt.Fprintf(w, "ETA unknown: %s\n", rep.Reason)
 	}
 }

@@ -2,7 +2,9 @@ package summarize
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +72,7 @@ func TestStatusCountsCurrentVersionOnly(t *testing.T) {
 	insertSummary(t, pool, "file", ids[0], PromptVersion, "done")
 
 	r := newRunner(pool, "http://127.0.0.1:0", dir, 4096, io.Discard)
-	rep, err := r.Status(ctx, time.Millisecond, false)
+	rep, err := r.Status(ctx, false)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -89,59 +91,164 @@ func TestStatusCountsCurrentVersionOnly(t *testing.T) {
 	}
 }
 
-// TestStatusReportETA pins the ETA arithmetic against the real run: eligible
-// 6673, done 379 leaves 6294 remaining; a rate of 600 fn/h makes that ~10.5h.
-func TestStatusReportETA(t *testing.T) {
-	before := map[string]int{"done": 378}
-	after := map[string]int{"done": 379}
-	rep := statusReport(6673, before, after, false, 6*time.Second)
+// TestRunSetsCompletedAtWhenDone proves a row gets a completion timestamp when
+// it becomes done and none when it fails.
+func TestRunSetsCompletedAtWhenDone(t *testing.T) {
+	pool := testdb.New(t)
+	dir := t.TempDir()
+	source, spans := funcFile("A", "B")
+	seedSource(t, pool, dir, "pkg/scheduler/ts.go", source, spans)
+
+	fake := newFakeOllama(t, nil)
+	r := newRunner(pool, fake.URL, dir, 4096, io.Discard)
+	before := time.Now().Add(-time.Minute)
+	if _, err := r.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var stamped int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM summaries
+		WHERE status = 'done' AND completed_at BETWEEN $1 AND now() + interval '1 minute'`, before).Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	if stamped != 2 {
+		t.Errorf("done rows with completed_at = %d, want 2", stamped)
+	}
+
+	big, bigSpans := largeFile("Huge", 400)
+	seedSource(t, pool, dir, "pkg/scheduler/big.go", big, bigSpans)
+	small := newRunner(pool, fake.URL, dir, 64, io.Discard)
+	if _, err := small.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("run big: %v", err)
+	}
+	var failedStamped int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM summaries WHERE status = 'failed' AND completed_at IS NOT NULL`).Scan(&failedStamped); err != nil {
+		t.Fatal(err)
+	}
+	if failedStamped != 0 {
+		t.Errorf("failed rows with completed_at = %d, want 0", failedStamped)
+	}
+}
+
+// seedDoneAt inserts a done row for symbol id at the given completion time
+// (nil = a row that was done before timestamps existed).
+func seedDoneAt(t *testing.T, pool *pgxpool.Pool, id int64, version string, at *time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status, completed_at)
+		VALUES ('function', $1, 't', 'test-model', $2, 'h', 'done', $3)`, id, version, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func statusFixture(t *testing.T, funcs int) (*Runner, []int64) {
+	t.Helper()
+	pool := testdb.New(t)
+	dir := t.TempDir()
+	names := make([]string, funcs)
+	for i := range names {
+		names[i] = fmt.Sprintf("F%03d", i)
+	}
+	source, spans := funcFile(names...)
+	seedSource(t, pool, dir, "pkg/scheduler/eta.go", source, spans)
+	return newRunner(pool, "http://127.0.0.1:0", dir, 4096, io.Discard), symbolIDs(t, pool)
+}
+
+// TestStatusETAFollowsLast100Completions proves the rate comes from the most
+// recent 100 timestamped completions, not older ones: 50 old completions an
+// hour apart are followed by 100 ten seconds apart (99 intervals over 990s),
+// so 10 remaining rows take 100s.
+func TestStatusETAFollowsLast100Completions(t *testing.T) {
+	r, ids := statusFixture(t, 160)
+	base := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 50; i++ {
+		at := base.Add(time.Duration(i) * time.Hour)
+		seedDoneAt(t, r.Pool, ids[i], PromptVersion, &at)
+	}
+	recent := base.Add(100 * time.Hour)
+	for i := 0; i < 100; i++ {
+		at := recent.Add(time.Duration(i) * 10 * time.Second)
+		seedDoneAt(t, r.Pool, ids[50+i], PromptVersion, &at)
+	}
+
+	start := time.Now()
+	rep, err := r.Status(context.Background(), false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("status took %s, want immediate", time.Since(start))
+	}
 	if !rep.Measured {
-		t.Fatal("report not measured despite progress")
+		t.Fatalf("not measured, reason %q", rep.Reason)
 	}
-	if rep.PerHour != 600 {
-		t.Errorf("per hour = %v, want 600", rep.PerHour)
+	if rep.Remaining != 10 {
+		t.Errorf("remaining = %d, want 10", rep.Remaining)
 	}
-	if rep.Remaining != 6294 {
-		t.Errorf("remaining = %d, want 6294", rep.Remaining)
+	if rep.PerHour != 360 {
+		t.Errorf("per hour = %v, want 360", rep.PerHour)
 	}
-	if want := 6294 * 6 * time.Second; rep.ETA != want {
-		t.Errorf("eta = %s, want %s", rep.ETA, want)
-	}
-}
-
-// TestStatusReportFailedRemaining proves failed rows are excluded from
-// remaining (they are terminal) unless a retry run will re-pick them.
-func TestStatusReportFailedRemaining(t *testing.T) {
-	counts := map[string]int{"done": 100, "failed": 5, "pending": 1}
-	if got := statusReport(200, counts, counts, false, time.Second).Remaining; got != 95 {
-		t.Errorf("remaining without retry = %d, want 95", got)
-	}
-	if got := statusReport(200, counts, counts, true, time.Second).Remaining; got != 100 {
-		t.Errorf("remaining with retry = %d, want 100", got)
+	if rep.ETA != 100*time.Second {
+		t.Errorf("eta = %s, want 1m40s", rep.ETA)
 	}
 }
 
-// TestStatusReportNoProgress proves a window without completions (or with a
-// shrinking done count) reports an unknown ETA rather than dividing by zero.
-func TestStatusReportNoProgress(t *testing.T) {
-	for _, before := range []map[string]int{
-		{"done": 100},
-		{"done": 101},
-	} {
-		rep := statusReport(
-			105,
-			before,
-			map[string]int{"done": 100, "pending": 5},
-			false,
-			time.Second)
-		if rep.Measured {
-			t.Fatal("report measured without progress")
-		}
-		if rep.ETA != 0 {
-			t.Errorf("eta = %s, want 0", rep.ETA)
-		}
-		if rep.Remaining != 5 {
-			t.Errorf("remaining = %d, want 5", rep.Remaining)
-		}
+// TestStatusETAUnknownBelowTwoTimestamps proves fewer than two timestamped
+// completions gives no ETA and a reason (rows done before timestamps existed
+// do not count).
+func TestStatusETAUnknownBelowTwoTimestamps(t *testing.T) {
+	r, ids := statusFixture(t, 5)
+	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	seedDoneAt(t, r.Pool, ids[0], PromptVersion, nil)
+	seedDoneAt(t, r.Pool, ids[1], PromptVersion, nil)
+	seedDoneAt(t, r.Pool, ids[2], PromptVersion, &at)
+
+	rep, err := r.Status(context.Background(), false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if rep.Measured || rep.ETA != 0 {
+		t.Errorf("measured = %v eta = %s, want unknown", rep.Measured, rep.ETA)
+	}
+	if !strings.Contains(rep.Reason, "timestamped") {
+		t.Errorf("reason = %q, want it to mention timestamped completions", rep.Reason)
+	}
+	if rep.Remaining != 2 {
+		t.Errorf("remaining = %d, want 2", rep.Remaining)
+	}
+}
+
+// TestStatusETAIgnoresOtherPromptVersion proves timestamped rows of another
+// prompt version never feed the rate.
+func TestStatusETAIgnoresOtherPromptVersion(t *testing.T) {
+	r, ids := statusFixture(t, 6)
+	base := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		at := base.Add(time.Duration(i) * time.Second)
+		seedDoneAt(t, r.Pool, ids[i], "fn-v0", &at)
+	}
+	only := base.Add(time.Hour)
+	seedDoneAt(t, r.Pool, ids[3], PromptVersion, &only)
+
+	rep, err := r.Status(context.Background(), false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if rep.Measured {
+		t.Errorf("measured from another version's rows: per hour %v", rep.PerHour)
+	}
+	if rep.Counts["done"] != 1 {
+		t.Errorf("done = %d, want 1", rep.Counts["done"])
+	}
+
+	second := base.Add(time.Hour + 30*time.Second)
+	seedDoneAt(t, r.Pool, ids[4], PromptVersion, &second)
+	rep, err = r.Status(context.Background(), false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !rep.Measured || rep.PerHour != 120 {
+		t.Errorf("measured = %v per hour = %v, want true/120", rep.Measured, rep.PerHour)
 	}
 }

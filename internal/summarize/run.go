@@ -136,7 +136,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Stats, error) {
 
 // work builds the prompt input and input hash for each row and returns the rows
 // that still need a summary, plus the number skipped because they are already
-// done with the same input hash or failed without --retry-failed (D-065).
+// current (see [symbolRow.skip], D-065).
 func (r *Runner) work(rows []symbolRow, retryFailed bool) ([]workItem, int, error) {
 	work := make([]workItem, 0, len(rows))
 	skipped := 0
@@ -146,11 +146,7 @@ func (r *Runner) work(rows []symbolRow, retryFailed bool) ([]workItem, int, erro
 			return nil, 0, fmt.Errorf("read %s: %w", sr.path, err)
 		}
 		hash := in.Hash()
-		if sr.storedStatus == StatusDone && sr.storedHash == hash {
-			skipped++
-			continue
-		}
-		if sr.storedStatus == StatusFailed && !retryFailed {
+		if sr.skip(hash, retryFailed) {
 			skipped++
 			continue
 		}
@@ -255,7 +251,7 @@ func (r *Runner) markPending(ctx context.Context, it workItem) error {
 		INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status, reason)
 		VALUES ($5, $1, NULL, $2, $3, $4, $6, NULL)
 		ON CONFLICT (level, target_id, prompt_version) DO UPDATE SET
-			status = $6, text = NULL, reason = NULL,
+			status = $6, text = NULL, reason = NULL, completed_at = NULL,
 			model = EXCLUDED.model, input_hash = EXCLUDED.input_hash`,
 		it.row.id, r.Model, PromptVersion, it.hash, LevelFunction, StatusPending); err != nil {
 		return fmt.Errorf("mark pending %d: %w", it.row.id, err)
@@ -275,9 +271,10 @@ func (r *Runner) finalize(ctx context.Context, id int64, status Status, text, re
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE summaries SET status = $1, text = $2, reason = $3
+		UPDATE summaries SET status = $1, text = $2, reason = $3,
+			completed_at = CASE WHEN $1 = $7 THEN now() END
 		WHERE level = $6 AND target_id = $4 AND prompt_version = $5`,
-		status, store.NullIfEmpty(text), store.NullIfEmpty(reason), id, PromptVersion, LevelFunction); err != nil {
+		status, store.NullIfEmpty(text), store.NullIfEmpty(reason), id, PromptVersion, LevelFunction, StatusDone); err != nil {
 		return fmt.Errorf("finalize %d: %w", id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
