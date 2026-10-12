@@ -21,6 +21,25 @@ type symbolRow struct {
 	storedHash    string
 }
 
+// skip reports whether the row needs no work for the given current input hash.
+// A row of any status is current only when its stored hash equals hash (D-065):
+// a done row then stays done, and a failed row stays failed unless retryFailed.
+// A failed row whose hash changed is stale, so it is attempted again without
+// the flag; a pending row is always re-attempted (it is an interrupted run).
+func (sr symbolRow) skip(hash string, retryFailed bool) bool {
+	if sr.storedHash != hash {
+		return false
+	}
+	switch sr.storedStatus {
+	case StatusDone:
+		return true
+	case StatusFailed:
+		return !retryFailed
+	default:
+		return false
+	}
+}
+
 // eligible returns every in-slice function or method whose body is at least
 // [MinBodyLines] lines, with its current function-summary status and hash, ordered by
 // qualified_name (the sampling order).

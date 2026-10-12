@@ -311,15 +311,25 @@ func TestRunRetryFailed(t *testing.T) {
 		`SELECT id FROM symbols WHERE qualified_name = 'pkg/scheduler/retry.Retry'`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status, reason)
-		 VALUES ('function', $1, NULL, 'test-model', $2, 'stale', 'failed', $3)`,
-		id, PromptVersion, ReasonHTTPError); err != nil {
-		t.Fatal(err)
-	}
-
 	fake := newFakeOllama(t, nil)
 	r := newRunner(pool, fake.URL, dir, 4096, io.Discard)
+
+	// The failed row carries the symbol's current hash: a failure on unchanged
+	// input is what --retry-failed exists for (a changed hash is stale; S1C-10).
+	rows, err := r.eligible(ctx)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("eligible rows = %d err = %v, want 1", len(rows), err)
+	}
+	in, err := BuildInput(dir, rows[0].path, rows[0].sym)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO summaries (level, target_id, text, model, prompt_version, input_hash, status, reason)
+		 VALUES ('function', $1, NULL, 'test-model', $2, $4, 'failed', $3)`,
+		id, PromptVersion, ReasonHTTPError, in.Hash()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Without --retry-failed the failed row is skipped and the model is not called.
 	st, err := r.Run(ctx, RunOptions{})
