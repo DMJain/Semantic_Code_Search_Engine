@@ -37,8 +37,8 @@ func TestEligibilityGoAndSQLFormsAgree(t *testing.T) {
 	for i, f := range fixtures {
 		var fileID int64
 		if err := pool.QueryRow(ctx, `
-			INSERT INTO files (path, package, sha, loc, in_slice)
-			VALUES ($1, 'p', 'sha', 100, $2) RETURNING id`,
+			INSERT INTO files (path, package, sha, loc, in_slice, parsed_sha)
+			VALUES ($1, 'p', 'sha', 100, $2, 'sha') RETURNING id`,
 			fmt.Sprintf("f%d.go", i), f.inSlice).Scan(&fileID); err != nil {
 			t.Fatal(err)
 		}

@@ -53,7 +53,7 @@ func (r *Runner) eligible(ctx context.Context) ([]symbolRow, error) {
 		JOIN files f ON f.id = s.file_id
 		LEFT JOIN summaries sm
 		  ON sm.level = $2 AND sm.target_id = s.id AND sm.prompt_version = $1
-		WHERE f.in_slice
+		WHERE f.in_slice AND `+ParsedFileWhere+`
 		ORDER BY s.qualified_name`, PromptVersion, LevelFunction)
 	if err != nil {
 		return nil, fmt.Errorf("list eligible symbols: %w", err)

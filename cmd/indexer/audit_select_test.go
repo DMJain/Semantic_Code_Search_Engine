@@ -30,8 +30,8 @@ func TestSelectAuditRowsTakesAllInSliceFuncsAndMethods(t *testing.T) {
 	}
 	for i, f := range fixtures {
 		var id int64
-		if err := pool.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc, in_slice)
-			VALUES ($1, 'p', 'sha', 100, $2) RETURNING id`, fmt.Sprintf("f%d.go", i), f.inSlice).Scan(&id); err != nil {
+		if err := pool.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc, in_slice, parsed_sha)
+			VALUES ($1, 'p', 'sha', 100, $2, 'sha') RETURNING id`, fmt.Sprintf("f%d.go", i), f.inSlice).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := pool.Exec(ctx, `INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line, raw_calls)

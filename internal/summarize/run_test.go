@@ -77,8 +77,8 @@ func seedSource(t *testing.T, pool *pgxpool.Pool, dir, rel, source string, spans
 	pkg := strings.TrimSuffix(rel, ".go")
 	var fileID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO files (path, package, sha, loc, in_slice)
-		VALUES ($1, $2, 'sha', $3, true) RETURNING id`,
+		INSERT INTO files (path, package, sha, loc, in_slice, parsed_sha)
+		VALUES ($1, $2, 'sha', $3, true, 'sha') RETURNING id`,
 		rel, pkg, strings.Count(source, "\n")).Scan(&fileID); err != nil {
 		t.Fatal(err)
 	}

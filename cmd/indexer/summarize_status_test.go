@@ -64,8 +64,8 @@ func TestStatusToPrintStatusEndToEnd(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
 	var fileID int64
-	if err := pool.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc, in_slice)
-		VALUES ('pkg/e2e.go', 'pkg', 'sha', 100, true) RETURNING id`).Scan(&fileID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc, in_slice, parsed_sha)
+		VALUES ('pkg/e2e.go', 'pkg', 'sha', 100, true, 'sha') RETURNING id`).Scan(&fileID); err != nil {
 		t.Fatal(err)
 	}
 	base := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)

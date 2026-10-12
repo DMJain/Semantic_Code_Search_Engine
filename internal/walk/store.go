@@ -12,6 +12,9 @@ import (
 // batchSize is the number of rows per upsert statement (sprint T03).
 const batchSize = 500
 
+// Sync couples files to symbols: deleting a file cascades its symbols, so
+// symbols of vanished files are re-homed first (see rehomeVanishedSymbols).
+//
 // Sync upserts files into the files table in batches inside one transaction,
 // then deletes rows whose path is not in files. It returns the number of rows
 // inserted or updated, so an unchanged second walk reports 0 changed, and the

@@ -22,11 +22,18 @@ func Eligible(sym parse.Symbol, inSlice bool) bool {
 	return sym.EndLine-sym.StartLine >= MinBodyLines
 }
 
-// InSliceFuncWhere is the SQL condition for an in-slice function or method,
-// with no body-length threshold. It expects the aliases s (symbols) and f
-// (files).
+// ParsedFileWhere is the SQL condition that the symbol's file has been parsed
+// at its current content hash. Walk can re-home symbols of a vanished file to
+// a survivor and clears the survivor's marker, so until the next parse their
+// line ranges and slice flag belong to another file and must not be used. It
+// expects the alias f (files).
+const ParsedFileWhere = "f.parsed_sha = f.sha"
+
+// InSliceFuncWhere is the SQL condition for an in-slice function or method in
+// a parsed file, with no body-length threshold. It expects the aliases s
+// (symbols) and f (files).
 func InSliceFuncWhere() string {
-	return fmt.Sprintf("f.in_slice AND s.kind IN ('%s', '%s')", parse.KindFunc, parse.KindMethod)
+	return fmt.Sprintf("f.in_slice AND %s AND s.kind IN ('%s', '%s')", ParsedFileWhere, parse.KindFunc, parse.KindMethod)
 }
 
 // EligibleWhere returns the SQL form of [Eligible] as a WHERE condition over
