@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -250,5 +253,85 @@ func TestStatusETAIgnoresOtherPromptVersion(t *testing.T) {
 	}
 	if !rep.Measured || rep.PerHour != 120 {
 		t.Errorf("measured = %v per hour = %v, want true/120", rep.Measured, rep.PerHour)
+	}
+}
+
+// TestStatusRetryFailedKeepsFailedRemaining proves failed rows are terminal
+// (excluded from remaining) unless a retry run will re-pick them.
+func TestStatusRetryFailedKeepsFailedRemaining(t *testing.T) {
+	r, ids := statusFixture(t, 10)
+	for i := 0; i < 3; i++ {
+		seedDoneAt(t, r.Pool, ids[i], PromptVersion, nil)
+	}
+	for i := 3; i < 5; i++ {
+		insertSummary(t, r.Pool, "function", ids[i], PromptVersion, "failed")
+	}
+	for retry, want := range map[bool]int{false: 5, true: 7} {
+		rep, err := r.Status(context.Background(), retry)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if rep.Remaining != want {
+			t.Errorf("retryFailed=%v remaining = %d, want %d", retry, rep.Remaining, want)
+		}
+	}
+}
+
+// TestStatusETAUnknownWhenCompletionsShareOneInstant proves a zero time span
+// gives "unknown" with a reason instead of dividing by zero.
+func TestStatusETAUnknownWhenCompletionsShareOneInstant(t *testing.T) {
+	r, ids := statusFixture(t, 5)
+	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	seedDoneAt(t, r.Pool, ids[0], PromptVersion, &at)
+	seedDoneAt(t, r.Pool, ids[1], PromptVersion, &at)
+
+	rep, err := r.Status(context.Background(), false)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if rep.Measured || rep.ETA != 0 {
+		t.Errorf("measured = %v eta = %s, want unknown", rep.Measured, rep.ETA)
+	}
+	if !strings.Contains(rep.Reason, "one instant") {
+		t.Errorf("reason = %q, want it to mention one instant", rep.Reason)
+	}
+}
+
+// TestRerunClearsOldCompletedAtWhilePending proves a row sent back to pending
+// by a changed input hash loses its old completion time until it is done again.
+func TestRerunClearsOldCompletedAtWhilePending(t *testing.T) {
+	pool := testdb.New(t)
+	dir := t.TempDir()
+	source, spans := funcFile("A")
+	seedSource(t, pool, dir, "pkg/scheduler/redo.go", source, spans)
+
+	var sawStamp atomic.Int64
+	fake := newFakeOllama(t, func(int64) {
+		var n int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM summaries WHERE status = 'pending' AND completed_at IS NOT NULL`).Scan(&n); err != nil {
+			t.Error(err)
+		}
+		sawStamp.Add(int64(n))
+	})
+	r := newRunner(pool, fake.URL, dir, 4096, io.Discard)
+	if _, err := r.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// Change the function body (hash changes) and rerun.
+	changed := strings.Replace(source, `v := "A"`, `v := "A2"`, 1)
+	if err := os.WriteFile(filepath.Join(dir, "pkg/scheduler/redo.go"), []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake.requests.Store(0)
+	sawStamp.Store(0)
+	if _, err := r.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("rerun: %v", err)
+	}
+	if fake.requests.Load() != 1 {
+		t.Fatalf("rerun requests = %d, want 1 (hash should have changed)", fake.requests.Load())
+	}
+	if got := sawStamp.Load(); got != 0 {
+		t.Errorf("pending row still had completed_at during the rerun request (%d)", got)
 	}
 }
