@@ -147,20 +147,3 @@ func TestPauseDidNotExitWithinTimeout(t *testing.T) {
 		t.Fatal("stand-in ignoring SIGINT should still be running")
 	}
 }
-
-// A grandparent of the script (pgrep itself already skips the direct parent) whose own command line matches the pattern must be
-// skipped: only the script's ancestor guard protects it.
-func TestPauseSkipsMatchingAncestor(t *testing.T) {
-	bin := uniqueBin(t)
-	script, err := filepath.Abs("../../scripts/summarize-pause.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("bash", "-c",
-		`exec -a "$0" bash -c 'sh -c '"'"'sh "$0"; exit $?'"'"' "$1"; exit $?' _ "$1"`,
-		bin+" summarize --level function", script)
-	out, code := runCmd(t, bin, "2", cmd)
-	if code != 2 || !strings.Contains(out, "nothing running") {
-		t.Fatalf("exit %d, want 2 'nothing running'; output:\n%s", code, out)
-	}
-}

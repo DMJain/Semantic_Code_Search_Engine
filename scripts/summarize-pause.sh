@@ -1,11 +1,8 @@
 #!/bin/sh
 # Interrupt the running `bin/indexer summarize` safely.
 #
-# The target is matched by an anchored regex on the full command line, so it
-# cannot match this script's shell, make, or the keep-awake wrapper (their
-# command lines start with sh/make/caffeinate, not "bin/indexer summarize").
-# No separate ancestor guard: it could not be exercised (macOS pgrep already
-# omits its own ancestors), so the anchoring is the protection.
+# The target is matched by an anchored regex on the full command line. The recipe's own command lines (sh -c, make, this script, caffeinate) all
+# start with something other than "bin/indexer summarize", so none can match.
 #
 # Caveat: the default pattern assumes the run was launched as
 # `bin/indexer summarize ...` (as `make summarize-run` does). A run launched
