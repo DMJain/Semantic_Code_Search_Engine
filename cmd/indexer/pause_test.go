@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,7 +38,7 @@ func startStandIn(t *testing.T, ignoreInt bool, argv0 string) *standIn {
 	if ignoreInt {
 		trap = `trap "" INT; `
 	}
-	cmd := exec.Command("bash", "-c", trap+`exec -a "$0" sleep 60`, argv0)
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", trap+`exec -a "$0" sleep 60`, argv0)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func waitForCommandLine(t *testing.T, pid int, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		out, _ := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+		out, _ := exec.CommandContext(t.Context(), "ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 		if strings.HasPrefix(strings.TrimSpace(string(out)), want) {
 			return
 		}
@@ -68,7 +69,7 @@ func waitForCommandLine(t *testing.T, pid int, want string) {
 	t.Fatalf("pid %d never showed command line %q", pid, want)
 }
 
-func uniqueBin(t *testing.T) string {
+func uniqueBin() string {
 	return fmt.Sprintf("bin/indexer-pausetest-%d-%d", os.Getpid(), time.Now().UnixNano()%100000)
 }
 
@@ -80,7 +81,7 @@ func runPause(t *testing.T, bin string, timeout string) (string, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return runCmd(t, bin, timeout, exec.Command("sh", "-c", `sh "$0"; exit $?  # `+bin+` summarize --level function`, script))
+	return runCmd(t, bin, timeout, exec.CommandContext(t.Context(), "sh", "-c", `sh "$0"; exit $?  # `+bin+` summarize --level function`, script))
 }
 
 func runCmd(t *testing.T, bin, timeout string, cmd *exec.Cmd) (string, int) {
@@ -91,7 +92,8 @@ func runCmd(t *testing.T, bin, timeout string, cmd *exec.Cmd) (string, int) {
 	)
 	out, err := cmd.CombinedOutput()
 	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
 		code = ee.ExitCode()
 	} else if err != nil {
 		t.Fatalf("running pause: %v", err)
@@ -100,8 +102,8 @@ func runCmd(t *testing.T, bin, timeout string, cmd *exec.Cmd) (string, int) {
 }
 
 func TestPauseSignalsOnlyTheStandIn(t *testing.T) {
-	bin := uniqueBin(t)
-	real := startStandIn(t, false, bin+" summarize --level function --concurrency 1")
+	bin := uniqueBin()
+	target := startStandIn(t, false, bin+" summarize --level function --concurrency 1")
 	wrapper := startStandIn(t, false, "caffeinate -i "+bin+" summarize --level function")
 	decoy := startStandIn(t, false, "sh -c echo "+bin+" summarize")
 
@@ -109,11 +111,11 @@ func TestPauseSignalsOnlyTheStandIn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0; output:\n%s", code, out)
 	}
-	if !strings.Contains(out, "pid "+strconv.Itoa(real.cmd.Process.Pid)) {
-		t.Fatalf("output does not name pid %d:\n%s", real.cmd.Process.Pid, out)
+	if !strings.Contains(out, "pid "+strconv.Itoa(target.cmd.Process.Pid)) {
+		t.Fatalf("output does not name pid %d:\n%s", target.cmd.Process.Pid, out)
 	}
 	select {
-	case <-real.done:
+	case <-target.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stand-in was not signalled")
 	}
@@ -123,7 +125,7 @@ func TestPauseSignalsOnlyTheStandIn(t *testing.T) {
 }
 
 func TestPauseNothingRunning(t *testing.T) {
-	out, code := runPause(t, uniqueBin(t), "2")
+	out, code := runPause(t, uniqueBin(), "2")
 	if code != 2 {
 		t.Fatalf("exit %d, want 2; output:\n%s", code, out)
 	}
@@ -133,7 +135,7 @@ func TestPauseNothingRunning(t *testing.T) {
 }
 
 func TestPauseDidNotExitWithinTimeout(t *testing.T) {
-	bin := uniqueBin(t)
+	bin := uniqueBin()
 	stuck := startStandIn(t, true, bin+" summarize --level function")
 
 	out, code := runPause(t, bin, "1")
