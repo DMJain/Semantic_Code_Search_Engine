@@ -22,21 +22,22 @@ func Eligible(sym parse.Symbol, inSlice bool) bool {
 	return sym.EndLine-sym.StartLine >= MinBodyLines
 }
 
-// inSliceFuncWhere is the SQL condition for an in-slice function or method.
-// It expects the aliases s (symbols) and f (files).
-func inSliceFuncWhere() string {
+// InSliceFuncWhere is the SQL condition for an in-slice function or method,
+// with no body-length threshold. It expects the aliases s (symbols) and f
+// (files).
+func InSliceFuncWhere() string {
 	return fmt.Sprintf("f.in_slice AND s.kind IN ('%s', '%s')", parse.KindFunc, parse.KindMethod)
 }
 
 // EligibleWhere returns the SQL form of [Eligible] as a WHERE condition over
 // the aliases s (symbols) and f (files).
 func EligibleWhere() string {
-	return fmt.Sprintf("%s AND s.end_line - s.start_line >= %d", inSliceFuncWhere(), MinBodyLines)
+	return fmt.Sprintf("%s AND s.end_line - s.start_line >= %d", InSliceFuncWhere(), MinBodyLines)
 }
 
 // SkippedWhere returns the SQL condition for in-slice functions and methods
 // that are not eligible because their body is too short, over the aliases s
 // and f.
 func SkippedWhere() string {
-	return fmt.Sprintf("%s AND s.end_line - s.start_line < %d", inSliceFuncWhere(), MinBodyLines)
+	return fmt.Sprintf("%s AND s.end_line - s.start_line < %d", InSliceFuncWhere(), MinBodyLines)
 }

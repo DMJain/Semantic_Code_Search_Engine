@@ -150,7 +150,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Stats, error) {
 }
 
 // eligible returns every in-slice function or method whose body is at least
-// three lines, with its current function-summary status and hash, ordered by
+// [MinBodyLines] lines, with its current function-summary status and hash, ordered by
 // qualified_name (the sampling order).
 func (r *Runner) eligible(ctx context.Context) ([]symbolRow, error) {
 	rows, err := r.Pool.Query(ctx, `

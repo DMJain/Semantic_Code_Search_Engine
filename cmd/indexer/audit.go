@@ -15,6 +15,7 @@ import (
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/summarize"
 )
 
 // defaultAuditSeed is the fixed seed the T08 audit samples with; the same seed
@@ -58,13 +59,15 @@ func runAudit(ctx context.Context, args []string) error {
 }
 
 // selectAuditRows loads every in-slice func/method symbol ordered by
-// qualified_name, which is the deterministic order [sampleRows] shuffles.
+// qualified_name, which is the deterministic order [sampleRows] shuffles. The
+// audit deliberately has no body-length threshold, so it uses the in-slice
+// predicate only, not [summarize.EligibleWhere].
 func selectAuditRows(ctx context.Context, pool *pgxpool.Pool) ([]auditRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT s.qualified_name, s.name, coalesce(s.receiver, ''),
 		       s.start_line, s.end_line, coalesce(s.doc, ''), f.path
 		FROM symbols s JOIN files f ON f.id = s.file_id
-		WHERE f.in_slice AND s.kind IN ('func', 'method')
+		WHERE `+summarize.InSliceFuncWhere()+`
 		ORDER BY s.qualified_name`)
 	if err != nil {
 		return nil, fmt.Errorf("list in-slice symbols: %w", err)
