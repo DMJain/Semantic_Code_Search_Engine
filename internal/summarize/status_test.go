@@ -75,6 +75,8 @@ func TestStatusCountsCurrentVersionOnly(t *testing.T) {
 	insertSummary(t, pool, "file", ids[0], PromptVersion, "done")
 
 	r := newRunner(pool, "http://127.0.0.1:0", dir, 4096, io.Discard)
+	// The failed row failed on unchanged input, so it is terminal (S1C-10).
+	setCurrentHash(t, r, ids[2])
 	rep, err := r.Status(ctx, false)
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -265,6 +267,8 @@ func TestStatusRetryFailedKeepsFailedRemaining(t *testing.T) {
 	}
 	for i := 3; i < 5; i++ {
 		insertSummary(t, r.Pool, "function", ids[i], PromptVersion, "failed")
+		// Failed on unchanged input: terminal unless retried (S1C-10).
+		setCurrentHash(t, r, ids[i])
 	}
 	for retry, want := range map[bool]int{false: 5, true: 7} {
 		rep, err := r.Status(context.Background(), retry)

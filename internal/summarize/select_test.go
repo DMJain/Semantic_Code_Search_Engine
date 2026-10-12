@@ -87,3 +87,56 @@ func TestFailedRowWithUnchangedHashNeedsRetryFlag(t *testing.T) {
 		t.Fatalf("with flag done = %d calls = %d, want 1/1", st.Done, fake.requests.Load())
 	}
 }
+
+func TestStatusRemainingCountsFailedRowWithChangedHash(t *testing.T) {
+	r, _, _ := seedFailedRow(t, false)
+	for _, retry := range []bool{false, true} {
+		rep, err := r.Status(context.Background(), retry)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if rep.Remaining != 1 {
+			t.Errorf("retryFailed=%v remaining = %d, want 1 (stale failed row is re-attempted)", retry, rep.Remaining)
+		}
+	}
+}
+
+func TestStatusRemainingExcludesFailedRowWithUnchangedHashUnlessRetry(t *testing.T) {
+	r, _, _ := seedFailedRow(t, true)
+	for retry, want := range map[bool]int{false: 0, true: 1} {
+		rep, err := r.Status(context.Background(), retry)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if rep.Remaining != want {
+			t.Errorf("retryFailed=%v remaining = %d, want %d", retry, rep.Remaining, want)
+		}
+	}
+}
+
+// setCurrentHash stores on the symbol's summary row the input hash the symbol
+// has now, so the row counts as current.
+func setCurrentHash(t *testing.T, r *Runner, id int64) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := r.eligible(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sr := range rows {
+		if sr.id != id {
+			continue
+		}
+		in, err := BuildInput(r.KubeDir, sr.path, sr.sym)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Pool.Exec(ctx,
+			`UPDATE summaries SET input_hash = $1 WHERE level = $2 AND target_id = $3`,
+			in.Hash(), LevelFunction, id); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("symbol %d not eligible", id)
+}

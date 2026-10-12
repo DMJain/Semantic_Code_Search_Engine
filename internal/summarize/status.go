@@ -31,7 +31,8 @@ type StatusReport struct {
 // Status counts the current-version function summary rows by status and
 // derives an ETA from the stored completion times of the most recent
 // [RateSamples] done rows. It never waits. Remaining is eligible minus done
-// (minus failed unless retryFailed, since a retry run re-picks failed rows),
+// (minus failed unless retryFailed, since a retry run re-picks failed rows,
+// or the failed row's input hash changed, since any run re-picks it),
 // not just the in-flight pending count, so the ETA covers the whole queue.
 func (r *Runner) Status(ctx context.Context, retryFailed bool) (StatusReport, error) {
 	rows, err := r.eligible(ctx)
@@ -45,6 +46,14 @@ func (r *Runner) Status(ctx context.Context, retryFailed bool) (StatusReport, er
 	failed := counts[StatusFailed.String()]
 	if retryFailed {
 		failed = 0
+	} else {
+		// A failed row whose input changed is stale: the next run re-attempts
+		// it, so it is remaining, not terminal.
+		stale, err := r.staleFailed(rows)
+		if err != nil {
+			return StatusReport{}, err
+		}
+		failed -= stale
 	}
 	rep := StatusReport{
 		PromptVersion: PromptVersion,
@@ -77,6 +86,26 @@ func (r *Runner) Status(ctx context.Context, retryFailed bool) (StatusReport, er
 		rep.ETA = time.Duration(float64(rep.Remaining) / rate * float64(time.Second))
 	}
 	return rep, nil
+}
+
+// staleFailed counts the failed rows among rows that the next run would
+// re-attempt without the retry flag, using the same currentness rule as the run
+// ([symbolRow.skip]).
+func (r *Runner) staleFailed(rows []symbolRow) (int, error) {
+	n := 0
+	for _, sr := range rows {
+		if sr.storedStatus != StatusFailed {
+			continue
+		}
+		in, err := BuildInput(r.KubeDir, sr.path, sr.sym)
+		if err != nil {
+			return 0, fmt.Errorf("read %s: %w", sr.path, err)
+		}
+		if !sr.skip(in.Hash(), false) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // statusCounts returns the number of current-version function rows per status.
