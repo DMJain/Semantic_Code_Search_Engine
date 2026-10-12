@@ -49,11 +49,7 @@ func (r *Runner) Status(ctx context.Context, retryFailed bool) (StatusReport, er
 	} else {
 		// A failed row whose input changed is stale: the next run re-attempts
 		// it, so it is remaining, not terminal.
-		stale, err := r.staleFailed(rows)
-		if err != nil {
-			return StatusReport{}, err
-		}
-		failed -= stale
+		failed -= r.staleFailed(rows)
 	}
 	rep := StatusReport{
 		PromptVersion: PromptVersion,
@@ -91,21 +87,20 @@ func (r *Runner) Status(ctx context.Context, retryFailed bool) (StatusReport, er
 // staleFailed counts the failed rows among rows that the next run would
 // re-attempt without the retry flag, using the same currentness rule as the run
 // ([symbolRow.skip]).
-func (r *Runner) staleFailed(rows []symbolRow) (int, error) {
+func (r *Runner) staleFailed(rows []symbolRow) int {
 	n := 0
 	for _, sr := range rows {
 		if sr.storedStatus != StatusFailed {
 			continue
 		}
 		in, err := BuildInput(r.KubeDir, sr.path, sr.sym)
-		if err != nil {
-			return 0, fmt.Errorf("read %s: %w", sr.path, err)
-		}
-		if !sr.skip(in.Hash(), false) {
+		// An unreadable source cannot prove the row current, so it counts as
+		// stale; the next run re-attempts it and reports the read error there.
+		if err != nil || !sr.skip(in.Hash(), false) {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 // statusCounts returns the number of current-version function rows per status.

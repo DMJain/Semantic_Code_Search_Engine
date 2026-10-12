@@ -3,6 +3,8 @@ package summarize
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
@@ -114,29 +116,48 @@ func TestStatusRemainingExcludesFailedRowWithUnchangedHashUnlessRetry(t *testing
 	}
 }
 
-// setCurrentHash stores on the symbol's summary row the input hash the symbol
-// has now, so the row counts as current.
-func setCurrentHash(t *testing.T, r *Runner, id int64) {
-	t.Helper()
-	ctx := context.Background()
-	rows, err := r.eligible(ctx)
-	if err != nil {
+func TestSymbolRowSkip(t *testing.T) {
+	const cur, old = "h-current", "h-old"
+	cases := []struct {
+		status Status
+		hash   string
+		retry  bool
+		want   bool
+	}{
+		{StatusDone, cur, false, true},
+		{StatusDone, cur, true, true},
+		{StatusDone, old, false, false},
+		{StatusDone, old, true, false},
+		{StatusFailed, cur, false, true},
+		{StatusFailed, cur, true, false},
+		{StatusFailed, old, false, false},
+		{StatusFailed, old, true, false},
+		{StatusPending, cur, false, false},
+		{StatusPending, cur, true, false},
+		{StatusPending, old, false, false},
+		{StatusPending, old, true, false},
+	}
+	for _, c := range cases {
+		sr := symbolRow{storedStatus: c.status, storedHash: c.hash}
+		if got := sr.skip(cur, c.retry); got != c.want {
+			t.Errorf("status=%s hash=%s retry=%v: skip = %v, want %v", c.status, c.hash, c.retry, got, c.want)
+		}
+	}
+}
+
+// A failed row whose source cannot be read is counted as remaining rather than
+// failing the whole report: the next run re-attempts it and surfaces the read
+// error there.
+func TestStatusFailedRowWithMissingSourceCountsAsRemaining(t *testing.T) {
+	r, _, _ := seedFailedRow(t, true)
+	if err := os.Remove(filepath.Join(r.KubeDir, "pkg/scheduler/failing.go")); err != nil {
 		t.Fatal(err)
 	}
-	for _, sr := range rows {
-		if sr.id != id {
-			continue
-		}
-		in, err := BuildInput(r.KubeDir, sr.path, sr.sym)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := r.Pool.Exec(ctx,
-			`UPDATE summaries SET input_hash = $1 WHERE level = $2 AND target_id = $3`,
-			in.Hash(), LevelFunction, id); err != nil {
-			t.Fatal(err)
-		}
-		return
+	rep, err := r.Status(context.Background(), false)
+	if err != nil {
+		t.Fatalf("status with unreadable source: %v", err)
 	}
-	t.Fatalf("symbol %d not eligible", id)
+	if rep.Remaining != 1 {
+		t.Errorf("remaining = %d, want 1", rep.Remaining)
+	}
 }
