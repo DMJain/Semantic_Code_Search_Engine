@@ -116,10 +116,10 @@ type BenchPkgResult struct {
 	OK           bool    `json:"ok"`
 }
 
-// Bench measures summarization throughput without writing any summary row. It samples FunctionN eligible functions (seed) with the same
-// stratified [Sample] as production, runs the exact fn-v1 prompt at
-// concurrency 1 and then 2, then times FileN stratified file-level prompts and
-// PkgN package-level prompts with the draft file-bench and pkg-bench prompts.
+// Bench measures summarization throughput without writing any summary row. It
+// samples FunctionN eligible functions (seed) with the same stratified [Sample]
+// as production, runs the exact fn-v1 prompt at concurrency 1 and then 2, then
+// times FileN stratified file-level prompts and PkgN package-level prompts with the draft file-bench and pkg-bench prompts.
 // Each file/package input is built from the fn-v1 summaries of the file's
 // eligible functions, which are not stored.
 func (r *Runner) Bench(ctx context.Context, opts BenchOptions) (BenchResult, error) {

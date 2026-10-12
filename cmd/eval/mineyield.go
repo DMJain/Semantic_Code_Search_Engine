@@ -199,7 +199,7 @@ func mine(ctx context.Context, client *github.Client, o mineOptions) (mineResult
 // issue, then file count, then its files in order), so the counts sum to the
 // number of rejected PRs. "outside slice" also covers vendor and
 // build-constraint files and files absent at the pinned tag. "no changed
-// files" is not one of the ticket's six reasons; a PR with an empty file list
+// files" is not one of the six rejection reasons; a PR with an empty file list
 // is reported separately rather than mislabelled "too many files".
 const (
 	reasonNonGo          = "non-Go file"

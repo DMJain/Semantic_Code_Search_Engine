@@ -340,7 +340,7 @@ func TestAssignQualifiedNamesCrossFile(t *testing.T) {
 
 // TestFileSyntaxError proves a file with tree-sitter ERROR nodes still yields
 // the symbols that parsed cleanly and reports ErrSyntax, so the caller counts
-// the file as a parse error but still stores it (T07).
+// the file as a parse error but still stores it.
 func TestFileSyntaxError(t *testing.T) {
 	src := []byte("package pkg\n\nfunc Good() {}\n\nfunc Bad( {\n")
 	syms, err := parse.File("pkg/bad.go", src)

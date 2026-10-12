@@ -55,7 +55,7 @@ func runWalk(ctx context.Context, args []string) error {
 // walk.SliceDropPrefixes), then compares it with the frozen hash in
 // internal/walk/slice.sha256 (D-070). Recomputing from the slice definition,
 // not from the database, is what makes a temporary edit of the drop list fail
-// the check (ticket 15 acceptance). It prints both hashes and returns an error
+// the check. It prints both hashes and returns an error
 // on drift, so `make verify-slice` exits non-zero.
 func verifySliceHash(root string) error {
 	files, _, err := walk.Walk(root)

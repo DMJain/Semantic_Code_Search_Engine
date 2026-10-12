@@ -1,6 +1,6 @@
 // Command tools holds one-off author tooling that must not ship in the
 // production indexer binary (D-071). Its first command, gate,
-// reproduces the S1 quality-gate sample and writes the grading sheet.
+// reproduces the fn-v1 quality-gate sample and writes the grading sheet.
 //
 // Usage:
 //

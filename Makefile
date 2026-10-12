@@ -3,7 +3,7 @@
 export
 
 GOLANGCI_LINT_VERSION := v2.14.0
-# Newest actionlint that builds/runs under GOTOOLCHAIN=local (see S1 Results).
+# Newest actionlint that builds/runs under GOTOOLCHAIN=local (see D-071 and docs/plan/sprints/S1-corpus-symbols.md).
 ACTIONLINT_VERSION := v1.7.12
 WORKFLOW ?= .github/workflows/ci.yml
 SHELLCHECK ?= shellcheck

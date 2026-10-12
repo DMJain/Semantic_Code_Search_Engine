@@ -18,7 +18,7 @@ import (
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/summarize"
 )
 
-// defaultAuditSeed is the fixed seed the T08 audit samples with; the same seed
+// defaultAuditSeed is the fixed seed the walk/parse audit samples with; the same seed
 // and candidate ordering always gives the same sample.
 const defaultAuditSeed = 42
 

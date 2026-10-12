@@ -48,7 +48,7 @@ const (
 // user-defined type, for example MyType(x), is kept because without type
 // information it is syntactically identical to a function call. error is
 // deliberately absent (it cannot be used as a conversion). It is the single
-// source of truth for the T06 drop rule.
+// source of truth for the raw-call drop rule.
 var builtins = map[string]bool{
 	// Builtin functions.
 	"len": true, "cap": true, "make": true, "new": true, "append": true,

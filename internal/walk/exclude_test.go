@@ -23,7 +23,7 @@ func writeFixture(t *testing.T, root, rel, content string) string {
 
 // TestExcludedRules is the unit table for every named exclusion rule, with a
 // positive (excluded) and negative (kept) path each, plus the OS-suffix,
-// build-tag and import-"C" negatives the sprint calls out.
+// build-tag and import-"C" negatives the exclusion rules must keep.
 func TestExcludedRules(t *testing.T) {
 	cases := []struct {
 		name        string

@@ -42,7 +42,7 @@ type gateVerdict struct {
 	Criterion     string `json:"criterion"`
 }
 
-// runGate reproduces the S1 quality-gate sample without any Ollama call:
+// runGate reproduces the fn-v1 quality-gate sample without any Ollama call:
 // it draws the same `--sample N --seed S` set the gate run summarized, takes
 // `--draw` done rows by a seeded shuffle, and writes the human sheet and the
 // empty-verdict jsonl the author grades.

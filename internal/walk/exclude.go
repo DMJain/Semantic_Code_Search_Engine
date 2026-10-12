@@ -27,7 +27,7 @@ type exclusionRule struct {
 }
 
 // exclusionRules is the ordered table of exclusion rules. The order decides
-// which rule is credited when several match, and follows the sprint list.
+// which rule is credited when several match, and follows the rule list in architecture.md#corpus-and-slice.
 var exclusionRules = []exclusionRule{
 	{"vendor", func(rel, _ string) bool { return strings.HasPrefix(rel, "vendor/") }},
 	{"zz_generated", func(_, abs string) bool { return strings.HasPrefix(filepath.Base(abs), "zz_generated") }},

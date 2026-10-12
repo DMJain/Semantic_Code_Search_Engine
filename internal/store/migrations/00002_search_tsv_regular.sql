@@ -1,6 +1,6 @@
 -- +goose Up
--- Replace the generated full-text column with a plain tsvector column so a
--- later sprint can fill it with identifier-split tokens from Go. Dropping the
+-- Replace the generated full-text column with a plain tsvector column so the
+-- chunk stage can fill it with identifier-split tokens from Go. Dropping the
 -- column also drops its GIN index.
 ALTER TABLE chunks DROP COLUMN search_tsv;
 ALTER TABLE chunks ADD COLUMN search_tsv tsvector NOT NULL DEFAULT '';

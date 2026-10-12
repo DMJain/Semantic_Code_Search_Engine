@@ -10,7 +10,7 @@ import (
 
 // TestWalkGoldenFixture asserts the exact kept-file list and the per-rule
 // excluded counts over the committed fixture tree. The tree mirrors the
-// sprint's negatives: a _windows.go file, a //go:build windows file and a file
+// exclusion rules' negatives: a _windows.go file, a //go:build windows file and a file
 // that imports "C".
 func TestWalkGoldenFixture(t *testing.T) {
 	files, stats, err := walk.Walk("testdata/module")

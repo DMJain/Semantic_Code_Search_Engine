@@ -21,7 +21,7 @@ func main() {
 }
 
 // run dispatches to a subcommand and returns the process exit code. The
-// no-token error prints as its bare message, the exact text the ticket requires.
+// no-token error prints as its bare message, the exact text the CLI contract requires.
 func run(args []string) int {
 	return cli.App{Name: "eval", Commands: commands, Bare: []error{errNoToken}}.Run(args)
 }
