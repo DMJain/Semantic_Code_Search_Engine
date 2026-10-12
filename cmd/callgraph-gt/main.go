@@ -2,8 +2,8 @@
 // checkout with golang.org/x/tools/go/packages and measures the accuracy of the
 // tree-sitter call graph (edges.source = 'gopackages').
 //
-// S1-09 implements only the --check mode: it proves the files the walk selected
-// for the four slice roots are exactly the files go/packages loads under the
+// Only the --check mode exists: it proves the files the walk selected
+// for the frozen slice roots are exactly the files go/packages loads under the
 // identical build context (D-067). Building the VTA graph itself is S2.
 package main
 

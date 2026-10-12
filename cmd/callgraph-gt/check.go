@@ -1,31 +1,32 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
-	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/walk"
 )
 
-// slicePatterns are the four slice roots as go/packages patterns (D-067). The
-// three k8s.io/kubernetes subtrees are addressed relative to the clone root;
-// client-go is addressed by import path because staging is its own module
-// inside the clone's go.work (Q-05).
-var slicePatterns = []string{
-	"./pkg/scheduler/...",
-	"./pkg/kubelet/...",
-	"./pkg/controller/...",
-	"k8s.io/client-go/...",
+// slicePatterns returns the go/packages patterns for the frozen slice's roots
+// only (D-067, D-070): every walk.SlicePrefixes root that the drop list does
+// not remove whole. Roots are addressed relative to the clone root, so a
+// dropped root such as client-go is never loaded.
+func slicePatterns() []string {
+	var patterns []string
+	for _, prefix := range walk.SlicePrefixes {
+		if walk.InSlice(prefix) {
+			patterns = append(patterns, "./"+prefix+"/...")
+		}
+	}
+	return patterns
 }
 
 // maxDiffLines caps each difference list printed on exit 1.
@@ -160,81 +161,66 @@ func describeFailure(r loadResult, err error) string {
 	}
 }
 
-// runCheck implements --check (S1-09/T08). It compares the walk in-slice set
-// from the files table with the go/packages set, prints the exclusion counts
-// from both sides, and returns 0 (equal), 1 (unequal) or 2 (cannot check).
+// sliceLoader loads the type-checker file set for the slice roots under root
+// and names the environment that loaded it.
+type sliceLoader func(root string) (loadResult, string, error)
+
+// realLoader loads the frozen slice roots with the pinned invocation and the
+// workspace fallback.
+func realLoader(root string) (loadResult, string, error) {
+	return loadSliceWithFallback(root, slicePatterns(), os.Environ())
+}
+
+// runCheck implements --check. It needs no database: the walk side is a fresh
+// walk of the pinned tree, so a stale files table cannot make it pass.
 func runCheck() int {
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "callgraph-gt --check: %v\n", err)
-		return 2
-	}
+	cfg := config.LoadEnv()
 	root, err := filepath.Abs(cfg.KubeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "callgraph-gt --check: %v\n", err)
 		return 2
 	}
-
 	printSymlinkFact(root)
+	return checkSlice(root, realLoader, os.Stdout, os.Stderr)
+}
 
-	ctx := context.Background()
-	pool, err := store.NewPool(ctx, cfg.DatabaseURL)
+// checkSlice walks root afresh (same exclusion rules and corpus build
+// context), compares the in-slice files with the loader's set, prints the
+// exclusion counts and the symmetric difference, and returns 0 (equal), 1
+// (unequal) or 2 (cannot check).
+func checkSlice(root string, load sliceLoader, out, errOut io.Writer) int {
+	files, stats, err := walk.Walk(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "callgraph-gt --check: %v\n", err)
+		fmt.Fprintf(errOut, "callgraph-gt --check: %v\n", err)
 		return 2
 	}
-	defer pool.Close()
-	dbPaths, err := inSlicePaths(ctx, pool)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "callgraph-gt --check: %v\n", err)
-		return 2
+	var walkPaths []string
+	for _, f := range files {
+		if f.InSlice {
+			walkPaths = append(walkPaths, f.Path)
+		}
 	}
 
-	_, stats, err := walk.Walk(root)
+	res, envName, err := load(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "callgraph-gt --check: %v\n", err)
+		fmt.Fprintf(errOut, "callgraph-gt --check: %v\n", err)
 		return 2
 	}
+	fmt.Fprintf(out, "load: %s\n", envName)
+	fmt.Fprintf(out, "walk excluded:     %s\n", formatCounts(stats.Excluded))
+	fmt.Fprintf(out, "packages excluded: %s\n", formatCounts(res.excluded))
 
-	res, envName, err := loadSliceWithFallback(root, slicePatterns, os.Environ())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "callgraph-gt --check: %v\n", err)
-		return 2
-	}
-	fmt.Printf("load: %s\n", envName)
-	fmt.Printf("walk excluded:     %s\n", formatCounts(stats.Excluded))
-	fmt.Printf("packages excluded: %s\n", formatCounts(res.excluded))
-
-	walkSet := stringSet(dbPaths)
+	walkSet := stringSet(walkPaths)
 	pkgSet := stringSet(res.kept)
 	onlyWalk, onlyPackages := diffSets(walkSet, pkgSet)
 	if len(onlyWalk) == 0 && len(onlyPackages) == 0 {
-		fmt.Printf("file-set: equal (%d files)\n", len(walkSet))
+		fmt.Fprintf(out, "file-set: equal (%d files)\n", len(walkSet))
 		return 0
 	}
-	fmt.Printf("file-set: unequal (walk %d, packages %d)\n", len(walkSet), len(pkgSet))
-	printDiff("only in walk", onlyWalk)
-	printDiff("only in packages", onlyPackages)
+	fmt.Fprintf(out, "file-set: unequal (walk %d, packages %d)\n", len(walkSet), len(pkgSet))
+	printDiff(out, "only in walk", onlyWalk)
+	printDiff(out, "only in packages", onlyPackages)
 	return 1
-}
-
-// inSlicePaths returns the repo-root-relative in-slice paths from the files
-// table, ordered.
-func inSlicePaths(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
-	rows, err := pool.Query(ctx, `SELECT path FROM files WHERE in_slice ORDER BY path`)
-	if err != nil {
-		return nil, fmt.Errorf("query in-slice paths: %w", err)
-	}
-	defer rows.Close()
-	var paths []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			return nil, fmt.Errorf("scan path: %w", err)
-		}
-		paths = append(paths, p)
-	}
-	return paths, rows.Err()
 }
 
 // printSymlinkFact records whether vendor/k8s.io/client-go is a symlink at the
@@ -294,13 +280,13 @@ func diffSets(a, b map[string]bool) (onlyA, onlyB []string) {
 }
 
 // printDiff prints a difference list with its total and a cap of maxDiffLines.
-func printDiff(label string, paths []string) {
-	fmt.Printf("%s (%d):\n", label, len(paths))
+func printDiff(out io.Writer, label string, paths []string) {
+	fmt.Fprintf(out, "%s (%d):\n", label, len(paths))
 	for i, p := range paths {
 		if i >= maxDiffLines {
-			fmt.Printf("  ... (%d more)\n", len(paths)-maxDiffLines)
+			fmt.Fprintf(out, "  ... (%d more)\n", len(paths)-maxDiffLines)
 			break
 		}
-		fmt.Printf("  %s\n", p)
+		fmt.Fprintf(out, "  %s\n", p)
 	}
 }
