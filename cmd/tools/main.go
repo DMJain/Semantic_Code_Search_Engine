@@ -1,5 +1,5 @@
 // Command tools holds one-off author tooling that must not ship in the
-// production indexer binary (S1C-06, D-071). Its first command, gate,
+// production indexer binary (D-071). Its first command, gate,
 // reproduces the S1 quality-gate sample and writes the grading sheet.
 //
 // Usage:
@@ -16,7 +16,7 @@ import (
 )
 
 var commands = []cli.Command{
-	{Name: "gate", Short: "print the quality-gate sample with code and write the grade sheet (S1-T14)", Run: runGate},
+	{Name: "gate", Short: "print the quality-gate sample with code and write the grade sheet", Run: runGate},
 }
 
 func main() {

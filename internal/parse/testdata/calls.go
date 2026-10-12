@@ -1,6 +1,6 @@
 package scheduler
 
-// Calls covers raw-call extraction (S1-T06): a method chain, a builtin
+// Calls covers raw-call extraction: a method chain, a builtin
 // (len/append/string/make), a conversion, a nested function literal and a
 // repeated call. The golden pins the exact list, its source order and dedup.
 // The tree-sitter parser does not type-check, so the identifiers need not

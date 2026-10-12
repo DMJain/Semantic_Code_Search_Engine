@@ -15,7 +15,7 @@ import (
 )
 
 // Runner summarizes eligible in-slice functions into the summaries table. It is
-// the database-backed half of the summarize stage (S1-T10): each item is
+// the database-backed half of the summarize stage: each item is
 // written pending, sent to the LLM, then finalized done or failed, so an
 // interrupt never leaves a partial row. Reusing [Client] keeps the Ollama call
 // and the D-015 guards in one place.

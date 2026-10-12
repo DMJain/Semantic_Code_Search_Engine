@@ -10,7 +10,7 @@ import (
 )
 
 // sliceHashFile is the frozen sha256 of the sorted in-slice path list, recorded
-// at S1-T13 (D-070) and embedded so the binary carries the expected value.
+// when the slice was frozen (D-070) and embedded so the binary carries the expected value.
 //
 //go:embed slice.sha256
 var sliceHashFile string

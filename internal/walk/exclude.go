@@ -103,11 +103,11 @@ func importsC(abs string) bool {
 
 // Excluded reports whether the candidate file at p is excluded from the index
 // and which named rule rejected it. root is the repository (or fixture) root;
-// p may be absolute or root-relative (the mining probe in S1-12 works with
+// p may be absolute or root-relative (the mining probe works with
 // repo-relative GitHub paths). Only .go files can be excluded, so a non-Go
 // file returns ("", false) and the caller must not index it. The rule table is
-// defined once here and shared by walk, callgraph-gt (S1-08) and the mining
-// probe (S1-12); nothing re-implements it.
+// defined once here and shared by walk, callgraph-gt and the mining
+// probe; nothing re-implements it.
 func Excluded(root, p string) (rule string, excluded bool) {
 	rel, abs := p, p
 	if filepath.IsAbs(p) {

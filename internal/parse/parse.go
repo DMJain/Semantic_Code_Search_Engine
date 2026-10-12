@@ -15,7 +15,7 @@ import (
 )
 
 // Symbol kinds. Func, method, struct and interface are produced here;
-// raw_calls (S1-T06) extends the shape without adding a kind.
+// raw_calls extends the shape without adding a kind.
 const (
 	// KindFunc is a top-level function declaration.
 	KindFunc = "func"
@@ -82,7 +82,7 @@ type Symbol struct {
 	EndLine       int    `json:"end_line"`
 	Doc           string `json:"doc,omitempty"`
 	// RawCalls is the deduplicated, source-ordered list of callee texts for a
-	// function or method (S1-T06), capped at [maxRawCalls] entries of at most
+	// function or method, capped at [maxRawCalls] entries of at most
 	// [maxRawCall] runes each. It is summary-prompt input only and never feeds
 	// the call graph (D-019). It is empty for struct and interface symbols.
 	RawCalls []string `json:"raw_calls,omitempty"`

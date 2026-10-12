@@ -80,7 +80,7 @@ func TestExcludedNonGoIsNotARule(t *testing.T) {
 }
 
 // TestExcludedAcceptsRelativePath proves Excluded works with a repo-relative
-// path as well as an absolute one, since S1-12 feeds it GitHub changed-file
+// path as well as an absolute one, since the mining probe feeds it GitHub changed-file
 // paths. A relative path must resolve its content rules against root, not the
 // process working directory.
 func TestExcludedAcceptsRelativePath(t *testing.T) {

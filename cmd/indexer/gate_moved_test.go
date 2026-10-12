@@ -8,7 +8,7 @@ import (
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/cli"
 )
 
-// The one-off quality-gate helper moved to cmd/tools (S1C-06); the production
+// The one-off quality-gate helper moved to cmd/tools (D-071); the production
 // indexer must not register it.
 func TestIndexerDoesNotRegisterGate(t *testing.T) {
 	for _, c := range commands {

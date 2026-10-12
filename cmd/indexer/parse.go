@@ -212,7 +212,7 @@ func parsePackage(root string, files []staleFile, st *parseStats) ([]parsedFile,
 // and changed symbols are upserted first (on qualified_name, keeping row ids
 // stable across re-parses and across moves between files); only afterwards are
 // symbols of the package's files that are absent from the whole package parse
-// deleted together with their function summaries (D-065, S1C-11). Files are
+// deleted together with their function summaries (D-065). Files are
 // marked parsed last.
 func writePackage(ctx context.Context, pool *pgxpool.Pool, files []parsedFile) error {
 	tx, err := pool.Begin(ctx)

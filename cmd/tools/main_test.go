@@ -9,7 +9,7 @@ import (
 )
 
 // The one-off quality-gate helper lives in the tools binary, not in the
-// production indexer (S1C-06).
+// production indexer (D-071).
 func TestToolsRegistersGate(t *testing.T) {
 	var errOut bytes.Buffer
 	code := cli.App{Name: "tools", Commands: commands, Stderr: &errOut}.Run([]string{"help"})

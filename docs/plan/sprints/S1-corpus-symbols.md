@@ -534,3 +534,13 @@ The gate sample was summarized: `bin/indexer summarize --level function --sample
 - `.scratch/S1/quality-gate-fn-v1.jsonl` — 30 lines `{qualified_name, input_hash, verdict:"", criterion:""}`.
 
 The author grades each summary good/bad against the D-068 rubric (first failing criterion), edits the jsonl, and starts `make summarize-run` in their own terminal. The agent does not grade or start the run. The 200 gate rows stay; the full run skips them by `input_hash`.
+
+### Earlier `summarize --status` ETA bug (fixed by 6971672, superseded by S1C-12)
+
+Observed during the fn-v1 run: `make summarize-status` printed `pending 1`, `remaining 1`, `eta 6s` while about 6,300 functions were still unsummarized.
+
+Cause (verified): `Status` set `Remaining` from the `pending` count. Rows are written `pending` one at a time by `markPending` when an item is picked up, so with `--concurrency 1` the pending count is never above 1. The ETA divided that count by the measured rate, so it was always a few seconds. The 30-second rate (`PerHour`) was correct but noisy, swinging between 600 and 960 fn/h.
+
+Fix (commit 6971672): `Status` counted eligible rows with `r.eligible(ctx)` (the same query `Run` uses) and `statusReport` set `Remaining = max(0, eligible - done - failed)`, subtracting failed unless the status call was a `--retry-failed` run; the CLI passed the existing flag through and `pending` stayed printed as in-flight. Tests: `TestStatusReportETA` (eligible 6673, done 379, 600 fn/h gives remaining 6294 and an ETA of about 10.5 h), `TestStatusReportFailedRemaining` and `TestStatusReportNoProgress` (delta 0 and delta below 0 give no ETA). `bin/indexer` was not rebuilt, so the live run was untouched. The optional longer-window or run-start rate was left as it was.
+
+Superseded: S1C-12 replaced the 30-second sampled rate with a rate from the last 100 timestamped completions of the current prompt version, so the windowed-rate concern above no longer applies.

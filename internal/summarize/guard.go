@@ -17,7 +17,7 @@ const (
 // Result is the outcome of summarizing one function. On success Text holds the
 // summary and Reason is empty; on failure Text is empty and Reason is one of
 // the Reason* constants. OutputTokens is Ollama's generated-token count
-// (eval_count), recorded by the throughput benchmark (S1-T11) and zero on a
+// (eval_count), recorded by the throughput benchmark and zero on a
 // response that never reached the model.
 type Result struct {
 	Text         string

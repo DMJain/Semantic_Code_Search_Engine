@@ -103,7 +103,7 @@ func TestRequestBodies(t *testing.T) {
 	}
 }
 
-// wantNumCtx is the embedding context size each model must send (D-003, S0-12).
+// wantNumCtx is the embedding context size each model must send (D-003).
 var wantNumCtx = map[string]int{"qwen3-embedding:0.6b": 4096, "nomic-embed-text": 2048}
 
 // wantBody builds the exact request body Embedder should send for one input.
@@ -308,7 +308,7 @@ func TestCheckVectorNaN(t *testing.T) {
 }
 
 // TestRenderedTemplateHashesArePinned fixes the exact bytes of every rendered
-// template with the sha256 values recorded in D-003 (S0-T05). A change to any
+// template with the sha256 values recorded in D-003. A change to any
 // template, even one character, changes a hash and fails here, so the change
 // must be made deliberately together with a new decision.
 func TestRenderedTemplateHashesArePinned(t *testing.T) {

@@ -95,7 +95,7 @@ func ctxProbeBytes(numCtx int, factor float64) int {
 }
 
 // ctxProbeInput returns about n bytes of English-like filler, which Ollama
-// tokenizes at roughly 5 bytes per token (measured in S0-12), so an input at
+// tokenizes at roughly 5 bytes per token (measured in the S0 spike), so an input at
 // 0.8 x num_ctx estimated tokens is well inside the context and 1.5 x is well over.
 func ctxProbeInput(n int) string {
 	const unit = "kubelet evicts pods under memory pressure "

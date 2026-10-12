@@ -20,7 +20,7 @@ const onlyFunctionLevel = summarize.LevelFunction
 const defaultBenchOutput = "eval/results/bench/summarize.json"
 
 // benchFunctionN, benchFileN, benchPkgN and benchSeed are the fixed benchmark
-// parameters of S1-T11: 200 in-slice functions, 20 file-level and 3
+// parameters of the throughput benchmark: 200 in-slice functions, 20 file-level and 3
 // package-level prompts, seed 7.
 const (
 	benchFunctionN = 200

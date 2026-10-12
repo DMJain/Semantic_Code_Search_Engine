@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// batchSize is the number of rows per upsert statement (sprint T03).
+// batchSize is the number of rows per upsert statement.
 const batchSize = 500
 
 // Sync couples files to symbols: deleting a file cascades its symbols, so
@@ -59,7 +59,7 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, files []File) (changed, delet
 // while summaries have no foreign key. Symbols of a vanished file move to the
 // first surviving file of the same package, and that file's parsed marker is
 // cleared so the parse stage re-parses the package and deletes, by its
-// whole-package seen set, the symbols that really are gone (S1C-11). Symbols
+// whole-package seen set, the symbols that really are gone. Symbols
 // of a package with no surviving file cascade away; the parse stage then
 // deletes the function summaries left without a symbol.
 func rehomeVanishedSymbols(ctx context.Context, tx pgx.Tx, paths []string) error {

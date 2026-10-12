@@ -66,7 +66,7 @@ test: ## Run every test fresh (uncached); fail if the Postgres integration test 
 		exit 1; \
 	fi
 
-# Opt-in live-model check (S1C-04). Not part of `make test`/`ci-local`: it needs
+# Opt-in live-model check. Not part of `make test`/`ci-local`: it needs
 # a running model server and must fail, never skip, when there is none.
 test-live: ## Run the live summarize test against OLLAMA_URL; fails (never skips) if the server is unreachable
 	@url=$${OLLAMA_URL:-}; \

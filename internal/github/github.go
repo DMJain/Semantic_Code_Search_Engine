@@ -1,11 +1,3 @@
-// Package github is a small, reusable GitHub REST client for the eval mining
-// probes (S1-T12 and, later, S4-T05). It speaks only the search, pull-files
-// and rate-limit endpoints, uses the standard library, waits on an injected
-// clock (tests never sleep) and caches every raw response on disk keyed by
-// request URL, so a second run makes no HTTP calls.
-//
-// A rate-limited response (403/429) is waited out and retried once (D-071); the
-// mine-yield probe depends on it to survive a long run.
 package github
 
 import (

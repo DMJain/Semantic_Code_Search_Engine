@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Draft prompt versions used only by the throughput benchmark (S1-T11). File-
+// Draft prompt versions used only by the throughput benchmark. File-
 // and package-level summaries are S5; these throwaway versions label the
 // synthetic prompts timed here and are never written to the summaries table.
 const (
@@ -116,8 +116,7 @@ type BenchPkgResult struct {
 	OK           bool    `json:"ok"`
 }
 
-// Bench measures summarization throughput without writing any summary row
-// (S1-T11). It samples FunctionN eligible functions (seed) with the same
+// Bench measures summarization throughput without writing any summary row. It samples FunctionN eligible functions (seed) with the same
 // stratified [Sample] as production, runs the exact fn-v1 prompt at
 // concurrency 1 and then 2, then times FileN stratified file-level prompts and
 // PkgN package-level prompts with the draft file-bench and pkg-bench prompts.

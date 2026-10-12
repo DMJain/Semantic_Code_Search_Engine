@@ -222,7 +222,7 @@ func checkSlice(root string, load sliceLoader, out, errOut io.Writer) int {
 }
 
 // printSymlinkFact records whether vendor/k8s.io/client-go is a symlink at the
-// pinned tag (Q-05, S1-08 acceptance).
+// pinned tag (Q-05).
 func printSymlinkFact(root string) {
 	p := filepath.Join(root, "vendor", "k8s.io", "client-go")
 	fi, err := os.Lstat(p)

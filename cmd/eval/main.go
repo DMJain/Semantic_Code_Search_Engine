@@ -1,6 +1,6 @@
 // Command eval runs evaluation tooling. The first subcommand, mine-yield,
 // probes GitHub for real merged pull requests that can be mined into semantic
-// evaluation queries for the frozen candidate slice (S1-T12).
+// evaluation queries for the frozen candidate slice.
 package main
 
 import (

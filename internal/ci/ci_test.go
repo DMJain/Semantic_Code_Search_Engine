@@ -1,4 +1,4 @@
-// Package ci tests the Makefile's CI-facing targets (S1C-04). The tests run
+// Package ci tests the Makefile's CI-facing targets. The tests run
 // make against a stubbed tool and an unreachable model server; they never
 // start, stop or contact a real Ollama.
 package ci

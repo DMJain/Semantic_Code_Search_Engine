@@ -213,7 +213,7 @@ func TestRunInterruptResume(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// S1-15 pause/resume by counts: cancel once at least five items are done
+	// Pause/resume by counts: cancel once at least five items are done
 	// (request 6), mid-run. The in-flight item still finishes because the
 	// write/request context is not the cancelled one.
 	const pauseAt = 6
@@ -315,7 +315,7 @@ func TestRunRetryFailed(t *testing.T) {
 	r := newRunner(pool, fake.URL, dir, 4096, io.Discard)
 
 	// The failed row carries the symbol's current hash: a failure on unchanged
-	// input is what --retry-failed exists for (a changed hash is stale; S1C-10).
+	// input is what --retry-failed exists for (a changed hash is stale).
 	rows, err := r.eligible(ctx)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("eligible rows = %d err = %v, want 1", len(rows), err)

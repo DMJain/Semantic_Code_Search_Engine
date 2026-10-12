@@ -36,7 +36,7 @@ type modelSpec struct {
 	dim int
 	// numCtx is the context size sent as options.num_ctx on every embed
 	// request (D-015). Ollama clamps it to the model's own context length,
-	// so it must not exceed what the model supports (D-003 outcome, S0-12).
+	// so it must not exceed what the model supports (D-003 outcome).
 	numCtx int
 	query  *template.Template
 	doc    *template.Template
@@ -58,7 +58,7 @@ var registry = map[string]modelSpec{
 	// Query and document prefixes are "search_query: " and "search_document: ".
 	// numCtx is 2048, not the card's 8192: Ollama serves the model with a
 	// 2048-token context and rejects longer input even when asked for more
-	// (measured in S0-12, recorded in D-003).
+	// (measured in the S0 spike, recorded in D-003).
 	"nomic-embed-text": newSpec(768, 2048,
 		"search_query: {{.Text}}",
 		"search_document: {{if .Title}}{{.Title}}\n{{end}}{{.Text}}"),

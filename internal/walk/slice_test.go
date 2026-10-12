@@ -21,7 +21,7 @@ func TestSlicePrefixesOrdered(t *testing.T) {
 	}
 }
 
-// TestSliceDropPrefixesFrozen pins the frozen D-005 drop list (S1-T13, D-070).
+// TestSliceDropPrefixesFrozen pins the frozen D-005 drop list (D-070).
 func TestSliceDropPrefixesFrozen(t *testing.T) {
 	want := []string{"staging/src/k8s.io/client-go"}
 	if !slices.Equal(walk.SliceDropPrefixes, want) {

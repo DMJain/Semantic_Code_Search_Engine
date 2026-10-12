@@ -6,7 +6,7 @@
     "signature": "func Calls(a, b int, x any)",
     "start_line": 8,
     "end_line": 24,
-    "doc": "// Calls covers raw-call extraction (S1-T06): a method chain, a builtin\n// (len/append/string/make), a conversion, a nested function literal and a\n// repeated call. The golden pins the exact list, its source order and dedup.\n// The tree-sitter parser does not type-check, so the identifiers need not\n// resolve.",
+    "doc": "// Calls covers raw-call extraction: a method chain, a builtin\n// (len/append/string/make), a conversion, a nested function literal and a\n// repeated call. The golden pins the exact list, its source order and dedup.\n// The tree-sitter parser does not type-check, so the identifiers need not\n// resolve.",
     "raw_calls": [
       "sched.cache.AssumePod",
       "a.B().C",
