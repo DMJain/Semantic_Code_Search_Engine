@@ -364,14 +364,13 @@ func WriteBenchResult(path string, res BenchResult) error {
 }
 
 // countSkipped counts in-slice function/method symbols whose body is shorter
-// than the eligibility minimum (end_line - start_line < 3, D-014).
+// than the eligibility minimum ([MinBodyLines], D-014).
 func (r *Runner) countSkipped(ctx context.Context) (int, error) {
 	var n int
 	err := r.Pool.QueryRow(ctx, `
 		SELECT count(*) FROM symbols s
 		JOIN files f ON f.id = s.file_id
-		WHERE f.in_slice AND s.kind IN ('func', 'method')
-		  AND s.end_line - s.start_line < 3`).Scan(&n)
+		WHERE `+SkippedWhere()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count skipped functions: %w", err)
 	}

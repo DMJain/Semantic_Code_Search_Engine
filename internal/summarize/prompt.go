@@ -78,17 +78,6 @@ func (in Input) Hash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Eligible reports whether sym is a function or method symbol in the slice
-// whose body is at least three lines (end_line - start_line >= 3, D-014). A
-// two-line body is skipped; a three-line body is eligible. Types are never
-// eligible.
-func Eligible(sym parse.Symbol, inSlice bool) bool {
-	if !inSlice || (sym.Kind != parse.KindFunc && sym.Kind != parse.KindMethod) {
-		return false
-	}
-	return sym.EndLine-sym.StartLine >= 3
-}
-
 // readCode returns lines start..end (1-based, inclusive) of relPath under
 // kubeDir, cut to maxCodeBytes and marked with truncatedMarker when cut.
 func readCode(kubeDir, relPath string, start, end int) (string, error) {

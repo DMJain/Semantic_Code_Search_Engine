@@ -127,8 +127,7 @@ func gateRows(ctx context.Context, pool *pgxpool.Pool) ([]gateEntry, error) {
 		JOIN files f ON f.id = s.file_id
 		LEFT JOIN summaries sm
 		  ON sm.level = 'function' AND sm.target_id = s.id AND sm.prompt_version = $1
-		WHERE f.in_slice AND s.kind IN ('func', 'method')
-		  AND s.end_line - s.start_line >= 3
+		WHERE `+summarize.EligibleWhere()+`
 		ORDER BY s.qualified_name`, summarize.PromptVersion)
 	if err != nil {
 		return nil, fmt.Errorf("list gate rows: %w", err)
