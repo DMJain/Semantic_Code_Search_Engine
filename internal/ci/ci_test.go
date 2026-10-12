@@ -119,3 +119,16 @@ func TestLiveTestIsNotInTheDefaultRun(t *testing.T) {
 		t.Fatal("the live test must fail, never skip")
 	}
 }
+
+// The probe reads GITHUB_TOKEN and KUBE_TAG from the process environment, which
+// only make loads from .env; the target must exist so a bare `go run` shell
+// (without .env exported) cannot misreport KUBE_TAG as unset.
+func TestMineYieldTargetRunsTheProbe(t *testing.T) {
+	out, err := runMake(t, "-n", "mine-yield")
+	if err != nil {
+		t.Fatalf("mine-yield target missing: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "go run ./cmd/eval mine-yield --window-months 18") {
+		t.Fatalf("mine-yield must run the 18-month probe:\n%s", out)
+	}
+}

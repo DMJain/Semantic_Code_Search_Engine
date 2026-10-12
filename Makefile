@@ -8,7 +8,7 @@ ACTIONLINT_VERSION := v1.7.12
 WORKFLOW ?= .github/workflows/ci.yml
 SHELLCHECK ?= shellcheck
 
-.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean test-live lint lint-scripts lint-ci ci-local build summarize-run summarize-pause summarize-status verify-slice
+.PHONY: up down migrate migrate-up migrate-down reset-db doctor fetch-repo test test-db-clean test-live lint lint-scripts lint-ci ci-local build summarize-run summarize-pause summarize-status verify-slice mine-yield
 
 up: ## Start Postgres and wait until it is healthy
 	docker compose up -d --wait
@@ -126,3 +126,6 @@ summarize-status: ## Print current-prompt-version summary counts and an ETA
 
 verify-slice: ## Recompute the in-slice path hash and fail on drift (D-070)
 	go run ./cmd/indexer walk --verify-slice
+
+mine-yield: ## Re-run the GitHub mining-yield probe (18 months; uses GITHUB_TOKEN and KUBE_TAG from .env)
+	go run ./cmd/eval mine-yield --window-months 18
