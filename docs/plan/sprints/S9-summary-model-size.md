@@ -11,10 +11,10 @@ S8 done: every Phase 1 configuration has its single TEST result; D-028 filled; t
 
 ## Tasks
 
-### S9-T01 - Migration 00007: summaries keyed by model
+### S9-T01 - Migration 00008: summaries keyed by model
 - Why: two summary sets (7B and 3B) must coexist without overwriting each other.
 - Depends on: none
-- Touches: `internal/store/migrations/00007_summaries_model_key.sql`, `internal/summarize/`, `internal/retrieve/coarse.go`
+- Touches: `internal/store/migrations/00008_summaries_model_key.sql`, `internal/summarize/`, `internal/retrieve/coarse.go`
 - Details: replace the unique index `summaries_uniq (level, target_id, prompt_version)` with `(level, target_id, prompt_version, model)`. The summarizer's skip logic and the coarse retriever take a `SUMMARY_MODEL` setting (default `qwen2.5-coder:7b`) and read only rows of that model; embeddings of summaries are keyed by the summary row id, so the two sets never mix. Existing 7B rows are untouched.
 - Acceptance: after `make migrate`, `\d summaries` shows the new unique index; `eval run --config A2 --split dev` with `SUMMARY_MODEL` unset reproduces the stored S5 DEV numbers exactly (diff of `eval/results/A2/dev.json` per-query rows is empty apart from the date).
 - Tests: integration test inserting the same `(level, target, prompt_version)` for two models succeeds; unit test that the retriever filters by model.

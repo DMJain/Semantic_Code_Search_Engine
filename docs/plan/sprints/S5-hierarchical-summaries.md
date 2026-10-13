@@ -11,10 +11,10 @@ S4 done (harness, DEV labels, TEST frozen). Function-level summary run finished 
 
 ## Tasks
 
-### S5-T01 - Migration 00006: packages
+### S5-T01 - Migration 00007: packages
 - Why: package summaries need a target ID (summary uniqueness already exists since 00003).
 - Depends on: none
-- Touches: `internal/store/migrations/00006_packages.sql`, `internal/walk/`, `cmd/indexer/walk.go`
+- Touches: `internal/store/migrations/00007_packages.sql`, `internal/walk/`, `cmd/indexer/walk.go`
 - Details: `CREATE TABLE packages (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, import_path text NOT NULL UNIQUE, in_slice boolean NOT NULL DEFAULT false); INSERT INTO packages (import_path, in_slice) SELECT package, bool_or(in_slice) FROM files GROUP BY package;` Down drops the table. `walk` keeps `packages` in sync inside its transaction.
 - Acceptance: `select count(*) from packages where in_slice` > 0; rerunning `walk` leaves counts unchanged; `make migrate-down migrate-up` exits 0 and `\d packages` is unchanged.
 - Tests: migration integration test; walk test asserts packages sync.

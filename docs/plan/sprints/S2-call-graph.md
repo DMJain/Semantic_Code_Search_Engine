@@ -1,5 +1,7 @@
 # S2 - Call graph
 
+> Task list below is being superseded by vertical-slice tickets under `.scratch/S2/` (decisions D-073 to D-077 change the edge model). Migration number is 00005.
+
 ## Goal
 Build the tree-sitter call graph with resolution confidence, build the VTA ground-truth graph for the slice, and measure tree-sitter edge precision/recall by call kind.
 
@@ -11,10 +13,10 @@ S1 done: symbols populated, slice final (D-005), summary run launched (it keeps 
 
 ## Tasks
 
-### S2-T01 - Migration 00004: edge columns
+### S2-T01 - Migration 00005: edge columns
 - Why: precision/recall by call kind and evidence lines need them.
 - Depends on: none
-- Touches: `internal/store/migrations/00004_edges_columns.sql`
+- Touches: `internal/store/migrations/00005_edges_columns.sql`
 - Details: `ALTER TABLE edges ADD COLUMN call_line integer, ADD COLUMN call_kind text CHECK (call_kind IN ('func','concrete_method','interface_method','func_value','unknown'));` `ALTER TABLE files ADD COLUMN graphed_sha text;` `CREATE UNIQUE INDEX edges_uniq ON edges (source, caller_id, callee_raw, call_line, coalesce(callee_id, 0));` Down reverses. The graph command inserts with `ON CONFLICT DO NOTHING` (two identical calls on one line give one row).
 - Acceptance: `make migrate` ok; `\d edges` shows both columns and the index; `make migrate-down migrate-up` exits 0 and `\d edges` is unchanged.
 - Tests: extend the migration integration test with duplicate-edge insert rejected.

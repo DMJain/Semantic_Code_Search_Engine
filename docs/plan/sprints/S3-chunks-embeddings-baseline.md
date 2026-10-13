@@ -45,10 +45,10 @@ Both jobs use Ollama on one GPU; running together slows both and can thrash memo
 - Out of scope: embedding.
 - Owner: agent
 
-### S3-T04 - Migration 00005: embeddings and chunk markers
+### S3-T04 - Migration 00006: embeddings and chunk markers
 - Why: idempotent embedding and variants.
 - Depends on: none
-- Touches: `internal/store/migrations/00005_embeddings_columns.sql`
+- Touches: `internal/store/migrations/00006_embeddings_columns.sql`
 - Details: `ALTER TABLE embeddings ADD COLUMN input_hash text NOT NULL DEFAULT ''; CREATE UNIQUE INDEX embeddings_uniq ON embeddings (target_kind, target_id, model); ALTER TABLE files ADD COLUMN chunked_sha text; ALTER TABLE chunks ADD COLUMN start_line integer NOT NULL DEFAULT 0, ADD COLUMN end_line integer NOT NULL DEFAULT 0; CREATE TABLE embed_failures (target_kind text NOT NULL, target_id bigint NOT NULL, model text NOT NULL, reason text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (target_kind, target_id, model));` Down reverses.
 - Acceptance: migrate, `\d embeddings` shows the column and unique index; inserting a duplicate `(kind,id,model)` fails; `\d chunks` shows `start_line` and `end_line`; `\d embed_failures` exists; `make migrate-down migrate-up` exits 0 and `\d embeddings` is unchanged.
 - Tests: migration integration test extension.

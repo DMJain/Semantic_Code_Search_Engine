@@ -13,7 +13,15 @@
 - **Collapse helper**: the single `internal/retrieve` function that filters to the slice, then de-duplicates files, then cuts to top-k (D-039).
 - **Hop**: one iteration of the `/ask` loop (fetch more evidence or answer).
 - **Evidence set**: code snippets and symbols collected during `/ask`; citations must fall inside it.
-- **Edge resolution**: `exact`, `name_only`, `ambiguous` confidence of a tree-sitter call edge.
+- **Edge resolution**: how a tree-sitter call edge was resolved (D-073): `exact`, `name_only` (a guess; always has a callee), `ambiguous` (one row per candidate callee), or `unresolved` (no callee; carries a reason).
+- **Unresolved edge**: an edge with `callee_id NULL` and an `unresolved_reason` (`external`, `no_match`, `unknown_receiver`, `candidates_capped`); kept for recall accounting, never followed by retrievers.
+- **Exact (edge)**: resolved with certainty by the source that produced the edge; for `source='gopackages'` (GT) rows every edge is `exact`, so `source` disambiguates (D-077).
+- **Skip counters**: `skipped_builtin` and `skipped_conversion` in `graph --stats`: call expressions that are predeclared builtins or type conversions and are therefore not stored as edges (D-073).
+- **Rule 4 candidate**: a concrete indexed type declaring every method name of the called interface; signatures are not compared, and methods promoted from embedded structs are not seen (D-075). `interfaces_partial` counts interfaces with an unresolvable embedded interface.
+- **Graph fingerprint**: `files.graphed_symbols_fp`, a hash of the indexed symbol set plus the resolver version; a file is stale when it differs or when `graphed_sha <> sha` (D-076).
+- **Call site**: one call expression in a function body; identified for storage by `(caller, callee_raw, call_line)`.
+- **Call kind**: `func`, `concrete_method`, `interface_method`, `func_value` (or `unknown` for tree-sitter before resolution).
+- **Scored universe**: edges whose caller and callee are both in the slice; the only edges counted in call-graph precision and recall (D-074).
 - **Ground-truth graph (GT)**: VTA call graph from `go/packages` over the slice, `edges.source='gopackages'`; evaluation only.
 - **DEV / TEST**: 15 queries used for all tuning / 35 queries frozen by hash, each configuration run once.
 - **Primary / secondary label**: relevance grade 2 / 1.

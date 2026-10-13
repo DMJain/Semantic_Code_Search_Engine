@@ -27,10 +27,11 @@ Every `Retriever` returns `[]Result{File, Score, Source, Evidence[]}` ranked by 
 Initial schema is `internal/store/migrations/00001_init.sql` (never edited). Later changes are new migrations, listed by the sprint that adds them:
 - 00002 (S0): `chunks.search_tsv` becomes a regular `tsvector NOT NULL DEFAULT ''` column populated from Go; GIN index recreated.
 - 00003 (S1): `symbols.raw_calls text[]`, `files.parsed_sha text`, `summaries.reason text`, unique index `summaries_uniq (level, target_id, prompt_version)`.
-- 00004 (S2): `edges.call_line int`, `edges.call_kind text`, `files.graphed_sha text`, unique edge index.
-- 00005 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`, `chunks.start_line int NOT NULL`, `chunks.end_line int NOT NULL`, table `embed_failures(target_kind, target_id, model, reason, created_at, primary key (target_kind, target_id, model))` (per part; a grouped chunk lives in one file and stores the span of both declarations).
-- 00006 (S5): `packages` table.
-- 00007 (S9): summaries unique index also includes `model`, so 7B and 3B summary sets coexist.
+- 00004 (S1): `summaries.completed_at timestamptz` (nullable).
+- 00005 (S2): `edges.call_line int`, `edges.call_kind text`, `edges.unresolved_reason text`, `resolution` gains `unresolved` (D-073), `edges_callee_id_fkey` becomes ON DELETE CASCADE (D-076), `files.graphed_sha text`, `files.graphed_symbols_fp text`, unique edge index.
+- 00006 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`, `chunks.start_line int NOT NULL`, `chunks.end_line int NOT NULL`, table `embed_failures(target_kind, target_id, model, reason, created_at, primary key (target_kind, target_id, model))` (per part; a grouped chunk lives in one file and stores the span of both declarations).
+- 00007 (S5): `packages` table.
+- 00008 (S9): summaries unique index also includes `model`, so 7B and 3B summary sets coexist.
 `embeddings.target_kind` values: `chunk_raw`, `chunk_header`, `summary_function`, `summary_file`, `summary_package`. `embeddings.target_id` is `chunks.id` for the chunk kinds and `summaries.id` for the summary kinds.
 
 ## Resumability
