@@ -45,8 +45,52 @@ type UsesExt interface {
 	Write(int)
 }
 
-// Empty has no known method names, so it produces no Rule 4 candidates.
+// Empty has no known method names, so it produces no Rule 4 candidates (and
+// falls through to Rule 5).
 type Empty interface{}
+
+// Cap3 has exactly three implementers; a cap of 3 stores one ambiguous row per
+// implementer. Cap4 has four, so the same cap stores one candidates_capped row.
+type Cap3 interface {
+	Do3()
+}
+
+type Cap4 interface {
+	Do4()
+}
+
+type Q1 struct{}
+
+func (Q1) Do3() {}
+
+type Q2 struct{}
+
+func (Q2) Do3() {}
+
+type Q3 struct{}
+
+func (Q3) Do3() {}
+
+type R1 struct{}
+
+func (R1) Do4() {}
+
+type R2 struct{}
+
+func (R2) Do4() {}
+
+type R3 struct{}
+
+func (R3) Do4() {}
+
+type R4 struct{}
+
+func (R4) Do4() {}
+
+// NoImpl has a known method no indexed type declares, so it stores no_match.
+type NoImpl interface {
+	Missing()
+}
 
 func callStore(s Store) {
 	s.Get()
@@ -59,4 +103,22 @@ func callBoth(b Both) {
 
 func callUsesExt(u UsesExt) {
 	u.Write(0)
+}
+
+func callCap3(c Cap3) {
+	c.Do3()
+}
+
+func callCap4(c Cap4) {
+	c.Do4()
+}
+
+func callNoImpl(n NoImpl) {
+	n.Missing()
+}
+
+// callEmpty is a Rule 4 fall-through: Empty has no known method, so the call is
+// looked up by Rule 5 (one ambiguous row per same-package Get method).
+func callEmpty(e Empty) {
+	e.Get()
 }

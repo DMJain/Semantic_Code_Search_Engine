@@ -1128,3 +1128,116 @@ wrote nothing: the dev DB edge count was 26917 before and after.
 Checks. `make test` green (throwaway database per test, no new skips);
 `make ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
 actionlint).
+
+### Apply the cap: Rule 4 rows and candidates_capped (S2 ticket 08)
+
+What changed. Rule 4 now stores rows on the production path. `MaxInterfaceCandidates`
+is the named constant `50` (D-075), pinned by `TestMaxInterfaceCandidatesIsD075`;
+the `graph` command builds `Rule4{N: MaxInterfaceCandidates}` and only the
+`--uncapped-histogram` dry run uses `N = 0` (uncapped). A known interface stores
+one `ambiguous` `interface_method` row per candidate up to N; more than N stores
+one `unresolved` `candidates_capped` row with a NULL callee and the raw text
+kept; a known interface whose candidates do not declare the called name stores
+none. The cap applies to Rule 4 only: Rule 5 (unknown receiver) and Rules 1-3 are
+unchanged. `deferred_interface` is gone from `internal/graph` (`Stats`), the
+`--stats` printer and every increment; the invariant `call sites = stored +
+skipped + deferred` now has `deferred` equal to `deferred_local` alone. The
+resolver version is bumped 5 -> 6 (the fingerprint changes, so old edges go
+stale). The cap decision is shared: production (`analyzeInterface`) and
+`Index.InterfaceCandidates` both call `capExceeded(cands, n)`, so they cannot
+drift; the internal `Rule4.N`/`CappedCandidates` seams are kept for the ticket
+tests. The D-075 cap value lives once: `stats.go`'s `maxNonEscalatingCap =
+MaxInterfaceCandidates`.
+
+Zero-candidate choice. An interface with known methods but no indexed implementer
+stores one `unresolved` row with reason `no_match` and kind `interface_method`
+(the interface is indexed, no implementing type matched). This was chosen over
+leaving the call site unaccounted for: it keeps the D-073 invariant exact now
+that `deferred_interface` is removed, and `no_match` already means "the package
+is indexed but no symbol matched". A zero-candidate interface with a
+cross-package embed still increments `interfaces_partial`.
+
+Empty-method choice. An interface with no known method name stores no Rule 4 row
+and falls through to Rule 5 (same-package method-name lookup), so an empty set
+never matches every type (spec story 50) and the call site stays accounted for.
+Such a site does not increment `interfaces_partial`, because it is not a Rule 4
+row. Interpretation note: the fall-through row carries the Rule 5 kind `unknown`,
+not `interface_method` (story 44 lists a known interface receiver as
+`interface_method`). Because no Rule 4 row is produced and the row is a genuine
+Rule 5 guess, `unknown` is the honest kind; this is a story-44 wording tension,
+not a bug.
+
+Fixture goldens (`cmd/indexer/testdata/graph/interfaces/`, real Postgres).
+`callStore` (Store -> A) gives two ambiguous interface_method rows; `callBoth`
+(Both -> C, D) two; `callUsesExt` (UsesExt cross-package -> C, D) two and
+`interfaces_partial: 1`; `callCap3` (three implementers) three ambiguous rows
+with identical raw text; `callCap4` (four implementers) four rows at the
+production cap. `callNoImpl` (no indexed implementer) one `no_match` row with a
+NULL callee; `callEmpty` (no known method) falls to Rule 5, two ambiguous
+`unknown` rows. Production stats: `resolution ambiguous: 15`, `resolution
+unresolved: 1`, `reason no_match: 1`, `call kind interface_method: 14`,
+`interfaces_partial: 1`, invariant `call sites 16 = stored 16 + skipped 0 +
+deferred 0 [ok]`; `--stats` no longer prints `deferred_interface`. With a test
+cap of 3 (`graphOptions.Rule4N`), `callCap3` still gives three ambiguous rows and
+`callCap4` gives one `candidates_capped` unresolved row (NULL callee, raw
+`c.Do4`): `resolution ambiguous: 11`, `resolution unresolved: 2`, `reason
+candidates_capped: 1`, `reason no_match: 1`, invariant `call sites 13 = stored 13
++ skipped 0 + deferred 0 [ok]`. The histogram dry run still matches a stored run
+(its candidate total equals the ambiguous interface_method rows).
+
+Real run (dev DB, one interface-heavy package):
+`go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/scheduler/backend/cache --stats`.
+
+```
+5 files to graph
+graphed 5 files, stored 652 edges
+edges stored: 652
+  resolution exact: 220
+  resolution name_only: 23
+  resolution ambiguous: 123
+  resolution unresolved: 286
+  reason external: 92
+  reason no_match: 6
+  reason unknown_receiver: 188
+  reason candidates_capped: 0
+call kind func: 149
+call kind concrete_method: 71
+call kind interface_method: 3
+call kind unknown: 429
+interfaces_partial: 0
+invariant: call sites 835 = stored 652 + skipped 183 + deferred 0 [ok]
+```
+
+Querying the stored rows for that package: Rule 4 `ambiguous` `interface_method`
+rows = **3**, `candidates_capped` rows = **0**, `no_match` `interface_method`
+rows = 0; the 123 ambiguous rows are 3 interface_method plus 120 Rule 5
+`unknown`. `deferred_interface` is absent from the output and the invariant
+passes.
+
+Real `candidates_capped` evidence (dev DB). `k8s.io/apimachinery/pkg/runtime` and
+`k8s.io/kubernetes/pkg/kubelet` were already graphed at resolver version 6, so
+their graphed markers were cleared to force a fresh re-graph through the
+pipeline's own staleness path. `go run ./cmd/indexer graph --package
+k8s.io/apimachinery/pkg/runtime --stats`:
+
+```
+21 files to graph
+graphed 21 files, stored 1255 edges
+  resolution ambiguous: 466
+  resolution unresolved: 546
+  reason candidates_capped: 2
+  reason no_match: 6
+call kind interface_method: 420
+invariant: call sites 1400 = stored 1255 + skipped 133 + deferred 12 [ok]
+```
+
+Rule 4 `ambiguous` `interface_method` rows = **418**, `candidates_capped` rows =
+**2** (and 0 `no_match` `interface_method`); the 466 ambiguous rows are 418
+interface_method plus 48 Rule 5 `unknown`. The stored rows for
+`k8s.io/kubernetes/pkg/kubelet` have the same shape: `ambiguous`
+`interface_method` = **672**, `candidates_capped` = **2**, `no_match`
+`interface_method` = 1.
+
+Checks. `make test` green (throwaway database per test, no new skips);
+`make ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
+actionlint).

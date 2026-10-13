@@ -4,27 +4,30 @@ import (
 	"sort"
 )
 
+// MaxInterfaceCandidates caps the number of ambiguous Rule 4 rows one interface
+// call site may store; beyond it the call is stored once as candidates_capped
+// (D-075 records N = 50 from eval/results/callgraph/cap-histogram.json).
+const MaxInterfaceCandidates = 50
+
 // CandidateMode selects how the Rule 4 candidate set is bounded. The cap
-// histogram only uses UncappedCandidates; the cap itself is applied later.
+// histogram only uses UncappedCandidates; production uses CappedCandidates with
+// N = MaxInterfaceCandidates.
 type CandidateMode int
 
 const (
 	// UncappedCandidates returns every candidate; n is ignored.
 	UncappedCandidates CandidateMode = iota
 	// CappedCandidates returns the full sorted candidate set and reports capped
-	// when it exceeds n (once the cap lands).
+	// when it exceeds n.
 	CappedCandidates
 )
 
-// Rule4 configures interface-receiver (Rule 4) handling in Analyze. The zero
-// value is the current production behaviour: no Rule 4 rows, the call site is
-// counted deferred_interface. Compute enables the candidate rows (the histogram
-// dry run and the test-only uncapped fixture path).
+// Rule4 configures interface-receiver (Rule 4) handling in Analyze. Rule 4 is
+// always computed; N caps the candidate set and Observe, when set, is the
+// histogram dry-run hook.
 type Rule4 struct {
-	// Compute enables Rule 4 resolution.
-	Compute bool
-	// N caps the candidate set when > 0 (applied once the cap lands); <= 0 is
-	// uncapped.
+	// N caps the candidate set when > 0; <= 0 is uncapped (the histogram dry
+	// run). Production uses MaxInterfaceCandidates.
 	N int
 	// Observe, when set, is called once per interface call site with the number
 	// of candidates actually stored and whether an embedded interface was
@@ -45,6 +48,25 @@ func (ix *Index) InterfaceCandidates(names *NameIndex, pkg, name string, n int, 
 	if !ok || len(required) == 0 {
 		return nil, partial, false
 	}
+	cands = ix.candidatesFor(required)
+	if mode == CappedCandidates && capExceeded(cands, n) {
+		return cands, partial, true
+	}
+	return cands, partial, false
+}
+
+// capExceeded is the single Rule 4 cap decision shared by production
+// (analyzeInterface) and Index.InterfaceCandidates, so the two cannot drift:
+// a non-positive n is uncapped, otherwise the set is over the cap when it holds
+// more than n candidates.
+func capExceeded(cands []TypeKey, n int) bool {
+	return n > 0 && len(cands) > n
+}
+
+// candidatesFor returns the sorted concrete indexed types whose method-name set
+// contains every required name: value and pointer receivers count, interfaces
+// are excluded (D-075). The set is sorted so a capped result is deterministic.
+func (ix *Index) candidatesFor(required map[string]bool) []TypeKey {
 	// Start from the required name with the fewest declaring types, then keep
 	// only the types that declare every other required name.
 	var base []TypeKey
@@ -54,6 +76,7 @@ func (ix *Index) InterfaceCandidates(names *NameIndex, pkg, name string, n int, 
 			base = list
 		}
 	}
+	var cands []TypeKey
 	for _, t := range base {
 		if ix.interfaces[pkgName(t.Pkg, t.Type)] {
 			continue
@@ -63,17 +86,13 @@ func (ix *Index) InterfaceCandidates(names *NameIndex, pkg, name string, n int, 
 		}
 		cands = append(cands, t)
 	}
-	// Sort before capping, so a capped result is deterministic too.
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].Pkg != cands[j].Pkg {
 			return cands[i].Pkg < cands[j].Pkg
 		}
 		return cands[i].Type < cands[j].Type
 	})
-	if mode == CappedCandidates && n > 0 && len(cands) > n {
-		return cands, partial, true
-	}
-	return cands, partial, false
+	return cands
 }
 
 // hasAllMethods reports whether the type's method-name set contains every
@@ -87,25 +106,28 @@ func hasAllMethods(have, required map[string]bool) bool {
 	return true
 }
 
-// analyzeInterface resolves an interface-typed receiver (Rule 4). In production
-// (r4.Compute false) the call site stays deferred_interface and stores no row.
-// With r4.Compute it stores one ambiguous interface_method row per candidate;
-// zero candidates store no row and stay deferred_interface; more than the cap
-// stores one candidates_capped row.
-func analyzeInterface(edges []Edge, st Stats, callerID int64, c Call, pkg, name string, ix *Index, names *NameIndex, r4 Rule4) ([]Edge, Stats) {
-	if !r4.Compute {
-		st.DeferredInterface++
-		return edges, st
+// analyzeInterface resolves an interface-typed receiver (Rule 4). An interface
+// with no known method name yields no Rule 4 rows and falls through to Rule 5
+// (spec story 50), so the call site stays accounted for. Otherwise: up to N
+// candidates store one ambiguous interface_method row per candidate (D-023);
+// more than N store one candidates_capped unresolved row with no callee and the
+// raw text kept; a known interface with candidates but none declaring the called
+// name stores one no_match unresolved row (the interface is indexed but no
+// implementing type matched). callerPkg is the caller file's package, used by
+// the Rule 5 fallback.
+func analyzeInterface(edges []Edge, st Stats, callerID int64, c Call, callerPkg, ifacePkg, name string, ix *Index, names *NameIndex, r4 Rule4) ([]Edge, Stats) {
+	required, partial, ok := names.InterfaceMethodNames(ifacePkg, name)
+	if !ok || len(required) == 0 {
+		// Zero known methods (or an interface the name index does not know):
+		// Rule 4 must never match every type on an empty set, so the call is
+		// accounted for by Rule 5 instead.
+		return analyzeUnknownReceiver(edges, st, callerID, c, callerPkg, ix)
 	}
-	mode := UncappedCandidates
-	if r4.N > 0 {
-		mode = CappedCandidates
-	}
-	cands, partial, capped := ix.InterfaceCandidates(names, pkg, name, r4.N, mode)
+	cands := ix.candidatesFor(required)
 	if partial {
 		st.InterfacesPartial++
 	}
-	if capped {
+	if capExceeded(cands, r4.N) {
 		if r4.Observe != nil {
 			r4.Observe(r4.N+1, partial)
 		}
@@ -134,10 +156,16 @@ func analyzeInterface(edges []Edge, st Stats, callerID int64, c Call, pkg, name 
 		r4.Observe(stored, partial)
 	}
 	if stored == 0 {
-		// No candidate (or none declaring the called name): no Rule 4 rows. The
-		// residual is counted deferred_interface, which the cap step removes.
-		st.DeferredInterface++
-		return edges, st
+		// The interface is indexed and has known methods, but no indexed type
+		// declares them, so the call is honestly unresolved.
+		st.Unresolved++
+		st.Reasons[ReasonNoMatch]++
+		st.ByKind[KindInterfaceMethod]++
+		return append(edges, Edge{
+			CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
+			Resolution: ResolutionUnresolved, CallKind: KindInterfaceMethod,
+			CallLine: c.Line, UnresolvedReason: ReasonNoMatch,
+		}), st
 	}
 	st.Ambiguous += stored
 	st.ByKind[KindInterfaceMethod] += stored

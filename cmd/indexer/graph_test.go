@@ -118,7 +118,6 @@ func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 		"skipped_builtin: 2",
 		"skipped_conversion: 1",
 		"deferred_local: 1",
-		"deferred_interface: 0",
 		"invariant: call sites 8 = stored 4 + skipped 3 + deferred 1 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
@@ -240,9 +239,9 @@ func TestGraphStageAliasGoldens(t *testing.T) {
 // TestGraphStageMethodGoldens covers Rule 3 (known receivers and parameters) on
 // the methods fixture package: a pointer receiver, a value receiver, a
 // parameter-typed call, a method name on two types (resolved by receiver type),
-// an interface-typed parameter (interface_method, counted deferred_interface, no
-// stored row), an embedded struct left unknown, and a parameter shadowed by an
-// inner := (unknown, so never a wrong exact).
+// an interface-typed parameter with no indexed implementer (interface_method,
+// unresolved no_match), an embedded struct left unknown, and a parameter
+// shadowed by an inner := (unknown, so never a wrong exact).
 func TestGraphStageMethodGoldens(t *testing.T) {
 	pool, root := graphFixture(t)
 	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/methods", Stats: true})
@@ -260,9 +259,10 @@ func TestGraphStageMethodGoldens(t *testing.T) {
 			{"exact", "", "concrete_method", "a.M", 48, "k8s.io/kubernetes/methods.(Box).M"},
 			{"exact", "", "concrete_method", "c.M", 49, "k8s.io/kubernetes/methods.(Crate).M"},
 		})
-	// An interface-typed parameter is interface_method and counted
-	// deferred_interface; no Rule 4 row is stored yet.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.interfaceParam"), nil)
+	// An interface-typed parameter with a known method but no indexed
+	// implementer is stored once as interface_method, unresolved no_match.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.interfaceParam"),
+		[]edgeRow{{"unresolved", "no_match", "interface_method", "i.IMethod", 53, ""}})
 	// Embedded structs are left unknown: M is promoted from Inner but never
 	// seen, so the receiver is unknown and Rule 5 stores one ambiguous row per
 	// same-package method named M.
@@ -308,12 +308,12 @@ func TestGraphStageMethodGoldens(t *testing.T) {
 		"resolution exact: 6",
 		"resolution name_only: 1",
 		"resolution ambiguous: 14",
-		"resolution unresolved: 0",
+		"resolution unresolved: 1",
 		"call kind concrete_method: 6",
+		"call kind interface_method: 1",
 		"call kind unknown: 15",
 		"deferred_local: 0",
-		"deferred_interface: 1",
-		"invariant: call sites 22 = stored 21 + skipped 0 + deferred 1 [ok]",
+		"invariant: call sites 22 = stored 22 + skipped 0 + deferred 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -418,67 +418,102 @@ func TestGraphStageRule5Goldens(t *testing.T) {
 	}
 }
 
-// TestGraphStageInterfaceProductionDefers proves the production path in ticket
-// 07 still stores no Rule 4 rows: every interface call site is counted
-// deferred_interface and interfaces_partial stays 0.
-func TestGraphStageInterfaceProductionDefers(t *testing.T) {
+// TestGraphStageInterfaceRule4Rows covers the production Rule 4 path (cap 50):
+// A (value Get, pointer Set) is the only Store candidate, the same-package
+// embedded Both expands to C and D, the cross-package UsesExt contributes only
+// Write (C and D) and increments interfaces_partial, Cap3's three implementers
+// give three identical-raw ambiguous rows, Cap4's four stay under the cap, NoImpl
+// has a known method but no indexed implementer (one no_match row), and Empty has
+// no known method so it falls through to Rule 5.
+func TestGraphStageInterfaceRule4Rows(t *testing.T) {
 	pool, root := graphFixture(t)
 	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/interfaces", Stats: true})
 
-	for _, caller := range []string{
-		"k8s.io/kubernetes/interfaces.callStore",
-		"k8s.io/kubernetes/interfaces.callBoth",
-		"k8s.io/kubernetes/interfaces.callUsesExt",
-	} {
-		if got := edgesFor(t, pool, caller); len(got) != 0 {
-			t.Errorf("production edges for %s = %+v, want none", caller, got)
-		}
-	}
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callStore"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "s.Get", 96, "k8s.io/kubernetes/interfaces.(A).Get"},
+			{"ambiguous", "", "interface_method", "s.Set", 97, "k8s.io/kubernetes/interfaces.(*A).Set"},
+		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callBoth"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "b.Write", 101, "k8s.io/kubernetes/interfaces.(C).Write"},
+			{"ambiguous", "", "interface_method", "b.Write", 101, "k8s.io/kubernetes/interfaces.(D).Write"},
+		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callUsesExt"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "u.Write", 105, "k8s.io/kubernetes/interfaces.(C).Write"},
+			{"ambiguous", "", "interface_method", "u.Write", 105, "k8s.io/kubernetes/interfaces.(D).Write"},
+		})
+	// Three implementers, three ambiguous rows with identical raw text.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callCap3"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "c.Do3", 109, "k8s.io/kubernetes/interfaces.(Q1).Do3"},
+			{"ambiguous", "", "interface_method", "c.Do3", 109, "k8s.io/kubernetes/interfaces.(Q2).Do3"},
+			{"ambiguous", "", "interface_method", "c.Do3", 109, "k8s.io/kubernetes/interfaces.(Q3).Do3"},
+		})
+	// Four implementers, still at most the production cap of 50.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callCap4"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "c.Do4", 113, "k8s.io/kubernetes/interfaces.(R1).Do4"},
+			{"ambiguous", "", "interface_method", "c.Do4", 113, "k8s.io/kubernetes/interfaces.(R2).Do4"},
+			{"ambiguous", "", "interface_method", "c.Do4", 113, "k8s.io/kubernetes/interfaces.(R3).Do4"},
+			{"ambiguous", "", "interface_method", "c.Do4", 113, "k8s.io/kubernetes/interfaces.(R4).Do4"},
+		})
+	// No indexed implementer: one unresolved no_match row with a NULL callee.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callNoImpl"),
+		[]edgeRow{{"unresolved", "no_match", "interface_method", "n.Missing", 117, ""}})
+	// Empty has no known method, so Rule 5 finds both same-package Get methods.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callEmpty"),
+		[]edgeRow{
+			{"ambiguous", "", "unknown", "e.Get", 123, "k8s.io/kubernetes/interfaces.(A).Get"},
+			{"ambiguous", "", "unknown", "e.Get", 123, "k8s.io/kubernetes/interfaces.(B).Get"},
+		})
+
 	for _, line := range []string{
-		"resolution ambiguous: 0",
-		"call kind interface_method: 0",
-		"deferred_interface: 4",
-		"interfaces_partial: 0",
-		"invariant: call sites 4 = stored 0 + skipped 0 + deferred 4 [ok]",
+		"resolution ambiguous: 15",
+		"resolution unresolved: 1",
+		"reason no_match: 1",
+		"call kind interface_method: 14",
+		"call kind unknown: 2",
+		"interfaces_partial: 1",
+		"invariant: call sites 16 = stored 16 + skipped 0 + deferred 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
 		}
 	}
+	if strings.Contains(out, "deferred_interface") {
+		t.Errorf("--stats still prints the removed deferred_interface counter:\n%s", out)
+	}
 }
 
-// TestGraphStageInterfaceRule4Uncapped exercises the uncapped Rule 4 rows: A
-// (value Get, pointer Set) is the only Store candidate, the same-package
-// embedded Both expands to A and C, and the cross-package UsesExt contributes
-// only Set (A and C) and increments interfaces_partial.
-func TestGraphStageInterfaceRule4Uncapped(t *testing.T) {
+// TestGraphStageInterfaceCap covers the D-075 cap with a small test override
+// (Rule4N 3): Cap3's exactly three implementers give three ambiguous rows, and
+// Cap4's four give one candidates_capped unresolved row with a NULL callee and
+// the raw text kept.
+func TestGraphStageInterfaceCap(t *testing.T) {
 	pool, root := graphFixture(t)
 	out := runGraphStage(t, pool, root, graphOptions{
-		Package: "k8s.io/kubernetes/interfaces", Rule4Uncapped: true, Stats: true,
+		Package: "k8s.io/kubernetes/interfaces", Rule4N: 3, Stats: true,
 	})
 
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callStore"),
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callCap3"),
 		[]edgeRow{
-			{"ambiguous", "", "interface_method", "s.Get", 52, "k8s.io/kubernetes/interfaces.(A).Get"},
-			{"ambiguous", "", "interface_method", "s.Set", 53, "k8s.io/kubernetes/interfaces.(*A).Set"},
+			{"ambiguous", "", "interface_method", "c.Do3", 109, "k8s.io/kubernetes/interfaces.(Q1).Do3"},
+			{"ambiguous", "", "interface_method", "c.Do3", 109, "k8s.io/kubernetes/interfaces.(Q2).Do3"},
+			{"ambiguous", "", "interface_method", "c.Do3", 109, "k8s.io/kubernetes/interfaces.(Q3).Do3"},
 		})
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callBoth"),
-		[]edgeRow{
-			{"ambiguous", "", "interface_method", "b.Write", 57, "k8s.io/kubernetes/interfaces.(C).Write"},
-			{"ambiguous", "", "interface_method", "b.Write", 57, "k8s.io/kubernetes/interfaces.(D).Write"},
-		})
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callUsesExt"),
-		[]edgeRow{
-			{"ambiguous", "", "interface_method", "u.Write", 61, "k8s.io/kubernetes/interfaces.(C).Write"},
-			{"ambiguous", "", "interface_method", "u.Write", 61, "k8s.io/kubernetes/interfaces.(D).Write"},
-		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callCap4"),
+		[]edgeRow{{"unresolved", "candidates_capped", "interface_method", "c.Do4", 113, ""}})
 
 	for _, line := range []string{
-		"resolution ambiguous: 6",
-		"call kind interface_method: 6",
+		"resolution ambiguous: 11",
+		"resolution unresolved: 2",
+		"reason candidates_capped: 1",
+		"reason no_match: 1",
+		"call kind interface_method: 11",
 		"interfaces_partial: 1",
-		"deferred_interface: 0",
-		"invariant: call sites 6 = stored 6 + skipped 0 + deferred 0 [ok]",
+		"invariant: call sites 13 = stored 13 + skipped 0 + deferred 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -488,7 +523,8 @@ func TestGraphStageInterfaceRule4Uncapped(t *testing.T) {
 
 // TestGraphStageUncappedHistogramMatchesUncappedRun proves the histogram dry run
 // uses the real code path, writes nothing and its candidate total equals the
-// interface_method rows an uncapped stored run produces.
+// ambiguous interface_method rows a production stored run produces (the fixture
+// candidate counts stay under the production cap).
 func TestGraphStageUncappedHistogramMatchesUncappedRun(t *testing.T) {
 	histPool, root := graphFixture(t)
 	runGraphStage(t, histPool, root, graphOptions{})
@@ -516,11 +552,11 @@ func TestGraphStageUncappedHistogramMatchesUncappedRun(t *testing.T) {
 	uncapped := testdb.New(t)
 	seedFiles(t, uncapped, root)
 	runParseCorpus(t, uncapped, root, 0)
-	runGraphStage(t, uncapped, root, graphOptions{Rule4Uncapped: true})
+	runGraphStage(t, uncapped, root, graphOptions{})
 	stored := scalarInt(t, uncapped,
-		`SELECT count(*) FROM edges WHERE source = 'treesitter' AND call_kind = 'interface_method'`)
+		`SELECT count(*) FROM edges WHERE source = 'treesitter' AND call_kind = 'interface_method' AND resolution = 'ambiguous'`)
 	if stored != int64(h.CandidateTotal()) {
-		t.Errorf("uncapped stored interface rows = %d, histogram candidate total = %d",
+		t.Errorf("stored ambiguous interface rows = %d, histogram candidate total = %d",
 			stored, h.CandidateTotal())
 	}
 }
@@ -637,8 +673,8 @@ func TestGraphStageRerunIdempotent(t *testing.T) {
 		`SELECT count(*) FROM edges WHERE (resolution = 'unresolved') <> (callee_id IS NULL)`); n != 0 {
 		t.Errorf("rows breaking the unresolved shape = %d, want 0", n)
 	}
-	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 53 {
-		t.Errorf("tree-sitter edge count = %d, want 53", n)
+	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 70 {
+		t.Errorf("tree-sitter edge count = %d, want 70", n)
 	}
 }
 

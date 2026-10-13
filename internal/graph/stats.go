@@ -11,8 +11,9 @@ import (
 var CandidateCountThresholds = []int{5, 10, 20, 50, 100}
 
 // maxNonEscalatingCap is the largest N the rule may adopt; a chosen N above it
-// stops the work and escalates to the owner (D-075).
-const maxNonEscalatingCap = 50
+// stops the work and escalates to the owner (D-075). It is the Rule 4 production
+// cap by definition, so it references MaxInterfaceCandidates.
+const maxNonEscalatingCap = MaxInterfaceCandidates
 
 // CapHistogram collects the candidate count of every interface call site during
 // an uncapped Rule 4 dry run, to choose the cap N from evidence (D-075).
@@ -173,12 +174,10 @@ type Stats struct {
 	SkippedBuiltin    int
 	SkippedConversion int
 	// Deferred counters: kinds not yet handled, never counted as no_match.
-	DeferredLocal     int
-	DeferredInterface int
-	// InterfacesPartial counts interface call sites whose interface has a
-	// cross-package or unresolvable embedded interface (Rule 4). It is 0 on the
-	// production path by design, because production stores no Rule 4 rows yet;
-	// the cap step turns Rule 4 on.
+	DeferredLocal int
+	// InterfacesPartial counts Rule 4 call sites whose interface has a
+	// cross-package or unresolvable embedded interface, so the candidate set is
+	// a superset (D-075).
 	InterfacesPartial int
 }
 
@@ -195,7 +194,7 @@ func (s Stats) Skipped() int { return s.SkippedBuiltin + s.SkippedConversion }
 
 // Deferred is the number of call sites counted by deferred counters.
 func (s Stats) Deferred() int {
-	return s.DeferredLocal + s.DeferredInterface
+	return s.DeferredLocal
 }
 
 // Add merges another Stats into s.
@@ -214,7 +213,6 @@ func (s *Stats) Add(o Stats) {
 	s.SkippedBuiltin += o.SkippedBuiltin
 	s.SkippedConversion += o.SkippedConversion
 	s.DeferredLocal += o.DeferredLocal
-	s.DeferredInterface += o.DeferredInterface
 	s.InterfacesPartial += o.InterfacesPartial
 }
 

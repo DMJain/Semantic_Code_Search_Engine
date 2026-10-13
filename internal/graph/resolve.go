@@ -324,9 +324,9 @@ func (ni *NameIndex) IsIndexed(pkg string) bool { return ni.packages[pkg] }
 // Analyze classifies one file's call sites and returns the edges to store plus
 // the stats for those call sites. names is the cross-package declared-name index
 // (spec story 101). An optional Rule4 configures interface-receiver handling;
-// the zero value is production (no Rule 4 rows, counted deferred_interface).
+// the default is production (capped at MaxInterfaceCandidates).
 func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex, rule4 ...Rule4) ([]Edge, Stats) {
-	var r4 Rule4
+	r4 := Rule4{N: MaxInterfaceCandidates}
 	if len(rule4) > 0 {
 		r4 = rule4[0]
 	}
@@ -409,7 +409,7 @@ func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, p
 // analyzeSelector classifies a selector call whose operand is a bare identifier.
 // It is Rule 3 when the qualifier is a receiver, parameter or inferable local
 // with a written type and the (possibly field-chained) type resolves to a named
-// type with that method; a known interface type is counted deferred_interface.
+// type with that method; a known interface type is handled by Rule 4.
 // It is Rule 2 when the qualifier is an import alias. Anything else (an unknown
 // type, a shadowed local, an embedded-only promotion, a type without that
 // method) has an unknown receiver: Rule 5 (spec story 56).
@@ -417,7 +417,7 @@ func analyzeSelector(edges []Edge, st Stats, callerID int64, c Call, d Decl, cto
 	if base, ok := baseType(c.Qualifier, d, ctors, pkg, aliases, names); ok {
 		if targetPkg, typeName, ok := resolveChain(base, c.Fields, pkg, names); ok {
 			if ix.IsInterface(targetPkg, typeName) {
-				return analyzeInterface(edges, st, callerID, c, targetPkg, typeName, ix, names, r4)
+				return analyzeInterface(edges, st, callerID, c, pkg, targetPkg, typeName, ix, names, r4)
 			}
 			if id, ok := ix.ConcreteMethod(targetPkg, typeName, c.Field); ok {
 				st.Exact++

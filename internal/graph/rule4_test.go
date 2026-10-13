@@ -301,7 +301,7 @@ func F(i I) {
 		"I": {Methods: map[string]bool{"M": true}},
 	})
 
-	capped, st := Analyze("p/p.go", "p", info, ix, names, Rule4{Compute: true, N: 2})
+	capped, st := Analyze("p/p.go", "p", info, ix, names, Rule4{N: 2})
 	want := []Edge{{
 		CallerID: 1, CalleeID: 0, CalleeRaw: "i.M", Resolution: ResolutionUnresolved,
 		CallKind: KindInterfaceMethod, CallLine: 16, UnresolvedReason: ReasonCandidatesCap,
@@ -317,11 +317,107 @@ func F(i I) {
 		t.Errorf("capped invariant: %v", err)
 	}
 
-	uncapped, st := Analyze("p/p.go", "p", info, ix, names, Rule4{Compute: true, N: 3})
+	uncapped, st := Analyze("p/p.go", "p", info, ix, names, Rule4{N: 3})
 	if len(uncapped) != 3 || st.Ambiguous != 3 {
 		t.Fatalf("N=3 edges = %+v stats ambiguous=%d, want 3 ambiguous rows", uncapped, st.Ambiguous)
 	}
 	if err := st.Check(); err != nil {
 		t.Errorf("uncapped invariant: %v", err)
+	}
+}
+
+// TestMaxInterfaceCandidatesIsD075 pins the production cap to the N recorded in
+// D-075 (50); changing it is a decision, not a refactor.
+func TestMaxInterfaceCandidatesIsD075(t *testing.T) {
+	if MaxInterfaceCandidates != 50 {
+		t.Errorf("MaxInterfaceCandidates = %d, want the D-075 N of 50", MaxInterfaceCandidates)
+	}
+}
+
+// TestAnalyzeRule4NoImplementer proves a known interface with candidates that
+// no indexed type implements stores one no_match unresolved row (the interface
+// is indexed, no implementing type matched), keeping the call site accounted
+// for now that deferred_interface is gone.
+func TestAnalyzeRule4NoImplementer(t *testing.T) {
+	src := []byte(`package p
+
+type I interface {
+	M()
+}
+
+func F(i I) {
+	i.M()
+}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ix := NewIndex([]Symbol{
+		{ID: 1, Path: "p/p.go", Kind: parse.KindFunc, Package: "p", Name: "F", QualifiedName: "p.F", StartLine: 7},
+		{ID: 2, Path: "p/p.go", Kind: parse.KindInterface, Package: "p", Name: "I", QualifiedName: "p.I"},
+	})
+	names := NewNameIndex()
+	names.Add("p", map[string]string{"F": "func", "I": "type"})
+	names.AddInterfaces("p", map[string]InterfaceFact{"I": {Methods: map[string]bool{"M": true}}})
+
+	edges, st := Analyze("p/p.go", "p", info, ix, names)
+	want := Edge{
+		CallerID: 1, CalleeID: 0, CalleeRaw: "i.M", Resolution: ResolutionUnresolved,
+		CallKind: KindInterfaceMethod, CallLine: 8, UnresolvedReason: ReasonNoMatch,
+	}
+	if len(edges) != 1 || edges[0] != want {
+		t.Fatalf("no-implementer edges = %+v, want %+v", edges, want)
+	}
+	if st.Unresolved != 1 || st.Reasons[ReasonNoMatch] != 1 || st.ByKind[KindInterfaceMethod] != 1 {
+		t.Errorf("stats = %+v, want one no_match interface_method row", st)
+	}
+	if err := st.Check(); err != nil {
+		t.Errorf("invariant: %v", err)
+	}
+}
+
+// TestAnalyzeRule4EmptyInterfaceFallsToRule5 proves an interface with no known
+// method names stores no Rule 4 row and the call is accounted for by Rule 5
+// (spec story 50): here the one same-package Get method gives a name_only guess.
+func TestAnalyzeRule4EmptyInterfaceFallsToRule5(t *testing.T) {
+	src := []byte(`package p
+
+type Empty interface{}
+
+type A struct{}
+
+func (A) Get() int { return 0 }
+
+func F(e Empty) {
+	e.Get()
+}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ix := NewIndex([]Symbol{
+		{ID: 1, Path: "p/p.go", Kind: parse.KindFunc, Package: "p", Name: "F", QualifiedName: "p.F", StartLine: 9},
+		{ID: 2, Path: "p/p.go", Kind: parse.KindInterface, Package: "p", Name: "Empty", QualifiedName: "p.Empty"},
+		{ID: 3, Path: "p/p.go", Kind: parse.KindMethod, Package: "p", Name: "Get", Receiver: "A", QualifiedName: "p.(A).Get"},
+	})
+	names := NewNameIndex()
+	names.Add("p", map[string]string{"F": "func", "Empty": "type", "A": "type"})
+	names.AddInterfaces("p", map[string]InterfaceFact{"Empty": {}})
+
+	edges, st := Analyze("p/p.go", "p", info, ix, names)
+	want := Edge{
+		CallerID: 1, CalleeID: 3, CalleeRaw: "e.Get", Resolution: ResolutionNameOnly,
+		CallKind: KindUnknown, CallLine: 10,
+	}
+	if len(edges) != 1 || edges[0] != want {
+		t.Fatalf("empty-interface edges = %+v, want %+v (Rule 5)", edges, want)
+	}
+	if st.NameOnly != 1 || st.ByKind[KindUnknown] != 1 || st.ByKind[KindInterfaceMethod] != 0 {
+		t.Errorf("stats = %+v, want one Rule 5 name_only unknown row", st)
+	}
+	if err := st.Check(); err != nil {
+		t.Errorf("invariant: %v", err)
 	}
 }

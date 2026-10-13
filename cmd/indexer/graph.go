@@ -82,10 +82,9 @@ type graphOptions struct {
 	Status bool
 	// DryRun computes edges and stats but writes nothing (a no-op writer).
 	DryRun bool
-	// Rule4Uncapped computes Rule 4 (interface) rows with no cap and writes
-	// them. It exists only for tests that compare the histogram dry run to an
-	// uncapped stored run; production never sets it in this ticket.
-	Rule4Uncapped bool
+	// Rule4N overrides the Rule 4 candidate cap for tests; 0 uses the production
+	// cap (graph.MaxInterfaceCandidates).
+	Rule4N int
 	// Histogram, when non-nil, runs the uncapped-histogram dry run: Rule 4 is
 	// computed over every indexed file, nothing is written, and each interface
 	// call site's candidate count is recorded here.
@@ -171,9 +170,12 @@ func graphStage(ctx context.Context, pool *pgxpool.Pool, root string, opts graph
 	// indexed file with a no-op writer, so the histogram is evidence about the
 	// whole tree rather than only the currently stale files.
 	forceAll := opts.Histogram != nil
-	rule4 := graph.Rule4{Compute: opts.Rule4Uncapped || opts.Histogram != nil}
+	rule4 := graph.Rule4{N: graph.MaxInterfaceCandidates}
+	if opts.Rule4N > 0 {
+		rule4.N = opts.Rule4N
+	}
 	if opts.Histogram != nil {
-		rule4.Observe = opts.Histogram.Observe
+		rule4 = graph.Rule4{Observe: opts.Histogram.Observe}
 	}
 
 	stale := make(map[int64]bool)
@@ -478,7 +480,6 @@ func printGraphStats(out io.Writer, s graph.Stats) {
 	fmt.Fprintf(out, "skipped_builtin: %d\n", s.SkippedBuiltin)
 	fmt.Fprintf(out, "skipped_conversion: %d\n", s.SkippedConversion)
 	fmt.Fprintf(out, "deferred_local: %d\n", s.DeferredLocal)
-	fmt.Fprintf(out, "deferred_interface: %d\n", s.DeferredInterface)
 	fmt.Fprintf(out, "interfaces_partial: %d\n", s.InterfacesPartial)
 
 	status := "ok"

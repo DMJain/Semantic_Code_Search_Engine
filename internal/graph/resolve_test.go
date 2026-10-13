@@ -8,8 +8,9 @@ import (
 
 // TestAnalyzeKnownReceiverCrossPackage proves Rule 3 through an import alias: a
 // parameter written `d *dep.T` resolves `d.M()` to the method T.M in the aliased
-// indexed package, exact concrete_method, and an interface-typed parameter is
-// counted deferred_interface with no stored row.
+// indexed package, exact concrete_method. An interface-typed parameter with no
+// known method name stores no Rule 4 row and falls through to Rule 5, which
+// finds no same-package method named N, so it is unresolved unknown_receiver.
 func TestAnalyzeKnownReceiverCrossPackage(t *testing.T) {
 	src := []byte(`package p
 
@@ -38,16 +39,23 @@ func F(d *dep.T, i Iface) {
 	names.Add("example.com/dep", map[string]string{"T": "type"})
 
 	edges, st := Analyze("p/p.go", "example.com/p", info, ix, names)
-	want := []Edge{{
-		CallerID: 1, CalleeID: 2, CalleeRaw: "d.M", Resolution: ResolutionExact,
-		CallKind: KindConcreteMethod, CallLine: 6,
-	}}
-	if len(edges) != 1 || edges[0] != want[0] {
+	want := []Edge{
+		{CallerID: 1, CalleeID: 2, CalleeRaw: "d.M", Resolution: ResolutionExact,
+			CallKind: KindConcreteMethod, CallLine: 6},
+		{CallerID: 1, CalleeID: 0, CalleeRaw: "i.N", Resolution: ResolutionUnresolved,
+			CallKind: KindUnknown, CallLine: 7, UnresolvedReason: ReasonUnknownReceiver},
+	}
+	if len(edges) != len(want) {
 		t.Fatalf("edges = %+v, want %+v", edges, want)
 	}
-	if st.Exact != 1 || st.DeferredInterface != 1 || st.NameOnly != 0 {
-		t.Errorf("stats exact=%d deferred_interface=%d name_only=%d, want 1/1/0",
-			st.Exact, st.DeferredInterface, st.NameOnly)
+	for i := range want {
+		if edges[i] != want[i] {
+			t.Errorf("edge %d = %+v, want %+v", i, edges[i], want[i])
+		}
+	}
+	if st.Exact != 1 || st.Unresolved != 1 || st.NameOnly != 0 {
+		t.Errorf("stats exact=%d unresolved=%d name_only=%d, want 1/1/0",
+			st.Exact, st.Unresolved, st.NameOnly)
 	}
 	if err := st.Check(); err != nil {
 		t.Errorf("invariant: %v", err)
@@ -400,12 +408,13 @@ func F(s *S) {
 	}
 }
 
-// TestAnalyzeInterfaceFieldFallsToDeferred proves a same-package interface field
-// whose qualified type came from another file resolves to the declared interface
-// and is counted deferred_interface, not unknown_receiver: the field's package
-// path is carried from the declaring file, so the caller's alias map is
-// irrelevant.
-func TestAnalyzeInterfaceFieldFallsToDeferred(t *testing.T) {
+// TestAnalyzeInterfaceFieldFallsToRule5 proves a same-package interface field
+// whose qualified type came from another file resolves to the declared interface;
+// with no known method name it stores no Rule 4 row and falls through to Rule 5,
+// which finds no same-package Add method, so it is unresolved unknown_receiver:
+// the field's package path is carried from the declaring file, so the caller's
+// alias map is irrelevant.
+func TestAnalyzeInterfaceFieldFallsToRule5(t *testing.T) {
 	src := []byte(`package p
 
 import foo "example.com/other"
@@ -432,11 +441,15 @@ func F(s *S) {
 	names.AddFields("example.com/p", map[string]TypeRef{"S\x00queue": {Pkg: "example.com/q", Name: "Queue"}})
 
 	edges, st := Analyze("p/p.go", "example.com/p", info, ix, names)
-	if len(edges) != 0 {
-		t.Fatalf("edges = %+v, want none (interface receiver)", edges)
+	want := Edge{CallerID: 1, CalleeID: 0, CalleeRaw: "s.queue.Add",
+		Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: 8,
+		UnresolvedReason: ReasonUnknownReceiver}
+	if len(edges) != 1 || edges[0] != want {
+		t.Fatalf("edges = %+v, want [%+v]", edges, want)
 	}
-	if st.DeferredInterface != 1 || st.Unresolved != 0 {
-		t.Errorf("deferred_interface = %d, unresolved = %d, want 1/0", st.DeferredInterface, st.Unresolved)
+	if st.Unresolved != 1 || st.Reasons[ReasonUnknownReceiver] != 1 {
+		t.Errorf("unresolved = %d, unknown_receiver = %d, want 1/1",
+			st.Unresolved, st.Reasons[ReasonUnknownReceiver])
 	}
 }
 
