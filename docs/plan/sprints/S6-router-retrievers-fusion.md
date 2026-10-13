@@ -59,7 +59,7 @@ Client and cache first (T01-T03), retrievers (T04-T05), router (T06-T07), fusion
 - Depends on: none
 - Touches: `internal/retrieve/structural.go`
 - Details: input from the router (`symbols[]`, direction callers|callees inferred from phrasing "who calls"/"callers of" vs "what does X call"/"callees of"; default callers). Resolve symbol: exact `qualified_name`, else exact `name`; multiple matches -> take all (flag `ambiguous_symbol`). Recursive CTE over `edges` where `source='treesitter'` up to depth `d` (default 2, max 3) with cycle guard (`path` array); each reached symbol gets score `conf / hop` where `conf` = 1.0 exact, 0.7 name_only, 0.4 ambiguous; best score per symbol; collapse to files via shared helper; `Evidence` marks `ambiguous` and hop distance. Excludes the query symbol's own file only if no other file results.
-- Acceptance: for a symbol with known callers (take one from the S4 DEV structural query), the retriever returns the files of its direct callers ahead of 2-hop files; cycle test terminates; unit tests pass.
+- Acceptance: for a symbol with known callers (take one from the S4 DEV structural query), the retriever returns the files of its direct callers ahead of 2-hop files; cycle test terminates; unit tests pass. Source isolation (D-077): with one `source='gopackages'` row and one `source='treesitter'` row for the same caller/callee pair, the retriever returns one edge and never reads GT rows; it follows only edges with a callee and lists unresolved rows separately with their reason (D-073).
 - Tests: guarded integration test with a fixture graph (cycle, ambiguous edge, 3 hops); unit test for scoring.
 - Out of scope: using `gopackages` edges (forbidden at serving time).
 - Owner: agent
