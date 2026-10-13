@@ -1500,3 +1500,119 @@ itself produced.
 
 Checks. `make test` green (throwaway database per test, no new skips); `make
 ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck, actionlint).
+
+### Error analysis and draft Results (S2 ticket 12)
+
+**Sampling tool.** `eval callgraph --sample` enumerates false positives and
+false negatives through the same scoring core the report uses: `score()` in
+`cmd/eval/callgraph.go` builds the error lists (unexported fields, so the JSON
+report is unchanged) and `enumerateErrors` returns them, so the sampler and the
+report cannot disagree. A false positive is a scored tree-sitter call unit (one
+with an in-slice candidate) that no ground-truth pair matches; a false negative
+is an in-slice ground-truth pair no tree-sitter unit covers. The sampler draws 30
+of each, stratified by kind — false positives by the tree-sitter unit's
+`call_kind`, false negatives by the ground-truth pair's `call_kind` — using
+`internal/seeded` at seed 11. Quotas are allocated proportionally to each kind's
+error count by the largest-remainder method, capped at the stratum size; each
+stratum is sorted before the shuffle, so the draw is deterministic whatever order
+the queries returned rows in. Every drawn unit is rendered with the caller's
+qualified name, the raw callee text (false positive) or the ground-truth callee
+(false negative), the call line and the caller source line.
+
+```
+$ set -a; source .env; set +a
+$ go run ./cmd/eval callgraph --sample
+error sample: 30 fp (of 1620) + 30 fn (of 1712), seed 11 -> eval/results/callgraph/error-sample.json
+```
+
+Committed as `eval/results/callgraph/error-sample.json`: 60 samples (30 fp + 30
+fn), seed 11; fp quotas func 0, concrete_method 0, interface_method 10, unknown
+20; fn quotas func 5, concrete_method 4, interface_method 14, func_value 7. Tests:
+`TestAllocateQuotas`, `TestEnumerateErrors`,
+`TestSampleErrorsDeterministicAndStratified`, `TestSampleErrorsClampsWhenSparse`,
+`TestBuildErrorSampleNonVacuous`, `TestSampleCallgraphEndToEnd`. They assert 30+30
+samples, seed-11 determinism, per-stratum quota, and no vacuous item (every
+sample has a caller, a file and a source line).
+
+**Cause table (60 samples, sums to 60).** Each sample was classified by reading
+its caller source line (`internal/source`); the per-sample `cause` and the
+`cause_table` are recorded in the sample file.
+
+| cause | count | share | what it is |
+| --- | --- | --- | --- |
+| unknown receiver | 30 | 50.0% | Rule 5's same-package name guess fired (or the receiver type is unknown): a chained call (`a.B().C()`), a field, map element or local whose type the extractor did not infer, or a type from an unindexed package. 20 false positives (all `unknown`-kind FPs: `_c.Call.Run`, `_c.Call.Return`, `ret.Get` in generated testify mocks, `w.Write` on an `io.Writer`, `im.tracer.Start`, `pl.Name`, `bestHint.NUMANodeAffinity.IsEqual`) and 10 false negatives (`devices.deviceIds.Devices()`, `podCtx.state.SetPodGroupSchedulingCycle`, `ck.Verify`, `nc.zoneNoExecuteTainter[...].Remove`, and chained interface calls `snapshot.PodGroups().Get`, `kl.recorder...Eventf`, `rsl.ReplicaSets(...).Get`, `kl.getRuntime().UpdatePodCIDR`, `pl.PreFilterExtensions().AddPod`, `snapshot.CompositePodGroupStates().Get`). |
+| dynamic | 25 | 41.7% | A target no name-only heuristic can pin down: interface dispatch where the VTA-resolved implementer is not among the Rule 4 candidates (10 interface-method false positives), direct interface-method misses (`err.Error()`, `pcm.EnsureExists`, `entity.Update`, iterators; 8 false negatives) and function values (`selectPolicyFn`, `yield`, `eic.run()`, `f()`; 7 false negatives). |
+| closure | 5 | 8.3% | An immediately-invoked function literal `defer func() { ... }()`; VTA attributes the closure to the enclosing method and records a self-edge (caller = callee) that tree-sitter does not store. |
+| embedded struct | 0 | 0% | No sampled miss was caused only by a method promoted from an embedded struct. |
+| generic | 0 | 0% | Generic instantiation was not the sole cause of any sampled miss (the generic `(*ClusterTrustBundlePublisher[T]).Run` sample is a closure). |
+| build tag | 0 | 0% | No sampled miss was a build-tag file-set mismatch (walk and go/packages see the same linux/amd64 files, D-058/D-067). |
+| other | 0 | 0% | None. |
+
+**Recall per stratum.** Recall is over the in-slice ground-truth universe
+(D-074; both endpoints in slice). The mapping from kinds/callee availability:
+**interface method** = GT kind `interface_method`; **function value** = GT kind
+`func_value`; **plain** = GT kinds `func` and `concrete_method`; **external** =
+out-of-slice callees, for which no ground truth exists (D-011 story 14 keeps only
+in-slice pairs), so recall there is undefined and the in-slice-caller counts are
+given for context.
+
+| stratum | found / pairs | recall |
+| --- | --- | --- |
+| plain (func + concrete_method) | 7134 / 7644 | 0.9333 |
+| interface method | 1771 / 2588 | 0.6843 |
+| function value | 1 / 386 | 0.0026 |
+| external | n/a | undefined (out of the scoring universe; 7474 unresolved-`external` and 6289 resolved-out-of-slice in-slice-caller call sites) |
+
+**Fix-rule verdict: not triggered.** The rule is "one cause > 20% of the 60
+errors AND a fix <= 150 lines in one area". Two causes exceed 20%
+(`unknown_receiver` 50.0%, `dynamic` 41.7%; the next is `closure` 8.3%), but
+neither has a bounded <= 150-line single-area fix: `dynamic` is the deliberate
+design (D-073, D-075 — function values are unresolved and interface dispatch is a
+name-set candidate match, not type-checking), and `unknown_receiver` is the core
+heuristic limit, where a fix means propagating return types through chained calls
+and inferring field/local types — new resolution machinery well over 150 lines.
+`closure` is 8.3%, below the threshold. No fix is attempted and no resolver
+version bump, graph rerun or before/after report is produced by S2.
+`.scratch/S2/issues/13-conditional-fix.md` records this verdict and is set
+`wontfix`.
+
+**Unfixed limitations (recorded honestly; also in the glossary).**
+- Chained calls (`a.B().C()`), function values and interface dispatch are not
+  resolved by design (D-073, D-075); they are 41.7% of the sampled errors
+  (`dynamic`).
+- The receiver type of a field, a map element, a cross-package constructor result
+  or an unindexed type is often unknown, so Rule 5 makes a same-package name
+  guess that misses (50.0% of the sampled errors).
+- Immediately-invoked function literals are not stored as calls; VTA records them
+  as a self-edge (8.3%).
+- Methods promoted from embedded structs are unseen (D-075); it was not the sole
+  cause of any sampled error.
+- The false-positive sample is dominated by generated testify mock files
+  (`pkg/kubelet/*/testing/mocks.go`), where `_c.Call.Run`, `_c.Call.Return` and
+  `ret.Get` are calls on external testify types.
+
+**Headline numbers from S2 tickets 01 to 11** (all already recorded above; no new
+decisions).
+
+| metric | value |
+| --- | --- |
+| precision / recall (in-slice) | 0.8613 (10056/11676) / 0.8388 (8906/10618) |
+| precision / recall by kind | func 0.9977 / 0.9248; concrete_method 0.9987 / 0.9412; interface_method 0.7610 / 0.6843; func_value n/a / 0.0026; unknown 0.3614 / n/a |
+| out-of-slice share | 0.1066 (6289 of 59001 in-slice-caller edges) |
+| edges by source | treesitter 262420; gopackages 12586 |
+| treesitter by resolution | exact 75778, name_only 4802, ambiguous 62248, unresolved 119592 |
+| treesitter by kind | func 57649, concrete_method 18129, interface_method 36499, func_value 3804, unknown 146339 |
+| GT partition | total 15254 = mapped 12780 + dropped 1990 + gt_unmapped 484 |
+| GT peak RSS (Q-04) | 5,482,627,072 B (5.11 GiB), ticket 01; 5,389,205,504 B re-run, ticket 11 |
+| whole-repo graph wall time | 54.8 s (`go run`, includes the build), ticket 09 |
+| GT wall time | 23.91 s (ticket 10); 21.52 s (ticket 11) |
+| cap N (D-075) | 50 (9547 interface call sites; p50 2, p90 10, p99 78, max 407) |
+| graph call sites | 296953 = stored 262420 + skipped 34533 |
+
+### S2 close-out sign-off
+
+_Reserved for the owner's sign-off after reviewing this analysis and draft, as in
+S1. The agent leaves this line blank._
+
+**Owner sign-off:** _______________________________________
+

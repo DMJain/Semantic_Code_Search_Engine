@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +26,8 @@ func runCallgraph(ctx context.Context, args []string) error {
 	fs := newFlagSet("callgraph")
 	out := fs.String("out", config.DefaultCallgraphResultPath, "results JSON path")
 	gtStore := fs.String("gt-store", config.DefaultGTStorePath, "GT partition result file written by callgraph-gt")
+	sample := fs.Bool("sample", false, "write the seeded error sample instead of the precision/recall report")
+	sampleOut := fs.String("sample-out", config.DefaultErrorSamplePath, "error sample JSON path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -38,6 +41,9 @@ func runCallgraph(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 
+	if *sample {
+		return sampleCallgraph(ctx, pool, cfg.KubeDir, *sampleOut, os.Stdout)
+	}
 	return reportCallgraph(ctx, pool, cfg.KubeDir, *gtStore, *out, os.Stdout)
 }
 
@@ -120,11 +126,13 @@ type tsRow struct {
 	Reason    string
 }
 
-// gtRow is one stored ground-truth edge row (source='gopackages').
+// gtRow is one stored ground-truth edge row (source='gopackages'). CallLine is
+// carried only for the error sampler; scoring ignores it (D-074).
 type gtRow struct {
 	CallerID int64
 	CalleeID int64
 	CallKind string
+	CallLine int
 }
 
 // scoreInput is the pure input the scorer works over, so tests can hand-build
@@ -161,7 +169,7 @@ func loadScoreInput(ctx context.Context, pool *pgxpool.Pool) (scoreInput, error)
 	trows, err := pool.Query(ctx, `
 		SELECT caller_id, coalesce(callee_id, 0), callee_raw, call_kind, call_line,
 		       coalesce(unresolved_reason, '')
-		FROM edges WHERE source = 'treesitter'`)
+		FROM edges WHERE source = 'treesitter' ORDER BY id`)
 	if err != nil {
 		return in, fmt.Errorf("load tree-sitter edges: %w", err)
 	}
@@ -180,13 +188,13 @@ func loadScoreInput(ctx context.Context, pool *pgxpool.Pool) (scoreInput, error)
 	}
 
 	grows, err := pool.Query(ctx,
-		`SELECT caller_id, callee_id, call_kind FROM edges WHERE source = 'gopackages'`)
+		`SELECT caller_id, callee_id, call_kind, call_line FROM edges WHERE source = 'gopackages' ORDER BY id`)
 	if err != nil {
 		return in, fmt.Errorf("load ground-truth edges: %w", err)
 	}
 	for grows.Next() {
 		var r gtRow
-		if err := grows.Scan(&r.CallerID, &r.CalleeID, &r.CallKind); err != nil {
+		if err := grows.Scan(&r.CallerID, &r.CalleeID, &r.CallKind, &r.CallLine); err != nil {
 			grows.Close()
 			return in, fmt.Errorf("scan ground-truth edge: %w", err)
 		}
@@ -246,7 +254,9 @@ type counts struct {
 }
 
 // callgraphReport is the committed result.json shape. Precision and Recall are
-// null when their universe is empty (undefined, not zero).
+// null when their universe is empty (undefined, not zero). The unexported error
+// lists are populated by score() so the error sampler reuses the exact scoring
+// rules; they are not marshalled.
 type callgraphReport struct {
 	Scope     string              `json:"scope"`
 	Note      string              `json:"note"`
@@ -254,6 +264,9 @@ type callgraphReport struct {
 	Recall    *float64            `json:"recall"`
 	ByKind    map[string]kindStat `json:"by_kind"`
 	Counts    counts              `json:"counts"`
+
+	fpUnits []fpUnit
+	fnPairs []fnPair
 }
 
 // gtPartition mirrors the file callgraph-gt writes; its partition must sum.
@@ -276,6 +289,8 @@ var callKinds = []string{
 type unit struct {
 	caller int64
 	kind   string
+	raw    string
+	line   int
 	cands  map[int64]bool
 }
 
@@ -339,7 +354,7 @@ func score(in scoreInput) (callgraphReport, error) {
 		k := unitKey{r.CallerID, r.CalleeRaw, r.CallLine}
 		u := units[k]
 		if u == nil {
-			u = &unit{caller: r.CallerID, kind: r.CallKind, cands: map[int64]bool{}}
+			u = &unit{caller: r.CallerID, kind: r.CallKind, raw: r.CalleeRaw, line: r.CallLine, cands: map[int64]bool{}}
 			units[k] = u
 			unitOrder = append(unitOrder, k)
 		}
@@ -366,6 +381,7 @@ func score(in scoreInput) (callgraphReport, error) {
 	// GT store's dedup order) so by-kind universes sum to the overall.
 	gtPairSet := map[pair]bool{}
 	pairKind := map[pair]string{}
+	pairLine := map[pair]int{}
 	for _, r := range in.GT {
 		rep.Counts.GTByKind[r.CallKind]++
 		if !in.InSlice[r.CallerID] || !in.InSlice[r.CalleeID] {
@@ -374,6 +390,9 @@ func score(in scoreInput) (callgraphReport, error) {
 		p := pair{r.CallerID, r.CalleeID}
 		if k, ok := pairKind[p]; !ok || (r.CallKind != "" && r.CallKind < k) {
 			pairKind[p] = r.CallKind
+		}
+		if r.CallLine > 0 && (pairLine[p] == 0 || r.CallLine < pairLine[p]) {
+			pairLine[p] = r.CallLine
 		}
 		gtPairSet[p] = true
 	}
@@ -427,6 +446,15 @@ func score(in scoreInput) (callgraphReport, error) {
 			st.TP++
 			rep.ByKind[kind] = st
 			rep.Counts.TP++
+		} else {
+			// A scored unit no ground-truth pair matches: the false positives the
+			// error sampler draws from (reusing this exact rule set).
+			ids := make([]int64, 0, len(u.cands))
+			for c := range u.cands {
+				ids = append(ids, c)
+			}
+			slices.Sort(ids)
+			rep.fpUnits = append(rep.fpUnits, fpUnit{CallerID: u.caller, Kind: kind, Raw: u.raw, Line: u.line, CandIDs: ids})
 		}
 	}
 	rep.Counts.FP = rep.Counts.PrecisionUniverse - rep.Counts.TP
@@ -447,6 +475,10 @@ func score(in scoreInput) (callgraphReport, error) {
 		if covered[p.caller][p.callee] {
 			st.Found++
 			rep.Counts.Found++
+		} else {
+			// An in-slice ground-truth pair no unit covers: the false negatives
+			// the error sampler draws from.
+			rep.fnPairs = append(rep.fnPairs, fnPair{CallerID: p.caller, CalleeID: p.callee, Kind: kind, Line: pairLine[p]})
 		}
 		rep.ByKind[kind] = st
 	}

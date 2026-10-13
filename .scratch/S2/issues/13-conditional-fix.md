@@ -6,7 +6,7 @@ Plan: S2 spec (`.scratch/S2/spec.md`). Spec user stories: 91, 92, 97, 99.
 
 **Blocked by:** 12 (only if triggered)
 
-**Status:** ready-for-agent (conditional)
+**Status:** wontfix (fix rule did not trigger)
 
 - [ ] The fix touches one area and is at most 150 lines; a golden test covers it
 - [ ] Before and after `eval callgraph` reports are both kept in Results
@@ -16,3 +16,14 @@ Plan: S2 spec (`.scratch/S2/spec.md`). Spec user stories: 91, 92, 97, 99.
 - [ ] Report: the commands run (trimmed output) and the commit hash
 
 Out of scope: Any second fix; anything not named by ticket 12.
+
+## Disposition (ticket 12, 2026-10-14)
+
+The fix rule did not trigger, so no fix is attempted. The sampled cause table
+(`eval/results/callgraph/error-sample.json`, 60 samples) is `unknown_receiver`
+30 (50.0%), `dynamic` 25 (41.7%), `closure` 5 (8.3%). Two causes exceed 20%, but
+neither has a bounded <= 150-line single-area fix: `dynamic` is the deliberate
+design (D-073, D-075) and `unknown_receiver` needs return-type propagation
+through chained calls and field/local type inference, new machinery well over 150
+lines. `closure` is below the threshold. This ticket is therefore not worked and
+is set `wontfix`; the file is kept for the orchestrator rather than deleted.

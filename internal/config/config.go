@@ -56,6 +56,9 @@ const (
 	// two paths cannot drift.
 	DefaultCallgraphResultPath = "eval/results/callgraph/result.json"
 	DefaultGTStorePath         = "eval/results/callgraph/gt-store.json"
+	// DefaultErrorSamplePath is the seeded error sample the error-analysis
+	// ticket commits alongside the report.
+	DefaultErrorSamplePath = "eval/results/callgraph/error-sample.json"
 )
 
 // Load reads the configuration from the process environment.
