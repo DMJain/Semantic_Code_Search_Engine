@@ -7,7 +7,7 @@ Details: sprint files in `docs/plan/sprints/`; `architecture.md`, `v2-architectu
 |---|---|---|---|---|
 | S0 | Verify setup, fix audit findings | skeleton `59a5039` | CI runs the Postgres test; both models probed live; doctor passes and fails correctly; `search_tsv` migrated | done (local sign-off; CI/push deferred by owner) |
 | S1 | Pinned tag, walk, parse, benchmark, mining-yield probe, slice, overnight summary run | S0 | slice FROZEN (D-005); quality-gated function-summary run launched | done |
-| S2 | Call graph (tree-sitter), VTA ground truth, edge P/R by kind | S1 | both graphs; report by call kind | todo |
+| S2 | Call graph (tree-sitter), VTA ground truth, edge P/R by kind | S1 | both graphs populated; D-025 filled; report by call kind recorded; no `deferred_*` counter remains; no S2-related PENDING remains; Q-04 and Q-05 closed; partition assertions pass on both sides and `gt_unmapped` is printed | todo |
 | S3 | Chunks, headers, `search_tsv`, embeddings (slice), HNSW, A0/A1 CLI | S2 | A0/A1 search; ANN overlap >= 95% | todo |
 | S4 | Harness, 50 queries, TEST freeze, B0, A0/A1/B0 on DEV | S3 | `validate --strict`; TEST hash in `eval/queries.test.sha256` | todo |
 | S5 | File/package summaries, summary vectors, A2 | S4 | A2 DEV; weights in D-020 | todo |

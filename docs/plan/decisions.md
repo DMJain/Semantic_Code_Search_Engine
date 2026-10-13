@@ -77,7 +77,7 @@ One `edges` row per candidate callee, `resolution='ambiguous'`.
 PRs merged within 12 months before the tag, labeled on the tag's file state. Rules, fallbacks and the leakage filter: [eval-protocol.md#sources](eval-protocol.md#sources). Limitation: the fix is already in the tag.
 
 ## D-025 callgraph-gt invocation (2026-10-08)
-`go list -deps ./pkg/scheduler/...` must succeed inside the clone with the network disabled. Working invocation: PENDING (S2-T06).
+`go list -deps ./pkg/scheduler/...` must succeed inside the clone with the network disabled. Starts from the workspace load (D-071), not `GOWORK=off -mod=vendor`. Working invocation: PENDING (S2 ticket 03).
 
 ## D-027 ANN overlap probe set before DEV exists (2026-10-08)
 S3 precedes S4, so S3 measures ANN overlap@10 on 30 seeded queries made from doc-comment first sentences; re-run on DEV in S4 and S8; below 95% means tune `ef_search` first.
@@ -162,7 +162,8 @@ The plan was rewritten from the new brief; deletions are listed below.
 ## D-057 int8 decision from the compactness ablation on DEV (PENDING P2-S8-T02)
 
 ## D-058 One build context for walk and callgraph-gt (2026-10-10)
-`GOOS=linux`, `GOARCH=amd64`, `CgoEnabled=false` in both the S1 walk filter and the S2 `callgraph-gt` load (plus `GOWORK=off`, `GOTOOLCHAIN=local`, `GOFLAGS=-mod=vendor` for `callgraph-gt`). Why: tree-sitter indexes every file it is given, `go/packages` loads only one build context; unequal file sets make call-graph precision/recall and structural labels incomparable. Acceptance: the slice `.go` file set from `walk` equals the set loaded by `go/packages` (S2-T06). Rejected: host build context (darwin).
+`GOOS=linux`, `GOARCH=amd64`, `CgoEnabled=false` in both the S1 walk filter and the S2 `callgraph-gt` load (plus `GOTOOLCHAIN=local` for `callgraph-gt`). Why: tree-sitter indexes every file it is given, `go/packages` loads only one build context; unequal file sets make call-graph precision/recall and structural labels incomparable. Acceptance: the slice `.go` file set from `walk` equals the set loaded by `go/packages` (S2-T06). Rejected: host build context (darwin).
+Amended 2026-10-13 (refs D-071): the `GOWORK=off`/`-mod=vendor` part was dropped because that load fails at the pinned tag (no vendored client-go); `callgraph-gt` loads under the workspace. `GOOS`, `GOARCH` and `CGO_ENABLED` are unchanged and the walk and `go/packages` file sets stay equal (D-067: 876 files, 720 packages, 0 errors). The working invocation is recorded in D-025 by S2 ticket 03.
 
 ## D-059 Ignore-file library (PENDING P2-S3-T02)
 
