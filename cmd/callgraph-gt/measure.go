@@ -81,6 +81,96 @@ func runMeasure(out string) int {
 	return 0
 }
 
+// sliceGraph is the shared SSA/VTA build over the slice: the program, the VTA
+// call graph and the in-slice file and slice-package sets. --measure and the
+// ground-truth store share the load/build code but not the root policy, so
+// --measure keeps the original minimal VTA input while the store can see the
+// synthetic callers story 17 requires.
+type sliceGraph struct {
+	root       string
+	prog       *ssa.Program
+	graph      *callgraph.Graph
+	sliceFiles map[string]bool
+	slicePkgs  map[string]bool
+	packages   int
+	ssaFuncs   int
+}
+
+// rootPolicy chooses the VTA seed set.
+type rootPolicy int
+
+const (
+	// rootsSliceOnly seeds VTA with the slice functions only (the memory
+	// measurement's minimal input, story 10).
+	rootsSliceOnly rootPolicy = iota
+	// rootsSliceAndSynthetic also seeds the position-less synthetic functions of
+	// the slice packages, so package-variable initialiser callers are visible
+	// and can be dropped and counted by the store (story 17).
+	rootsSliceAndSynthetic
+)
+
+// buildSliceGraph loads the slice only, builds SSA with generics instantiated
+// and computes the VTA graph seeded by sliceRoots over the CHA graph. It is the
+// single load/build path shared by --measure and the ground-truth store; policy
+// selects the seed set.
+func buildSliceGraph(root string, environ []string, policy rootPolicy) (*sliceGraph, error) {
+	cfg := &packages.Config{
+		Mode:  measureLoadMode,
+		Dir:   root,
+		Env:   buildEnv(environ, workspaceMode.over...),
+		Tests: false,
+	}
+	pkgs, err := packages.Load(cfg, slicePatterns()...)
+	if err != nil {
+		return nil, err
+	}
+	if errs := collectLoadErrors(pkgs); len(errs) > 0 {
+		return nil, fmt.Errorf("slice load errors: %s", strings.Join(errs, "; "))
+	}
+
+	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
+	prog.Build()
+
+	sliceFiles := inSliceFileSet(root, pkgs)
+	slicePkgs := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		slicePkgs[p.PkgPath] = true
+	}
+	funcs := ssautil.AllFunctions(prog)
+	graph := vta.CallGraph(sliceRoots(prog, funcs, sliceFiles, slicePkgs, policy), cha.CallGraph(prog))
+
+	return &sliceGraph{
+		root:       root,
+		prog:       prog,
+		graph:      graph,
+		sliceFiles: sliceFiles,
+		slicePkgs:  slicePkgs,
+		packages:   len(pkgs),
+		ssaFuncs:   len(funcs),
+	}, nil
+}
+
+// sliceRoots is the VTA input. Under rootsSliceOnly it is every in-slice
+// function (the memory measurement). Under rootsSliceAndSynthetic it also
+// includes the position-less synthetic functions of the slice packages, so
+// package-variable initialiser callers are visible and can be dropped and
+// counted (story 17).
+func sliceRoots(prog *ssa.Program, funcs map[*ssa.Function]bool, sliceFiles, slicePkgs map[string]bool, policy rootPolicy) map[*ssa.Function]bool {
+	roots := make(map[*ssa.Function]bool)
+	for fn := range funcs {
+		if fnInSlice(prog, fn, sliceFiles) || (policy == rootsSliceAndSynthetic && syntheticSliceFn(fn, slicePkgs)) {
+			roots[fn] = true
+		}
+	}
+	return roots
+}
+
+// syntheticSliceFn reports whether fn is a position-less, synthetic function of
+// a loaded slice package (the package-variable initialiser).
+func syntheticSliceFn(fn *ssa.Function, slicePkgs map[string]bool) bool {
+	return fn != nil && fn.Pos() == 0 && fn.Pkg != nil && fn.Pkg.Pkg != nil && slicePkgs[fn.Pkg.Pkg.Path()]
+}
+
 // measureSlice is the whole read-only measurement, factored out so a test can
 // run it over the fixture module. It loads the slice only, builds SSA, seeds
 // VTA with the slice functions over the CHA graph, counts and (when out is
@@ -95,37 +185,13 @@ func measureSlice(root, out string, environ []string) (measureResult, error) {
 
 	start := time.Now()
 
-	cfg := &packages.Config{
-		Mode:  measureLoadMode,
-		Dir:   root,
-		Env:   buildEnv(environ, workspaceMode.over...),
-		Tests: false,
-	}
-	pkgs, err := packages.Load(cfg, slicePatterns()...)
+	sg, err := buildSliceGraph(root, environ, rootsSliceOnly)
 	if err != nil {
 		return res, err
 	}
-	res.PackagesLoaded = len(pkgs)
-	if errs := collectLoadErrors(pkgs); len(errs) > 0 {
-		return res, fmt.Errorf("slice load errors: %s", strings.Join(errs, "; "))
-	}
-
-	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
-	prog.Build()
-
-	sliceFiles := inSliceFileSet(root, pkgs)
-	funcs := ssautil.AllFunctions(prog)
-	res.SSAFunctions = len(funcs)
-
-	roots := make(map[*ssa.Function]bool)
-	for fn := range funcs {
-		if fnInSlice(prog, fn, sliceFiles) {
-			roots[fn] = true
-		}
-	}
-
-	graph := vta.CallGraph(roots, cha.CallGraph(prog))
-	res.VTAEdges, res.InSliceEdges = countEdges(prog, graph, sliceFiles)
+	res.PackagesLoaded = sg.packages
+	res.SSAFunctions = sg.ssaFuncs
+	res.VTAEdges, res.InSliceEdges = countEdges(sg.prog, sg.graph, sg.sliceFiles)
 
 	res.WallMS = time.Since(start).Milliseconds()
 	res.PeakRSSBytes = peakRSS()

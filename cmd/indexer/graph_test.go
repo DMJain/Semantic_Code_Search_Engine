@@ -1059,3 +1059,55 @@ func TestGraphParseLeavesGraphState(t *testing.T) {
 			shaBefore, shaAfter, fpBefore, fpAfter)
 	}
 }
+
+// TestGraphStatsStatusIgnoreGroundTruth proves source isolation (D-077, story
+// 35): a `gopackages` row that duplicates a real tree-sitter caller/callee pair
+// leaves `graph --stats` and `graph --status` output unchanged. The unique index
+// includes source, so the same pair can exist under both sources.
+func TestGraphStatsStatusIgnoreGroundTruth(t *testing.T) {
+	poolA, rootA := graphFixture(t)
+	statsA := runGraphStage(t, poolA, rootA, graphOptions{Stats: true})
+
+	// A real tree-sitter pair, named by qualified names so it can be recreated
+	// in the second database (ids are per-database).
+	var callerQN, calleeQN, raw string
+	var line int
+	if err := poolA.QueryRow(context.Background(), `
+		SELECT caller.qualified_name, callee.qualified_name, e.callee_raw, e.call_line
+		FROM edges e
+		JOIN symbols caller ON caller.id = e.caller_id
+		JOIN symbols callee ON callee.id = e.callee_id
+		WHERE e.source = 'treesitter'
+		ORDER BY e.caller_id, e.callee_id LIMIT 1`).
+		Scan(&callerQN, &calleeQN, &raw, &line); err != nil {
+		t.Fatalf("find tree-sitter pair: %v", err)
+	}
+
+	poolB, rootB := graphFixture(t)
+	var callerID, calleeID int64
+	if err := poolB.QueryRow(context.Background(),
+		`SELECT id FROM symbols WHERE qualified_name = $1`, callerQN).Scan(&callerID); err != nil {
+		t.Fatalf("caller symbol: %v", err)
+	}
+	if err := poolB.QueryRow(context.Background(),
+		`SELECT id FROM symbols WHERE qualified_name = $1`, calleeQN).Scan(&calleeID); err != nil {
+		t.Fatalf("callee symbol: %v", err)
+	}
+	if _, err := poolB.Exec(context.Background(), `
+		INSERT INTO edges (source, caller_id, callee_id, callee_raw, resolution, call_kind, call_line)
+		VALUES ('gopackages', $1, $2, $3, 'exact', 'func', $4)`,
+		callerID, calleeID, raw, line); err != nil {
+		t.Fatalf("insert gopackages row: %v", err)
+	}
+
+	statsB := runGraphStage(t, poolB, rootB, graphOptions{Stats: true})
+	statusA := runGraphStage(t, poolA, rootA, graphOptions{Status: true})
+	statusB := runGraphStage(t, poolB, rootB, graphOptions{Status: true})
+
+	if statsA != statsB {
+		t.Errorf("graph --stats changed by GT row:\nA:\n%s\nB:\n%s", statsA, statsB)
+	}
+	if statusA != statusB {
+		t.Errorf("graph --status changed by GT row:\nA:\n%s\nB:\n%s", statusA, statusB)
+	}
+}

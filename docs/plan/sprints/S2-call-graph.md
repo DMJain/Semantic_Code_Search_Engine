@@ -1340,3 +1340,72 @@ Checks. `make test` green (throwaway database per test, no new skips; the fixtur
 total moved 70 -> 83 stored rows and 15 -> 16 fixture files as the func_value
 rows and the `funcvalues` package were added); `make ci-local` green (`go vet`,
 tests, golangci-lint 0 issues, shellcheck, actionlint).
+
+### Ground truth stored with source isolation (S2 ticket 10)
+
+The default action of `callgraph-gt` stores the ground truth: it loads the
+slice, builds SSA/VTA through the shared `buildSliceGraph`, maps each in-slice
+edge to `symbols.qualified_name` (pointer receivers preserved including generic
+type parameters, closures attributed to the enclosing declared function, generic
+instantiations to their origin), drops synthetic callers (package initialisers,
+bound-method and thunk wrappers) and counts `gt_unmapped`, then replaces every
+`source='gopackages'` row in one transaction.
+
+**Measure vs store root policy.** `--measure` keeps the original minimal VTA
+input (slice functions only, story 10); the store seeds the graph with the slice
+functions plus the position-less synthetic functions of the slice packages (story
+17), so package-variable initialiser callers are visible and counted. The two
+share the load/build code and differ only in the seed set (`rootPolicy`). `--measure`
+still reproduces the memory evidence: `vta_edges` 39616 and `in_slice_edges`
+14469 and 332 packages match `eval/results/callgraph/gt-memory.json`. That file's
+`ssa_functions` (263605) is a per-run sample of `ssautil.AllFunctions`, which is
+not deterministic across runs (re-runs give ~263.4k); the field was already a
+single sample in the committed evidence and is unaffected by the root policy, so
+the file is not re-recorded. `--check` still prints `file-set: equal (876
+files)`.
+
+Real GT store run (dev DB, machine otherwise idle):
+
+```
+set -a; source .env; set +a
+GOMEMLIMIT=14GiB /usr/bin/time -l go run ./cmd/callgraph-gt
+```
+
+| field | value |
+| --- | --- |
+| wall time | 23.91 s real (`/usr/bin/time -l`, includes the `go run` build) |
+| peak RSS (`maximum resident set size`) | 5,482,627,072 bytes (5.11 GiB) |
+| GT partition | total 15254 = mapped 12780 (pre-dedup) + dropped 1990 + gt_unmapped 484 |
+| dropped by reason | init 777, bound_method 327, wrapper 886 |
+| call kinds | func 4389, concrete_method 4559, interface_method 3115, func_value 523, unknown 0 |
+| rows stored | 12586 (194 `edges_uniq` duplicate collapses: 12780 - 12586) |
+
+`select call_kind, count(*) from edges where source='gopackages' group by 1`
+returns all four kinds (4559 concrete_method, 4389 func, 523 func_value, 3115
+interface_method) and 12586 rows. A second run gives identical counts. The
+`gt_unmapped` count (484) counts only in-slice edges (both endpoints in slice
+files); its contributors are `#n`/duplicate qualified-name cases, not dependency
+callees (out-of-slice edges are excluded before the total). Fixing the generic
+method receiver spelling (221 edges whose callee is a generic method such as
+`(*Heap[T]).AddOrUpdate`) moved those edges from `gt_unmapped` to mapped;
+`select count(*) ... AND callee_raw LIKE '%[%'` is now 121, was 0.
+
+The GT-side partition sums to the total; `gtStore.check` asserts an independently
+counted total against the buckets, so a categorisation bug fails it. The
+committed fixture (`cmd/callgraph-gt/testdata/module/pkg/scheduler`) exercises an
+interface, a function value, a concrete method, a closure, a generic function, a
+generic pointer-receiver method and a plain pointer-receiver method plus a
+package-variable initialiser: `gt edges: total 15 = mapped 13 (pre-dedup) +
+dropped 2 (init 1, wrapper 1) + gt_unmapped 0`, with `func 8, concrete_method 3,
+interface_method 1, func_value 1`.
+
+Source isolation (D-077): no non-eval code reads `edges` except the tree-sitter
+delete, and `TestGraphStatsStatusIgnoreGroundTruth` proves a `gopackages` row
+duplicating a real tree-sitter caller/callee pair leaves `graph --stats` and
+`graph --status` output byte-for-byte unchanged. S6-T05 and D-077 already carry
+the one-edge isolation criterion and S6-T05 already states the retriever follows
+only edges with a callee and lists unresolved rows separately with their reason.
+
+Checks. `make test` green (throwaway database per test, no new skips); `make
+ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
+actionlint).
