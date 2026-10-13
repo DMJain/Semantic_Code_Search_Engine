@@ -150,7 +150,7 @@ func G() {}
 
 // TestExtractTypeEnvironmentShadowedParam proves an inner declaration of a name
 // removes the parameter's type (the flat per-declaration local scope), so a
-// call through the shadowed name is deferred rather than a wrong exact.
+// call through the shadowed name is a func_value rather than a wrong exact.
 func TestExtractTypeEnvironmentShadowedParam(t *testing.T) {
 	src := []byte(`package p
 
@@ -173,8 +173,8 @@ type Foo struct{}
 }
 
 // TestExtractTypeSwitchAndReceiveLocals proves a type-switch guard and a select
-// receive variable count as locals, so a bare identifier call through one is
-// deferred_local rather than a stored no_match.
+// receive variable count as locals, so a bare identifier call through one is a
+// func_value rather than a stored no_match.
 func TestExtractTypeSwitchAndReceiveLocals(t *testing.T) {
 	src := []byte(`package p
 
@@ -311,6 +311,27 @@ func F(s *Scheduler) {
 	}
 }
 
+// TestExtractCapsLongCallRaw proves a call whose function is a long expression
+// (here an immediately-invoked function literal) has its raw callee text capped,
+// so the stored callee_raw can never overflow the edges_uniq btree index.
+func TestExtractCapsLongCallRaw(t *testing.T) {
+	body := strings.Repeat("\t\t_ = 1\n", 400)
+	src := []byte("package p\n\nfunc F() {\n\tfunc() {\n" + body + "\t}()\n}\n")
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	d := findDecl(t, info, "F")
+	if len(d.Calls) == 0 {
+		t.Fatal("the immediately-invoked function literal was not extracted")
+	}
+	for _, c := range d.Calls {
+		if len(c.Raw) > maxCallRaw {
+			t.Errorf("raw call length = %d, want at most %d", len(c.Raw), maxCallRaw)
+		}
+	}
+}
+
 // TestExtractShadowedLocalStaysUnknown proves a local redeclared in the body
 // (here a var then a nested :=) is unknown, so shadowing wins and the resolver
 // never inherits an outer type.
@@ -379,6 +400,54 @@ func NoResult() {}
 	for _, name := range []string{"NewT2", "NamedTwo", "NoResult"} {
 		if ref, ok := facts.Results[name]; ok {
 			t.Errorf("%s should not be a single-result constructor, got %+v", name, ref)
+		}
+	}
+}
+
+// TestSourceFactsFuncVariables proves the declared-name index marks a
+// package-level function variable as kind "func_value" for all four shapes: a
+// written function type, an inferred function-literal initialiser, a written
+// type that names a package-level function type, and a written type that names a
+// package-level function type alias. A package-level declared function stays
+// "func" and a plain var stays "var".
+func TestSourceFactsFuncVariables(t *testing.T) {
+	src := []byte(`package p
+
+type Callback func(int)
+
+type Alias = func(int)
+
+var Written func()
+
+var Inferred = func() {}
+
+var Named Callback
+
+var Aliased Alias
+
+var Plain int
+
+const C = 1
+
+func Declared() {}
+`)
+	facts, err := SourceFacts(src)
+	if err != nil {
+		t.Fatalf("SourceFacts: %v", err)
+	}
+	for name, want := range map[string]string{
+		"Written":  "func_value",
+		"Inferred": "func_value",
+		"Named":    "func_value",
+		"Aliased":  "func_value",
+		"Plain":    "var",
+		"C":        "const",
+		"Declared": "func",
+		"Callback": "type",
+		"Alias":    "type",
+	} {
+		if got := facts.Declared[name]; got != want {
+			t.Errorf("Declared[%q] = %q, want %q", name, got, want)
 		}
 	}
 }

@@ -1241,3 +1241,102 @@ interface_method plus 48 Rule 5 `unknown`. The stored rows for
 Checks. `make test` green (throwaway database per test, no new skips);
 `make ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
 actionlint).
+
+### Function values and the final whole-repo run (S2 ticket 09)
+
+What changed. The tree-sitter graph is complete. A call through a function value
+is now classified honestly and no deferred code path remains. `deferred_local` is
+removed (`Stats`, the `--stats` printer and every increment), so the invariant is
+now `call sites = stored rows + skipped` with no `deferred_*` counter anywhere;
+`Stats.Check` fails on `stored + skipped != call sites`. The resolver version is
+bumped 6 -> 7 (the fingerprint changes, so all old edges go stale and are
+re-graphed). This ticket also caps `callee_raw` (see below), a storage-boundary
+fix required for the whole-repo run.
+
+Function values. A bare identifier call whose operand is a local name (`:=`,
+`var`, parameter or closure variable) is stored `unresolved` with reason
+`func_value` and kind `func_value`, with no callee; this replaces the old
+`deferred_local`. A package-level function VARIABLE (recorded by the declared-name
+index as kind `func_value`) is reclassified from `no_match` to `func_value`, both
+for a same-package identifier call and for an `alias.Name` call. The declared-name
+index marks a package-level `var`/`const` as kind `func_value` in all three
+shapes: a written function type (`var f func()`), an inferred function-literal
+initialiser (`var f = func() {}`), and a written type that names a package-level
+function type or alias (`type Callback func(); var f Callback` or
+`type Callback = func(); var f Callback`). A package-level declared
+FUNCTION is untouched: Rule 1 keeps it `exact` (the guard against
+over-reclassification).
+
+Raw-call cap (`maxCallRaw` = 1000 bytes). A call whose function node is a
+function literal (`func() { ... }()`) has the whole literal as its raw text; in
+`test/e2e/storage/podlogs/podlogs.go` that is ~7.4 KB, which overflows the
+`edges_uniq` btree index (Postgres caps an index tuple near 2.7 KB even after
+compression) and aborted the first whole-repo attempt. `callShape` now truncates
+the raw callee text on a rune boundary to at most 1000 bytes, so `callee_raw` is
+always storable; the call site is still counted and stored (`unknown_receiver`
+for the anonymous literal). This bounds any future long call expression, not only
+this fixture.
+
+Fixture goldens (`cmd/indexer/testdata/graph/funcvalues/`, real Postgres). A
+func-typed local (`var f func()`), a func-typed parameter, a closure variable, a
+package-level function variable with a written function type (`var f func()`), one
+inferred from a function literal (`var f = func() {}`), one whose written type
+names a package-level function type (`type Callback func(); var c Callback`), and
+a cross-package function variable called through an import alias
+(`depone.Hook()`) each store one `unresolved` `func_value` row with kind
+`func_value` and no callee; `PackageFunc()` stays `exact` `func`.
+`TestGraphStageFuncValues` pins all seven callers and `reason func_value: 7`,
+`call kind func_value: 7`, invariant `call sites 8 = stored 8 + skipped 0 [ok]`.
+The `plain` fixture's `x()` (a local `x := 1`, an invalid Go call kept by
+tree-sitter) is now `func_value` rather than the removed `deferred_local`;
+`params`' four grouped/second-name locals are the same. Unit tests
+(`TestSourceFactsFuncVariables`, `TestAnalyzeFunctionValues`,
+`TestAnalyzeConstructorShadowedByLocal`) cover the classifications directly.
+
+Five reasons. `TestGraphStageAllUnresolvedReasonsOccur` graphs the whole fixture
+with a small Rule 4 cap (`Rule4N 3`, so `Cap4` produces a capped row) and asserts
+the distinct stored `unresolved_reason` values are exactly `external`,
+`no_match`, `unknown_receiver`, `func_value` and `candidates_capped` (spec story
+98).
+
+Final whole-repo run (dev DB, 6633 indexed files, machine otherwise idle). The
+`graphed_*` markers were cleared, then `time go run ./cmd/indexer graph --stats`
+(`set -a; source .env; set +a`); wall **54.8 s** (go run, includes the build).
+Full stats (the declared-name extension moved 20 real-tree package-level function
+variables from `no_match` to `func_value` versus the first run, both totals
+unchanged):
+
+```
+6633 files to graph
+graphed 6633 files, stored 262420 edges
+edges stored: 262420
+  resolution exact: 75778
+  resolution name_only: 4802
+  resolution ambiguous: 62248
+  resolution unresolved: 119592
+  reason external: 45340
+  reason no_match: 4570
+  reason unknown_receiver: 65711
+  reason func_value: 3804
+  reason candidates_capped: 167
+call kind func: 57649
+call kind concrete_method: 18129
+call kind interface_method: 36499
+call kind func_value: 3804
+call kind unknown: 146339
+percent ambiguous: 23.7%
+unresolved: 119592
+skipped_builtin: 33369
+skipped_conversion: 1164
+interfaces_partial: 685
+invariant: call sites 296953 = stored 262420 + skipped 34533 [ok]
+```
+
+No `deferred_*` counter is printed. Immediately after, `go run ./cmd/indexer
+graph --status` printed `0 files stale` and a second `go run ./cmd/indexer graph`
+printed `0 files to graph` / `graphed 0 files, stored 0 edges` (idempotent).
+
+Checks. `make test` green (throwaway database per test, no new skips; the fixture
+total moved 70 -> 83 stored rows and 15 -> 16 fixture files as the func_value
+rows and the `funcvalues` package were added); `make ci-local` green (`go vet`,
+tests, golangci-lint 0 issues, shellcheck, actionlint).

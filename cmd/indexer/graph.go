@@ -451,8 +451,8 @@ func writeGraphFile(ctx context.Context, pool *pgxpool.Pool, f graphFile, edges 
 }
 
 // printGraphStats writes the reconciliation report: counts per resolution and
-// reason (summing to the stored total), per call kind, the skip and deferred
-// counters, and the invariant line (spec stories 74-75).
+// reason (summing to the stored total), per call kind, the skip counters, and
+// the invariant line (spec stories 74-75). No deferred counter remains.
 func printGraphStats(out io.Writer, s graph.Stats) {
 	fmt.Fprintf(out, "edges stored: %d\n", s.Stored())
 	fmt.Fprintf(out, "  resolution exact: %d\n", s.Exact)
@@ -479,13 +479,12 @@ func printGraphStats(out io.Writer, s graph.Stats) {
 	fmt.Fprintf(out, "unresolved: %d\n", s.Unresolved)
 	fmt.Fprintf(out, "skipped_builtin: %d\n", s.SkippedBuiltin)
 	fmt.Fprintf(out, "skipped_conversion: %d\n", s.SkippedConversion)
-	fmt.Fprintf(out, "deferred_local: %d\n", s.DeferredLocal)
 	fmt.Fprintf(out, "interfaces_partial: %d\n", s.InterfacesPartial)
 
 	status := "ok"
 	if err := s.Check(); err != nil {
 		status = "FAILED"
 	}
-	fmt.Fprintf(out, "invariant: call sites %d = stored %d + skipped %d + deferred %d [%s]\n",
-		s.CallSites, s.Stored(), s.Skipped(), s.Deferred(), status)
+	fmt.Fprintf(out, "invariant: call sites %d = stored %d + skipped %d [%s]\n",
+		s.CallSites, s.Stored(), s.Skipped(), status)
 }

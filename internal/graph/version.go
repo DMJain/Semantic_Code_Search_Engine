@@ -16,11 +16,13 @@
 // falls through to Rule 5), and Rule 5 (a selector whose receiver is still
 // unknown is looked up among all methods of that name in the caller's package:
 // one is name_only, several are ambiguous, none is unresolved with reason
-// unknown_receiver), plus honest deferral of what later tickets handle.
+// unknown_receiver), and a bare identifier call through a function value (a
+// func-typed local, parameter or closure variable, or a package-level function
+// variable) is unresolved with reason func_value and kind func_value.
 package graph
 
 // ResolverVersion identifies the extraction and resolution output. Bump it on
 // any change that can change the edges (a new rule, a changed classification),
 // because it is part of the freshness fingerprint (D-076): old edges are then
 // stale instead of silently reused.
-const ResolverVersion = 6
+const ResolverVersion = 7

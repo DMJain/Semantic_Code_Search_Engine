@@ -152,11 +152,11 @@ func (h *CapHistogram) Result(resolverVersion int) CapHistogramResult {
 
 // Stats reconciles call sites for one graph run. Every unique call site
 // (enclosing caller, raw callee text, call line) is counted exactly once, so
-// CallSites equals the sum of stored resolutions plus the skip and deferred
-// counters (the S2 invariant). An ambiguous call site stores one row per
-// candidate, and each such row counts as one call unit, so CallSites equals the
-// stored rows plus the skip and deferred counters. The per-(resolution, reason)
-// counts sum to the stored rows.
+// CallSites equals the sum of stored resolutions plus the skip counters (the S2
+// invariant). An ambiguous call site stores one row per candidate, and each such
+// row counts as one call unit, so CallSites equals the stored rows plus the skip
+// counters. The per-(resolution, reason) counts sum to the stored rows. No
+// deferred counter remains: every call site is either stored or skipped.
 type Stats struct {
 	// CallSites is the number of call units seen: one per unique call site, plus
 	// one extra per additional ambiguous candidate row.
@@ -173,8 +173,6 @@ type Stats struct {
 	// Skip counters: call sites deliberately not stored.
 	SkippedBuiltin    int
 	SkippedConversion int
-	// Deferred counters: kinds not yet handled, never counted as no_match.
-	DeferredLocal int
 	// InterfacesPartial counts Rule 4 call sites whose interface has a
 	// cross-package or unresolvable embedded interface, so the candidate set is
 	// a superset (D-075).
@@ -192,11 +190,6 @@ func (s Stats) Stored() int { return s.Exact + s.NameOnly + s.Ambiguous + s.Unre
 // Skipped is the number of call sites counted by skip counters.
 func (s Stats) Skipped() int { return s.SkippedBuiltin + s.SkippedConversion }
 
-// Deferred is the number of call sites counted by deferred counters.
-func (s Stats) Deferred() int {
-	return s.DeferredLocal
-}
-
 // Add merges another Stats into s.
 func (s *Stats) Add(o Stats) {
 	s.CallSites += o.CallSites
@@ -212,16 +205,15 @@ func (s *Stats) Add(o Stats) {
 	}
 	s.SkippedBuiltin += o.SkippedBuiltin
 	s.SkippedConversion += o.SkippedConversion
-	s.DeferredLocal += o.DeferredLocal
 	s.InterfacesPartial += o.InterfacesPartial
 }
 
-// Check reports whether the invariant holds: every unique call site is stored,
-// skipped or deferred.
+// Check reports whether the invariant holds: every unique call site is stored
+// or skipped.
 func (s Stats) Check() error {
-	if got := s.Stored() + s.Skipped() + s.Deferred(); got != s.CallSites {
-		return fmt.Errorf("call sites %d != stored %d + skipped %d + deferred %d = %d",
-			s.CallSites, s.Stored(), s.Skipped(), s.Deferred(), got)
+	if got := s.Stored() + s.Skipped(); got != s.CallSites {
+		return fmt.Errorf("call sites %d != stored %d + skipped %d = %d",
+			s.CallSites, s.Stored(), s.Skipped(), got)
 	}
 	sum := 0
 	for _, n := range s.Reasons {

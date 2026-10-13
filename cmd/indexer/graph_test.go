@@ -92,8 +92,9 @@ func assertEdges(t *testing.T, got, want []edgeRow) {
 // TestGraphStagePlainFixtureGoldens covers the plain-call classifications on the
 // plain fixture package: a same-package call (exact, func), builtin and
 // predeclared-type skips, a conversion to a declared non-struct type, a locally
-// declared identifier call, a selector call, a call inside a function literal
-// attributed to the enclosing function, and a missing identifier (no_match).
+// declared identifier call (a function value: unresolved func_value), a selector
+// call, a call inside a function literal attributed to the enclosing function,
+// and a missing identifier (no_match).
 func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 	pool, root := graphFixture(t)
 	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/plain", Stats: true})
@@ -101,6 +102,7 @@ func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 	got := edgesFor(t, pool, "k8s.io/kubernetes/plain.caller")
 	want := []edgeRow{
 		{"exact", "", "func", "Target", 8, "k8s.io/kubernetes/plain.Target"},
+		{"unresolved", "func_value", "func_value", "x", 13, ""},
 		{"unresolved", "unknown_receiver", "unknown", "a.Method", 14, ""},
 		{"unresolved", "no_match", "unknown", "Missing", 15, ""},
 		{"exact", "", "func", "Target", 16, "k8s.io/kubernetes/plain.Target"},
@@ -109,16 +111,17 @@ func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 
 	for _, line := range []string{
 		"resolution exact: 2",
-		"resolution unresolved: 2",
+		"resolution unresolved: 3",
 		"reason no_match: 1",
 		"reason unknown_receiver: 1",
+		"reason func_value: 1",
 		"reason external: 0",
 		"call kind func: 2",
+		"call kind func_value: 1",
 		"call kind unknown: 2",
 		"skipped_builtin: 2",
 		"skipped_conversion: 1",
-		"deferred_local: 1",
-		"invariant: call sites 8 = stored 4 + skipped 3 + deferred 1 [ok]",
+		"invariant: call sites 8 = stored 5 + skipped 3 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -127,30 +130,152 @@ func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 }
 
 // TestGraphStageLocalDeclarationNames proves every name of a multi-name or
-// grouped declaration is a local, so calling it is deferred_local and never a
-// stored no_match edge: a second parameter, a second name in a plain var, a
-// grouped var and a grouped const.
+// grouped declaration is a local, so calling it goes through a function value
+// (unresolved func_value) and is never a stored no_match edge: a second
+// parameter, a second name in a plain var, a grouped var and a grouped const.
 func TestGraphStageLocalDeclarationNames(t *testing.T) {
 	pool, root := graphFixture(t)
 	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/params", Stats: true})
 
-	for _, caller := range []string{
-		"k8s.io/kubernetes/params.multi",
-		"k8s.io/kubernetes/params.localGrouped",
-		"k8s.io/kubernetes/params.localMulti",
-		"k8s.io/kubernetes/params.localConst",
-	} {
-		if got := edgesFor(t, pool, caller); len(got) != 0 {
-			t.Errorf("edges for %s = %+v, want none (every call is deferred_local)", caller, got)
-		}
+	want := map[string]edgeRow{
+		"k8s.io/kubernetes/params.multi":        {"unresolved", "func_value", "func_value", "b", 4, ""},
+		"k8s.io/kubernetes/params.localGrouped": {"unresolved", "func_value", "func_value", "y", 11, ""},
+		"k8s.io/kubernetes/params.localMulti":   {"unresolved", "func_value", "func_value", "q", 17, ""},
+		"k8s.io/kubernetes/params.localConst":   {"unresolved", "func_value", "func_value", "n", 25, ""},
+	}
+	for caller, row := range want {
+		assertEdges(t, edgesFor(t, pool, caller), []edgeRow{row})
 	}
 	for _, line := range []string{
-		"deferred_local: 4",
-		"invariant: call sites 4 = stored 0 + skipped 0 + deferred 4 [ok]",
+		"reason func_value: 4",
+		"call kind func_value: 4",
+		"invariant: call sites 4 = stored 4 + skipped 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
 		}
+	}
+}
+
+// TestGraphStageFuncValues covers the func_value classification over the
+// funcvalues fixture package (spec story 59): a func-typed local (`var f
+// func()`), a func-typed parameter, a closure variable, a package-level function
+// variable with a written function type, one inferred from a function literal,
+// one whose type names a package-level function type, and a cross-package
+// function variable called through an import alias are all stored unresolved
+// with reason func_value, kind func_value and no callee; a package-level
+// declared function stays Rule 1 exact (the guard against over-reclassification).
+func TestGraphStageFuncValues(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/funcvalues", Stats: true})
+
+	for _, tc := range []struct {
+		caller string
+		raw    string
+		line   int
+	}{
+		{"k8s.io/kubernetes/funcvalues.localFuncVar", "f", 17},
+		{"k8s.io/kubernetes/funcvalues.paramFunc", "f", 21},
+		{"k8s.io/kubernetes/funcvalues.closureVar", "f", 26},
+		{"k8s.io/kubernetes/funcvalues.packageVar", "PackageVarFunc", 30},
+		{"k8s.io/kubernetes/funcvalues.inferredVar", "InferredFunc", 34},
+		{"k8s.io/kubernetes/funcvalues.namedVar", "NamedFunc", 38},
+		{"k8s.io/kubernetes/funcvalues.aliasVar", "depone.Hook", 42},
+	} {
+		assertEdges(t, edgesFor(t, pool, tc.caller),
+			[]edgeRow{{"unresolved", "func_value", "func_value", tc.raw, tc.line, ""}})
+	}
+	// A package-level FUNCTION remains Rule 1 exact, never func_value.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/funcvalues.packageFunc"),
+		[]edgeRow{{"exact", "", "func", "PackageFunc", 46, "k8s.io/kubernetes/funcvalues.PackageFunc"}})
+
+	for _, line := range []string{
+		"reason func_value: 7",
+		"call kind func_value: 7",
+		"invariant: call sites 8 = stored 8 + skipped 0 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphStageAllUnresolvedReasonsOccur proves every value of the
+// unresolved_reason vocabulary occurs at least once in a whole-fixture run
+// (spec story 98): external, no_match, unknown_receiver, func_value and
+// candidates_capped. The small Rule 4 cap (Rule4N 3) is needed to produce a
+// candidates_capped row from the four-implementer Cap4 fixture.
+func TestGraphStageAllUnresolvedReasonsOccur(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Rule4N: 3, Stats: true})
+
+	rows, err := pool.Query(context.Background(),
+		`SELECT DISTINCT unresolved_reason FROM edges
+		 WHERE source = 'treesitter' AND resolution = 'unresolved'`)
+	if err != nil {
+		t.Fatalf("query reasons: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var reason string
+		if err := rows.Scan(&reason); err != nil {
+			t.Fatalf("scan reason: %v", err)
+		}
+		got[reason] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reasons rows: %v", err)
+	}
+	want := []string{
+		graph.ReasonExternal, graph.ReasonNoMatch, graph.ReasonUnknownReceiver,
+		graph.ReasonFuncValue, graph.ReasonCandidatesCap,
+	}
+	for _, reason := range want {
+		if !got[reason] {
+			t.Errorf("unresolved reason %q never occurred in the fixture run\n%s", reason, out)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("distinct unresolved reasons = %v, want exactly %v", got, want)
+	}
+}
+
+// btreeIndexTupleLimit is Postgres' maximum btree index entry size for the
+// default 8 KB page (~1/3 page); edges_uniq holds callee_raw text, so a longer
+// value fails the insert.
+const btreeIndexTupleLimit = 2704
+
+// TestGraphStageLongCallRawFitsIndex proves a call whose raw text is huge (an
+// immediately-invoked function literal) is still graphed: the stored callee_raw
+// is capped so it fits the edges_uniq btree index, rather than failing the whole
+// run on a long expression.
+func TestGraphStageLongCallRawFitsIndex(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	b.WriteString("package a\n\nfunc F() {\n\tfunc() {\n")
+	for i := 0; i < 500; i++ {
+		b.WriteString("\t\t_ = 1\n")
+	}
+	b.WriteString("\t}()\n}\n")
+	writeSrc(t, root, "p/a/a.go", b.String())
+
+	pool := testdb.New(t)
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	out := runGraphStage(t, pool, root, graphOptions{Stats: true})
+
+	if !strings.Contains(out, "graphed 1 files, stored 1 edges") {
+		t.Errorf("expected the long call to be stored once:\n%s", out)
+	}
+	if n := scalarInt(t, pool,
+		`SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 1 {
+		t.Errorf("tree-sitter edge count = %d, want 1", n)
+	}
+	if n := scalarInt(t, pool,
+		`SELECT max(length(callee_raw)) FROM edges WHERE source = 'treesitter'`); n <= 0 || n >= btreeIndexTupleLimit {
+		t.Errorf("stored callee_raw length = %d, want a positive value under the btree limit of %d",
+			n, btreeIndexTupleLimit)
 	}
 }
 
@@ -168,7 +293,7 @@ func TestGraphStageShadowedBuiltin(t *testing.T) {
 // TestGraphStageAliasGoldens covers Rule 2 and the import alias map on the alias
 // fixture package: an aliased import (exact, func) for two packages declaring the
 // same name (the collision resolves by alias), a dot import ignored, a blank
-// import ignored, a shadowed alias left deferred, an external alias (klog.V),
+// import ignored, a shadowed alias resolved by its receiver type, an external alias (klog.V),
 // a missed symbol in an indexed package (no_match), a conversion to a declared
 // non-struct type (skipped_conversion), and a staging-style import path mapped
 // to its k8s.io/client-go/... package.
@@ -228,7 +353,7 @@ func TestGraphStageAliasGoldens(t *testing.T) {
 		"call kind concrete_method: 1",
 		"call kind unknown: 6",
 		"skipped_conversion: 1",
-		"invariant: call sites 11 = stored 10 + skipped 1 + deferred 0 [ok]",
+		"invariant: call sites 11 = stored 10 + skipped 1 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -312,8 +437,7 @@ func TestGraphStageMethodGoldens(t *testing.T) {
 		"call kind concrete_method: 6",
 		"call kind interface_method: 1",
 		"call kind unknown: 15",
-		"deferred_local: 0",
-		"invariant: call sites 22 = stored 22 + skipped 0 + deferred 0 [ok]",
+		"invariant: call sites 22 = stored 22 + skipped 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -377,7 +501,7 @@ func TestGraphStageLocalsGoldens(t *testing.T) {
 		"call kind func: 2",
 		"call kind concrete_method: 7",
 		"call kind unknown: 4",
-		"invariant: call sites 13 = stored 13 + skipped 0 + deferred 0 [ok]",
+		"invariant: call sites 13 = stored 13 + skipped 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -410,7 +534,7 @@ func TestGraphStageRule5Goldens(t *testing.T) {
 		"resolution unresolved: 1",
 		"reason unknown_receiver: 1",
 		"call kind unknown: 4",
-		"invariant: call sites 4 = stored 4 + skipped 0 + deferred 0 [ok]",
+		"invariant: call sites 4 = stored 4 + skipped 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -476,7 +600,7 @@ func TestGraphStageInterfaceRule4Rows(t *testing.T) {
 		"call kind interface_method: 14",
 		"call kind unknown: 2",
 		"interfaces_partial: 1",
-		"invariant: call sites 16 = stored 16 + skipped 0 + deferred 0 [ok]",
+		"invariant: call sites 16 = stored 16 + skipped 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -513,7 +637,7 @@ func TestGraphStageInterfaceCap(t *testing.T) {
 		"reason no_match: 1",
 		"call kind interface_method: 11",
 		"interfaces_partial: 1",
-		"invariant: call sites 13 = stored 13 + skipped 0 + deferred 0 [ok]",
+		"invariant: call sites 13 = stored 13 + skipped 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -673,8 +797,8 @@ func TestGraphStageRerunIdempotent(t *testing.T) {
 		`SELECT count(*) FROM edges WHERE (resolution = 'unresolved') <> (callee_id IS NULL)`); n != 0 {
 		t.Errorf("rows breaking the unresolved shape = %d, want 0", n)
 	}
-	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 70 {
-		t.Errorf("tree-sitter edge count = %d, want 70", n)
+	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 83 {
+		t.Errorf("tree-sitter edge count = %d, want 83", n)
 	}
 }
 
@@ -879,8 +1003,8 @@ func TestGraphStatusNeverGraphed(t *testing.T) {
 	pool, root := graphFixture(t)
 
 	before := runGraphStage(t, pool, root, graphOptions{Status: true})
-	if !strings.Contains(before, "15 files stale") || !strings.Contains(before, "never graphed: 15") {
-		t.Errorf("status before graphing should list 15 never-graphed files:\n%s", before)
+	if !strings.Contains(before, "16 files stale") || !strings.Contains(before, "never graphed: 16") {
+		t.Errorf("status before graphing should list 16 never-graphed files:\n%s", before)
 	}
 	if !strings.Contains(before, "plain.go: never graphed") {
 		t.Errorf("status should name the never-graphed file:\n%s", before)

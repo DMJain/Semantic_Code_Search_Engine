@@ -298,8 +298,9 @@ func (ni *NameIndex) mergeInterface(pkg string, fact InterfaceFact, names, visit
 	return partial
 }
 
-// Declared returns the kind of a package-level name ("type", "func", "var" or
-// "const"), or "" when the package does not declare it.
+// Declared returns the kind of a package-level name ("type", "func", "var",
+// "const" or "func_value" for a var/const of function type), or "" when the
+// package does not declare it.
 func (ni *NameIndex) Declared(pkg, name string) string {
 	return ni.byPkgName[pkgName(pkg, name)]
 }
@@ -375,8 +376,10 @@ func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex, rule4
 // function (Rule 1), builtin or conversion, then no_match (spec story 102).
 func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, pkg string, ix *Index, names *NameIndex) ([]Edge, Stats) {
 	if d.Locals[c.Name] {
-		st.DeferredLocal++
-		return edges, st
+		// A bare identifier call whose operand is a local name goes through a
+		// function value (a func-typed :=/var/parameter/closure variable), so
+		// it is deliberately unresolvable (spec story 59).
+		return funcValue(edges, st, callerID, c)
 	}
 	if id, ok := ix.SamePackageFunc(pkg, c.Name); ok {
 		st.Exact++
@@ -394,8 +397,12 @@ func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, p
 		st.SkippedConversion++
 		return edges, st
 	}
-	// A missing identifier, or a package-level var/const used as a call
-	// (a function value; a later slice reclassifies it).
+	if names.Declared(pkg, c.Name) == KindFuncValue {
+		// A package-level function variable (a var/const of function type) is a
+		// function value, not a missing identifier (spec story 59).
+		return funcValue(edges, st, callerID, c)
+	}
+	// A missing identifier: the package is indexed but no symbol matched.
 	st.Unresolved++
 	st.Reasons[ReasonNoMatch]++
 	st.ByKind[KindUnknown]++
@@ -403,6 +410,21 @@ func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, p
 		CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
 		Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
 		UnresolvedReason: ReasonNoMatch,
+	}), st
+}
+
+// funcValue stores one unresolved row for a call through a function value: a
+// func-typed local, parameter or closure variable, or a package-level function
+// variable. The callee is deliberately not resolvable by tree-sitter, so the
+// row carries reason func_value and the call kind func_value.
+func funcValue(edges []Edge, st Stats, callerID int64, c Call) ([]Edge, Stats) {
+	st.Unresolved++
+	st.Reasons[ReasonFuncValue]++
+	st.ByKind[KindFuncValue]++
+	return append(edges, Edge{
+		CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
+		Resolution: ResolutionUnresolved, CallKind: KindFuncValue, CallLine: c.Line,
+		UnresolvedReason: ReasonFuncValue,
 	}), st
 }
 
@@ -478,6 +500,9 @@ func analyzeAlias(edges []Edge, st Stats, callerID int64, c Call, importPath str
 	if names.Declared(importPath, c.Field) == "type" {
 		st.SkippedConversion++
 		return edges, st
+	}
+	if names.Declared(importPath, c.Field) == KindFuncValue {
+		return funcValue(edges, st, callerID, c)
 	}
 	st.Unresolved++
 	st.Reasons[ReasonNoMatch]++

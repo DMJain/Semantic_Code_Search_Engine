@@ -150,6 +150,74 @@ func TestFingerprintVersionAndInputs(t *testing.T) {
 	}
 }
 
+// TestAnalyzeFunctionValues proves the func_value classification (spec story
+// 59): a call through a func-typed local (`var g func()`), a parameter, a
+// closure variable and a package-level function variable is unresolved with
+// reason func_value and kind func_value, while a package-level declared function
+// stays Rule 1 exact (the guard against over-reclassification).
+func TestAnalyzeFunctionValues(t *testing.T) {
+	src := []byte(`package p
+
+func PackageFunc() {}
+
+var PackageVar func()
+
+func F(f func()) {
+	var g func()
+	g()
+	f()
+	c := func() {}
+	c()
+	PackageVar()
+	PackageFunc()
+}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ix := NewIndex([]Symbol{
+		{ID: 1, Path: "p/p.go", Kind: parse.KindFunc, Package: "example.com/p",
+			Name: "F", QualifiedName: "example.com/p.F", StartLine: 7},
+		{ID: 2, Path: "p/p.go", Kind: parse.KindFunc, Package: "example.com/p",
+			Name: "PackageFunc", QualifiedName: "example.com/p.PackageFunc", StartLine: 3},
+	})
+	names := NewNameIndex()
+	names.Add("example.com/p", map[string]string{
+		"F": "func", "PackageFunc": "func", "PackageVar": "func_value",
+	})
+
+	edges, st := Analyze("p/p.go", "example.com/p", info, ix, names)
+	want := []Edge{
+		{CallerID: 1, CalleeID: 0, CalleeRaw: "g", Resolution: ResolutionUnresolved,
+			CallKind: KindFuncValue, CallLine: 9, UnresolvedReason: ReasonFuncValue},
+		{CallerID: 1, CalleeID: 0, CalleeRaw: "f", Resolution: ResolutionUnresolved,
+			CallKind: KindFuncValue, CallLine: 10, UnresolvedReason: ReasonFuncValue},
+		{CallerID: 1, CalleeID: 0, CalleeRaw: "c", Resolution: ResolutionUnresolved,
+			CallKind: KindFuncValue, CallLine: 12, UnresolvedReason: ReasonFuncValue},
+		{CallerID: 1, CalleeID: 0, CalleeRaw: "PackageVar", Resolution: ResolutionUnresolved,
+			CallKind: KindFuncValue, CallLine: 13, UnresolvedReason: ReasonFuncValue},
+		{CallerID: 1, CalleeID: 2, CalleeRaw: "PackageFunc", Resolution: ResolutionExact,
+			CallKind: KindFunc, CallLine: 14},
+	}
+	if len(edges) != len(want) {
+		t.Fatalf("edges = %+v, want %+v", edges, want)
+	}
+	for i := range want {
+		if edges[i] != want[i] {
+			t.Errorf("edge %d = %+v, want %+v", i, edges[i], want[i])
+		}
+	}
+	if st.Exact != 1 || st.Unresolved != 4 || st.Reasons[ReasonFuncValue] != 4 ||
+		st.ByKind[KindFuncValue] != 4 || st.ByKind[KindFunc] != 1 {
+		t.Errorf("stats exact=%d unresolved=%d func_value(reason)=%d func_value(kind)=%d func(kind)=%d",
+			st.Exact, st.Unresolved, st.Reasons[ReasonFuncValue], st.ByKind[KindFuncValue], st.ByKind[KindFunc])
+	}
+	if err := st.Check(); err != nil {
+		t.Errorf("invariant: %v", err)
+	}
+}
+
 // TestAnalyzeTypeParameterNotConcreteMethod proves a receiver or parameter typed
 // as the declaration's own type parameter is never resolved to a concrete
 // method of a same-named package type. It is an unknown receiver, so Rule 5
@@ -455,8 +523,8 @@ func F(s *S) {
 
 // TestAnalyzeConstructorShadowedByLocal proves a local variable that shadows the
 // constructor name stops `x := NewT()` from being typed: the call is a local
-// function value (deferred_local) and x stays unknown, so x.M is a Rule 5 guess,
-// never a wrong exact.
+// function value (unresolved func_value) and x stays unknown, so x.M is a Rule 5
+// guess, never a wrong exact.
 func TestAnalyzeConstructorShadowedByLocal(t *testing.T) {
 	src := []byte(`package p
 
@@ -490,14 +558,24 @@ func F() {
 	names.AddResults("example.com/p", map[string]TypeRef{"NewT": {Name: "T"}})
 
 	edges, st := Analyze("p/p.go", "example.com/p", info, ix, names)
-	want := []Edge{{CallerID: 1, CalleeID: 2, CalleeRaw: "x.M",
-		Resolution: ResolutionNameOnly, CallKind: KindUnknown, CallLine: 12}}
-	if len(edges) != 1 || edges[0] != want[0] {
-		t.Fatalf("edges = %+v, want [%+v] (x must stay unknown)", edges, want)
+	want := []Edge{
+		{CallerID: 1, CalleeID: 0, CalleeRaw: "NewT", Resolution: ResolutionUnresolved,
+			CallKind: KindFuncValue, CallLine: 11, UnresolvedReason: ReasonFuncValue},
+		{CallerID: 1, CalleeID: 2, CalleeRaw: "x.M",
+			Resolution: ResolutionNameOnly, CallKind: KindUnknown, CallLine: 12},
 	}
-	if st.NameOnly != 1 || st.Exact != 0 || st.DeferredLocal != 1 {
-		t.Errorf("name_only=%d exact=%d deferred_local=%d, want 1/0/1",
-			st.NameOnly, st.Exact, st.DeferredLocal)
+	if len(edges) != len(want) {
+		t.Fatalf("edges = %+v, want %+v (x must stay unknown)", edges, want)
+	}
+	for i := range want {
+		if edges[i] != want[i] {
+			t.Errorf("edge %d = %+v, want %+v", i, edges[i], want[i])
+		}
+	}
+	if st.NameOnly != 1 || st.Exact != 0 || st.Unresolved != 1 ||
+		st.Reasons[ReasonFuncValue] != 1 || st.ByKind[KindFuncValue] != 1 {
+		t.Errorf("name_only=%d exact=%d unresolved=%d func_value(reason)=%d func_value(kind)=%d, want 1/0/1/1/1",
+			st.NameOnly, st.Exact, st.Unresolved, st.Reasons[ReasonFuncValue], st.ByKind[KindFuncValue])
 	}
 	if err := st.Check(); err != nil {
 		t.Errorf("invariant: %v", err)

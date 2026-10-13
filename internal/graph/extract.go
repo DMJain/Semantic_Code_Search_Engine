@@ -3,10 +3,24 @@ package graph
 import (
 	"context"
 	"strings"
+	"unicode/utf8"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
 )
+
+// maxCallRaw caps a call's stored raw callee text. A call on a function literal
+// (`func() { ... }()`) or another long expression can run to several kilobytes,
+// which overflows the edges_uniq btree index (Postgres caps an index tuple near
+// 2.7 KB even after compression). The cap keeps callee_raw storable while the
+// call site is still counted and stored; truncation is on a rune boundary.
+//
+// ponytail: known ceiling - two distinct call sites on the same line whose raws
+// share their first 1000 bytes collapse to one row (ON CONFLICT DO NOTHING).
+// Such raws are callee-less and > 1000 bytes, which is pathological, so the
+// effect on scoring is negligible; if it ever matters, hash the full raw into
+// the unique key instead of truncating.
+const maxCallRaw = 1000
 
 // Decl is one declared function or method and the call sites in its body.
 // Calls inside function literals are collected here too, attributed to this
@@ -17,7 +31,9 @@ type Decl struct {
 	StartLine int
 	// Locals is the flat local scope of the declaration: the receiver name,
 	// parameters, and every :=, var or const name in the body (function-literal
-	// variables included). A call to a name in this set is deferred_local.
+	// variables included). A call to a name in this set goes through a function
+	// value (a func-typed local, parameter or closure variable), so it is
+	// unresolved with reason func_value.
 	Locals map[string]bool
 	// Types maps the receiver name, every parameter name and every local whose
 	// written type is inferable (a `var x T`, a `var x = T{...}`, an `x :=
@@ -60,8 +76,9 @@ type Call struct {
 
 // FileInfo is the extraction result for one file: its declared functions and
 // methods, its package-level declared names, and its import alias map. Declared
-// maps a name to its kind ("type", "func", "var" or "const") so the resolver can
-// tell a type conversion from a call through a package-level function variable.
+// maps a name to its kind ("type", "func", "var", "const" or "func_value" for a
+// var/const of function type) so the resolver can tell a type conversion from a
+// call through a package-level function variable.
 // Aliases maps a file import alias to its import path (dot and blank imports are
 // ignored).
 type FileInfo struct {
@@ -115,8 +132,8 @@ type TypeRef struct {
 // is absent), and every named interface's method names and embedded elements
 // (Rule 4, D-075).
 type FileFacts struct {
-	// Declared maps a package-level name to its kind ("type", "func", "var" or
-	// "const").
+	// Declared maps a package-level name to its kind ("type", "func", "var",
+	// "const" or "func_value" for a var/const of function type).
 	Declared map[string]string
 	// Fields maps "<struct>\x00<field>" to the field's resolved type.
 	Fields map[string]TypeRef
@@ -249,8 +266,16 @@ func interfaceEmbed(elem *sitter.Node, src []byte, aliases map[string]string) Em
 }
 
 // collectDeclaredNames records the package-level declared names (functions,
-// named types, vars and consts) of every top-level declaration.
+// named types, vars and consts) of every top-level declaration. Named function
+// types (`type Callback func(...)`) are collected first, so a var/const whose
+// written type names one of them is recognised as a function variable.
 func collectDeclaredNames(root *sitter.Node, src []byte, into map[string]string) {
+	funcTypes := map[string]bool{}
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		if n := root.NamedChild(i); n.Type() == "type_declaration" {
+			collectFuncTypeNames(n, src, funcTypes)
+		}
+	}
 	for i := 0; i < int(root.NamedChildCount()); i++ {
 		n := root.NamedChild(i)
 		switch n.Type() {
@@ -261,11 +286,74 @@ func collectDeclaredNames(root *sitter.Node, src []byte, into map[string]string)
 		case "type_declaration":
 			collectTypeNames(n, src, into)
 		case "var_declaration":
-			collectSpecNames(n, src, "var", into)
+			collectValueNames(n, src, "var", funcTypes, into)
 		case "const_declaration":
-			collectSpecNames(n, src, "const", into)
+			collectValueNames(n, src, "const", funcTypes, into)
 		}
 	}
+}
+
+// collectFuncTypeNames records the package-level type names whose underlying
+// type is a function type, both a defined type (`type Callback func(int) error`)
+// and a type alias (`type Callback = func(int) error`).
+func collectFuncTypeNames(decl *sitter.Node, src []byte, into map[string]bool) {
+	for i := 0; i < int(decl.NamedChildCount()); i++ {
+		spec := decl.NamedChild(i)
+		if spec.Type() != "type_spec" && spec.Type() != "type_alias" {
+			continue
+		}
+		if isFuncType(spec.ChildByFieldName("type")) {
+			if name := fieldName(spec, src); name != "" {
+				into[name] = true
+			}
+		}
+	}
+}
+
+// collectValueNames records the names declared by a var or const declaration. A
+// spec that is a function variable is recorded as kind "func_value" instead of
+// the given kind, so the resolver classifies a call through it as a func_value
+// rather than a missing identifier (spec story 59). A spec is a function
+// variable when its written type is a function type (`var f func()`), when its
+// written type names a package-level function type or alias (`var f Callback`
+// with `type Callback func()` or `type Callback = func()`), or when it has no
+// written type and is initialised with a function literal (`var f = func() {}`).
+func collectValueNames(decl *sitter.Node, src []byte, kind string, funcTypes map[string]bool, into map[string]string) {
+	for i := 0; i < int(decl.NamedChildCount()); i++ {
+		spec := decl.NamedChild(i)
+		switch spec.Type() {
+		case "var_spec", "const_spec":
+			k := kind
+			if isFuncValueSpec(spec, src, funcTypes) {
+				k = KindFuncValue
+			}
+			for _, name := range nameIdentifiers(spec, src) {
+				into[name] = k
+			}
+		case "var_spec_list", "const_spec_list":
+			collectValueNames(spec, src, kind, funcTypes, into)
+		}
+	}
+}
+
+// isFuncValueSpec reports whether a var/const spec declares a function variable:
+// a written function type, a written type that names a package-level function
+// type, or no written type with a function-literal initialiser.
+func isFuncValueSpec(spec *sitter.Node, src []byte, funcTypes map[string]bool) bool {
+	if t := spec.ChildByFieldName("type"); t != nil {
+		if isFuncType(t) {
+			return true
+		}
+		return t.Type() == "type_identifier" && funcTypes[t.Content(src)]
+	}
+	v := singleExpr(spec.ChildByFieldName("value"))
+	return v != nil && v.Type() == "func_literal"
+}
+
+// isFuncType reports whether a written type node is a function type (for
+// example `func()` or `func(int) error`).
+func isFuncType(typ *sitter.Node) bool {
+	return typ != nil && typ.Type() == "function_type"
 }
 
 // collectImports records the file's import alias map: an explicit alias
@@ -621,6 +709,20 @@ func collectCalls(body *sitter.Node, src []byte) []Call {
 	return out
 }
 
+// truncateCallRaw cuts a raw callee text to at most maxCallRaw bytes without
+// splitting a multi-byte rune, so the stored callee_raw always fits the
+// edges_uniq btree index.
+func truncateCallRaw(s string) string {
+	if len(s) <= maxCallRaw {
+		return s
+	}
+	cut := maxCallRaw
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // callShape builds a Call from a call's function node. An identifier is a bare
 // call. A selector is walked down to its base: the outermost field is the called
 // name, the intermediate selector names are the field chain, and a base that is
@@ -628,6 +730,7 @@ func collectCalls(body *sitter.Node, src []byte) []Call {
 // selector's operand is a call or any other non-identifier the qualifier is
 // empty and the receiver is the unknown result of that expression.
 func callShape(raw string, fn *sitter.Node, src []byte, line int) Call {
+	raw = truncateCallRaw(raw)
 	c := Call{Raw: raw, Line: line}
 	switch fn.Type() {
 	case "identifier":
@@ -662,7 +765,8 @@ func callShape(raw string, fn *sitter.Node, src []byte, line int) Call {
 // const, range and function-literal parameters (closure variables). A flat
 // per-declaration scope is deliberate for the first graph slice; a nested variable's name
 // is treated as local for the whole declaration, which can only turn an
-// identifier call into deferred_local, never into a wrong stored edge.
+// identifier call into a func_value function value, never into a wrong stored
+// edge.
 func collectLocals(n *sitter.Node, src []byte, locals map[string]bool) {
 	switch n.Type() {
 	case "short_var_declaration":
@@ -832,14 +936,6 @@ func singleResult(n *sitter.Node, src []byte) (string, bool) {
 		return "", false
 	}
 	return types[0], true
-}
-
-// collectSpecNames records the names of a var_declaration or const_declaration
-// as package-level declared names of the given kind.
-func collectSpecNames(decl *sitter.Node, src []byte, kind string, into map[string]string) {
-	for _, name := range specNames(decl, src) {
-		into[name] = kind
-	}
 }
 
 // addSpecNames records the names declared by a var or const declaration as
