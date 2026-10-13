@@ -200,20 +200,77 @@ func TestGraphStageAliasGoldens(t *testing.T) {
 	// A staging-style import path resolves to its k8s.io/client-go/... package.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callStaging"),
 		[]edgeRow{{"exact", "", "func", "cache.SomeFunc", 43, "k8s.io/client-go/tools/cache.SomeFunc"}})
-	// A local parameter named like the alias shadows it, so the call stays
-	// deferred instead of being external.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callShadowed"), nil)
+	// A parameter named like the alias shadows the alias (Rule 2 does not
+	// apply), but its own written type *fakeKlog is known, so Rule 3 resolves
+	// the inner klog.V to the concrete method; the outer chained call stays
+	// deferred.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callShadowed"),
+		[]edgeRow{{"exact", "", "concrete_method", "klog.V", 47, "k8s.io/kubernetes/alias.(fakeKlog).V"}})
 
 	for _, line := range []string{
-		"resolution exact: 3",
+		"resolution exact: 4",
 		"resolution unresolved: 3",
 		"reason external: 1",
 		"reason no_match: 2",
 		"call kind func: 3",
+		"call kind concrete_method: 1",
 		"call kind unknown: 3",
 		"skipped_conversion: 1",
-		"deferred_selector: 4",
-		"invariant: call sites 11 = stored 6 + skipped 1 + deferred 4 [ok]",
+		"deferred_selector: 3",
+		"invariant: call sites 11 = stored 7 + skipped 1 + deferred 3 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphStageMethodGoldens covers Rule 3 (known receivers and parameters) on
+// the methods fixture package: a pointer receiver, a value receiver, a
+// parameter-typed call, a method name on two types (resolved by receiver type),
+// an interface-typed parameter (interface_method, counted deferred_interface, no
+// stored row), an embedded struct left unknown, and a parameter shadowed by an
+// inner := (unknown, so never a wrong exact).
+func TestGraphStageMethodGoldens(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/methods", Stats: true})
+
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.(*Scheduler).Run"),
+		[]edgeRow{{"exact", "", "concrete_method", "s.Tick", 6, "k8s.io/kubernetes/methods.(*Scheduler).Tick"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.pointerReceiver"),
+		[]edgeRow{{"exact", "", "concrete_method", "s.Run", 36, "k8s.io/kubernetes/methods.(*Scheduler).Run"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.valueReceiver"),
+		[]edgeRow{{"exact", "", "concrete_method", "w.Tick", 40, "k8s.io/kubernetes/methods.(Widget).Tick"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.parameterTyped"),
+		[]edgeRow{{"exact", "", "concrete_method", "x.M", 44, "k8s.io/kubernetes/methods.(Box).M"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.sameNameOnTwoTypes"),
+		[]edgeRow{
+			{"exact", "", "concrete_method", "a.M", 48, "k8s.io/kubernetes/methods.(Box).M"},
+			{"exact", "", "concrete_method", "c.M", 49, "k8s.io/kubernetes/methods.(Crate).M"},
+		})
+	// An interface-typed parameter is interface_method and counted
+	// deferred_interface; no Rule 4 row is stored yet.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.interfaceParam"), nil)
+	// Embedded structs are left unknown: M is promoted from Inner but never seen.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.embeddedUnknown"), nil)
+	// A parameter shadowed by an inner := is unknown, so the call is deferred and
+	// never a wrong exact.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.shadowedParameter"), nil)
+	// A type-switch guard binding a name that shadows a receiver is unknown, so
+	// the call inside the case is deferred and never the outer receiver's method.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.typeSwitchShadow"), nil)
+	// A receive-statement binding that shadows a receiver is unknown too.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.receiveShadow"), nil)
+	// A bare type that is the declaration's own type parameter is never guessed,
+	// even when the package declares a type of the same name with that method.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.typeParam"), nil)
+
+	for _, line := range []string{
+		"resolution exact: 6",
+		"call kind concrete_method: 6",
+		"deferred_selector: 5",
+		"deferred_interface: 1",
+		"invariant: call sites 12 = stored 6 + skipped 0 + deferred 6 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -333,8 +390,8 @@ func TestGraphStageRerunIdempotent(t *testing.T) {
 		`SELECT count(*) FROM edges WHERE (resolution = 'unresolved') <> (callee_id IS NULL)`); n != 0 {
 		t.Errorf("rows breaking the unresolved shape = %d, want 0", n)
 	}
-	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 10 {
-		t.Errorf("tree-sitter edge count = %d, want 10", n)
+	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 17 {
+		t.Errorf("tree-sitter edge count = %d, want 17", n)
 	}
 }
 
@@ -539,8 +596,8 @@ func TestGraphStatusNeverGraphed(t *testing.T) {
 	pool, root := graphFixture(t)
 
 	before := runGraphStage(t, pool, root, graphOptions{Status: true})
-	if !strings.Contains(before, "10 files stale") || !strings.Contains(before, "never graphed: 10") {
-		t.Errorf("status before graphing should list 10 never-graphed files:\n%s", before)
+	if !strings.Contains(before, "11 files stale") || !strings.Contains(before, "never graphed: 11") {
+		t.Errorf("status before graphing should list 11 never-graphed files:\n%s", before)
 	}
 	if !strings.Contains(before, "plain.go: never graphed") {
 		t.Errorf("status should name the never-graphed file:\n%s", before)

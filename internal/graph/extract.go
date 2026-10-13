@@ -19,7 +19,18 @@ type Decl struct {
 	// parameters, and every :=, var or const name in the body (function-literal
 	// variables included). A call to a name in this set is deferred_local.
 	Locals map[string]bool
-	Calls  []Call
+	// Types maps the receiver name and every parameter name to its written type
+	// text (for example `*Scheduler`, `Interface`, `p *pkg.T`, `f func()`). It is
+	// the per-function type environment Rule 3 resolves against. A name
+	// redeclared anywhere in the body is removed, so a shadowed name is unknown
+	// (an inner variable never inherits the outer type). Unknown forms are kept
+	// as written and rejected by the resolver, which never guesses.
+	Types map[string]string
+	// TypeParams is the set of the declaration's own type parameter names. A
+	// receiver or parameter typed as one of them is unknown, so a type parameter
+	// that shares a name with a package type is never resolved to that type.
+	TypeParams map[string]bool
+	Calls      []Call
 }
 
 // Call is one call expression. Name is the identifier for a bare identifier
@@ -49,8 +60,9 @@ type FileInfo struct {
 
 // Extract re-parses src and returns its declared functions/methods with their
 // call sites, its package-level declared names and its import alias map (spec
-// stories 38, 101). Receiver/parameter types are not resolved here (this slice
-// needs identifier calls, alias-qualified calls and local scope).
+// stories 38, 101). Each declaration carries the receiver and parameter types as
+// written (the Rule 3 type environment); locals, fields and constructor return
+// types are not resolved here (later tickets).
 func Extract(src []byte) (FileInfo, error) {
 	tree, err := parseTree(src)
 	if err != nil {
@@ -204,22 +216,93 @@ func parseTree(src []byte) (*sitter.Tree, error) {
 // extractDecl builds one Decl from a function_declaration or method_declaration.
 func extractDecl(n *sitter.Node, src []byte) Decl {
 	d := Decl{
-		Name:      fieldName(n, src),
-		StartLine: int(n.StartPoint().Row) + 1,
-		Locals:    map[string]bool{},
+		Name:       fieldName(n, src),
+		StartLine:  int(n.StartPoint().Row) + 1,
+		Locals:     map[string]bool{},
+		Types:      map[string]string{},
+		TypeParams: map[string]bool{},
 	}
+	addAll(d.TypeParams, typeParamNames(n.ChildByFieldName("type_parameters"), src))
 	if recv := n.ChildByFieldName("receiver"); recv != nil {
 		d.Receiver = receiverText(recv, src)
 		if decl := recv.NamedChild(0); decl != nil {
 			addAll(d.Locals, nameIdentifiers(decl, src))
+			addType(d.Types, nameIdentifiers(decl, src), receiverText(recv, src))
 		}
 	}
-	addAll(d.Locals, paramNames(n.ChildByFieldName("parameters"), src))
+	params := n.ChildByFieldName("parameters")
+	addAll(d.Locals, paramNames(params, src))
+	addParamTypes(d.Types, params, src)
 	if body := n.ChildByFieldName("body"); body != nil {
 		collectLocals(body, src, d.Locals)
+		removeShadowed(body, src, d.Types)
 		d.Calls = collectCalls(body, src)
 	}
 	return d
+}
+
+// addType maps each name to typ, skipping empty names and an empty type.
+func addType(into map[string]string, names []string, typ string) {
+	if typ == "" {
+		return
+	}
+	for _, n := range names {
+		if n != "" {
+			into[n] = typ
+		}
+	}
+}
+
+// addParamTypes records each parameter's written type. A grouped `a, b T` gives
+// both names the same type; an unnamed parameter contributes nothing.
+func addParamTypes(into map[string]string, params *sitter.Node, src []byte) {
+	if params == nil {
+		return
+	}
+	for i := 0; i < int(params.NamedChildCount()); i++ {
+		p := params.NamedChild(i)
+		if p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration" {
+			continue
+		}
+		typ := p.ChildByFieldName("type")
+		if typ == nil {
+			continue
+		}
+		addType(into, nameIdentifiers(p, src), typ.Content(src))
+	}
+}
+
+// removeShadowed deletes from types every name the body redeclares: a :=, var
+// or const name, a range variable, a function-literal parameter, a type-switch
+// guard or a select receive variable. The scope is flat per declaration,
+// matching the tracer's flat local-scope simplification, so an inner declaration
+// always wins; it can only turn a known name into an unknown one, never invent a
+// type.
+func removeShadowed(n *sitter.Node, src []byte, types map[string]string) {
+	switch n.Type() {
+	case "short_var_declaration":
+		deleteAll(types, identList(n.ChildByFieldName("left"), src))
+	case "var_declaration", "const_declaration":
+		deleteAll(types, specNames(n, src))
+	case "range_clause":
+		deleteAll(types, identList(n.ChildByFieldName("left"), src))
+	case "parameter_list":
+		deleteAll(types, paramNames(n, src))
+	case "type_switch_statement":
+		deleteAll(types, identList(n.ChildByFieldName("alias"), src))
+	case "receive_statement":
+		deleteAll(types, identList(n.ChildByFieldName("left"), src))
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		removeShadowed(n.NamedChild(i), src, types)
+	}
+}
+
+// deleteAll removes names from a set.
+func deleteAll(set map[string]string, names []string) {
+	for _, n := range names {
+		delete(set, n)
+	}
 }
 
 // collectCalls walks body (function literals included) in pre-order and returns
@@ -270,6 +353,10 @@ func collectLocals(n *sitter.Node, src []byte, locals map[string]bool) {
 		addAll(locals, identList(n.ChildByFieldName("left"), src))
 	case "parameter_list":
 		addAll(locals, paramNames(n, src))
+	case "type_switch_statement":
+		addAll(locals, identList(n.ChildByFieldName("alias"), src))
+	case "receive_statement":
+		addAll(locals, identList(n.ChildByFieldName("left"), src))
 	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		collectLocals(n.NamedChild(i), src, locals)
@@ -335,6 +422,23 @@ func paramNames(params *sitter.Node, src []byte) []string {
 	for i := 0; i < int(params.NamedChildCount()); i++ {
 		p := params.NamedChild(i)
 		if p.Type() == "parameter_declaration" || p.Type() == "variadic_parameter_declaration" {
+			out = append(out, nameIdentifiers(p, src)...)
+		}
+	}
+	return out
+}
+
+// typeParamNames returns the type parameter names of a type_parameter_list,
+// skipping the constraint types (so a constraint name is never mistaken for a
+// type parameter).
+func typeParamNames(params *sitter.Node, src []byte) []string {
+	if params == nil {
+		return nil
+	}
+	var out []string
+	for i := 0; i < int(params.NamedChildCount()); i++ {
+		p := params.NamedChild(i)
+		if p.Type() == "type_parameter_declaration" {
 			out = append(out, nameIdentifiers(p, src)...)
 		}
 	}

@@ -766,4 +766,127 @@ The alias-qualified part of `deferred_selector` is gone; what remains in
 `pkg/scheduler` (906) is receiver-style selector and chained calls, handled by
 tickets 05 and 06.
 
+### Known receivers: methods and parameters (S2 ticket 05)
+
+What changed. Each declaration now carries a per-function type environment: the
+receiver's written type (`s *Scheduler`) and every parameter's written type
+(`i Interface`, `p *pkg.T`, `f func()`), alongside the flat local-scope names.
+It is built by `extractDecl` (receiver via `receiverText`, each
+`parameter_declaration`'s `type` field against its name list, and the
+declaration's own `type_parameters` names) and any name redeclared in the body (a
+`:=`, `var`/`const`, range variable, function-literal parameter, type-switch
+guard or select receive variable) is removed before resolution, so an inner
+declaration shadows the receiver or a parameter. The scope stays flat per
+declaration, matching the tracer's flat local-scope simplification: it can only
+turn a known name into an unknown one, never invent a type, so it can miss a
+resolution but never produce a wrong exact. Only the receiver and parameters are
+recorded; locals, fields and constructor return types are ticket 06.
+
+Rule 3. `analyzeQualified` now tries the type environment first: a selector whose
+qualifier is a receiver or parameter name with a written type goes to
+`analyzeReceiver`, before the local-scope deferral and before the import-alias
+lookup (so a parameter still wins as a receiver, and a name not in the type
+environment but in local scope stays `deferred_selector` as before). The written
+type is reduced to a named type: one leading `*` is stripped (Go auto-addresses,
+so a value call finds a pointer-receiver method and vice versa), a bare
+identifier is a same-package type only when the package actually declares a type
+of that name (the declared-name index), and `alias.Type` resolves through a known
+import alias to that package only when it declares the type too; the
+declaration's own type parameters are never types; any other form (slice, map,
+func, generic instantiation, inline struct, qualified type through an unknown
+alias) is not a named type and returns unknown. A method of that name whose
+receiver base equals the type in the same indexed package is `exact` kind
+`concrete_method`; a known named interface type (in any indexed package) sets no
+`call_kind` and stores no row, but is counted `deferred_interface` until Rule 4
+lands. No method and not an interface — including a method promoted only from an
+embedded struct — stays `deferred_selector`, never guessed. The method index and
+the interface set are built once in `NewIndex` from the symbol kinds, keyed by
+`(package, receiver base, method)` and `(package, name)`.
+
+Fixture goldens (`cmd/indexer/testdata/graph/methods/methods.go`, real Postgres,
+`TestGraphStageMethodGoldens`). Pointer receiver (`(s *Scheduler).Run` called on
+`s *Scheduler` -> `(*Scheduler).Run`), value receiver (`(Widget).Tick` -> `(Widget).Tick`),
+parameter-typed call (`x *Box` -> `(Box).M`), a method name on two types
+(`Box.M` and `Crate.M`, resolved by receiver type), an interface-typed parameter
+(`i Interface` -> `deferred_interface`, no row), an embedded struct left unknown
+(`Outer` embeds `Inner`; `o.M()` stays `deferred_selector`), a parameter shadowed
+by an inner `:=`, a type-switch guard (`switch s := y.(type)`) and a select
+receive (`case s := <-ch:`) that shadow a receiver (each call stays
+`deferred_selector`, never the outer receiver's method), and a bare type that is
+the declaration's own type parameter (`func typeParam[T any](x T) { x.M() }`)
+while the package declares a same-named type with that method (stays
+`deferred_selector`, never a wrong exact). `--stats` for the package:
+`invariant: call sites 12 = stored 6 + skipped 0 + deferred 6 [ok]`, exact 6,
+concrete_method 6, deferred_selector 5, deferred_interface 1. The receiver
+self-call inside `Run` resolves through the type environment too, so the pointer
+receiver is exercised both from a parameter and from the receiver itself.
+
+The existing `alias` golden changed as intended: the parameter named `klog`
+(`func callShadowed(klog *fakeKlog)`) still shadows the import alias (Rule 2 does
+not fire), but its own written type `*fakeKlog` is now known, so the inner
+`klog.V` resolves to `exact` `concrete_method`
+(`k8s.io/kubernetes/alias.(fakeKlog).V`) instead of staying deferred; the outer
+chained `klog.V(2).InfoS` stays deferred. The alias `--stats` invariant is now
+`call sites 11 = stored 7 + skipped 1 + deferred 3 [ok]` (exact 4, func 3,
+concrete_method 1, deferred_selector 3). `TestAnalyzeKnownReceiverCrossPackage`
+covers a `d *dep.T` parameter resolving to `dep.(T).M` through an import alias
+and an interface-typed parameter counted `deferred_interface`.
+
+Resolver version. `graph.ResolverVersion` is bumped 2 -> 3, so every file graphed
+before is stale (`symbols changed`); the fingerprint change is covered by the
+existing version-bump test.
+
+Real run (dev DB, `--package k8s.io/kubernetes/pkg/scheduler`; the rest of the
+tree stays stale until ticket 09):
+
+```
+$ go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/scheduler --stats
+5 files to graph
+graphed 5 files, stored 654 edges
+edges stored: 654
+  resolution exact: 418
+  resolution unresolved: 236
+  reason external: 236
+  reason no_match: 0
+call kind func: 282
+call kind concrete_method: 136
+call kind interface_method: 0
+call kind unknown: 236
+skipped_builtin: 159
+skipped_conversion: 4
+deferred_selector: 710
+deferred_local: 25
+deferred_interface: 60
+invariant: call sites 1612 = stored 654 + skipped 163 + deferred 795 [ok]
+```
+
+The invariant passes. Before this ticket the same package had exact 282 (all
+`func`), `deferred_selector` 906 and `deferred_interface` 0; now the 196
+receiver/parameter-typed selector sites (906 - 710) split exactly into 136
+`concrete_method` and 60 `deferred_interface`. Confirmed in the DB: 136
+`call_kind='concrete_method'` rows for the package and 0 rows breaking the
+unresolved shape rule (`(resolution='unresolved') <> (callee_id IS NULL)`). The
+review fixes (type-switch and select-receive shadowing, type-parameter and
+declared-name gating) do not change this package: re-running after forcing the
+five files stale (`graphed_symbols_fp = NULL`, since the resolver version stays
+3) gives the identical counts above, and a following run prints `0 files to
+graph`.
+
+Checks. `make test` green (throwaway database per test, no new skips);
+`make ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
+actionlint).
+
+Ambiguity. Embedded-struct promotion is deliberately unseen: the method index
+holds only methods declared on the named type, so `Outer.M` promoted from `Inner`
+is not found and the call stays `deferred_selector`. A cross-package receiver
+resolves only through a known import alias (`pkg.T`); an unaliased or dot-imported
+type has no alias and stays deferred, and a same-package bare type name is looked
+up only in the same package and only when the declared-name index knows it as a
+type. Builtin type names (including the interfaces `error` and `any`) are not
+declared types and not in the interface set, so `err.Error()` is counted
+`deferred_selector`, not `deferred_interface`, and stores no wrong edge; no
+special case is added for them. A known interface receiver stores no row and sets
+no `call_kind`; only the `deferred_interface` counter moves (the `interface_method`
+kind is not observable until Rule 4 lands).
+
 

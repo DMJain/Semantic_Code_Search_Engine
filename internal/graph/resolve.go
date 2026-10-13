@@ -66,6 +66,14 @@ type Index struct {
 	byFileLine     map[fileLine]int64
 	byPathNameRecv map[string]int64
 	funcsByPkgName map[string]int64
+	// methodsByType maps (package, receiver base type, method name) to the
+	// method symbol id, for Rule 3. The base type strips a leading `*`, so a
+	// value call resolves to a pointer-receiver method and vice versa (Go
+	// auto-addresses).
+	methodsByType map[string]int64
+	// interfaces is the set of (package, name) named interface types, so a
+	// known interface receiver is interface_method rather than a concrete one.
+	interfaces map[string]bool
 }
 
 type fileLine struct {
@@ -80,18 +88,40 @@ func NewIndex(symbols []Symbol) *Index {
 		byFileLine:     make(map[fileLine]int64, len(symbols)),
 		byPathNameRecv: make(map[string]int64, len(symbols)),
 		funcsByPkgName: make(map[string]int64, len(symbols)),
+		methodsByType:  make(map[string]int64, len(symbols)),
+		interfaces:     make(map[string]bool, len(symbols)),
 	}
 	for _, s := range symbols {
 		ix.byFileLine[fileLine{s.Path, s.StartLine}] = s.ID
 		ix.byPathNameRecv[pathNameRecv(s.Path, s.Name, s.Receiver)] = s.ID
-		if s.Kind == parse.KindFunc {
+		switch s.Kind {
+		case parse.KindFunc:
 			k := pkgName(s.Package, s.Name)
 			if _, ok := ix.funcsByPkgName[k]; !ok {
 				ix.funcsByPkgName[k] = s.ID
 			}
+		case parse.KindMethod:
+			k := methodKey(s.Package, strings.TrimPrefix(s.Receiver, "*"), s.Name)
+			if _, ok := ix.methodsByType[k]; !ok {
+				ix.methodsByType[k] = s.ID
+			}
+		case parse.KindInterface:
+			ix.interfaces[pkgName(s.Package, s.Name)] = true
 		}
 	}
 	return ix
+}
+
+// ConcreteMethod returns the id of the method named method on the named type
+// typ in pkg, accepting a value or pointer receiver (Rule 3, Go auto-addresses).
+func (ix *Index) ConcreteMethod(pkg, typ, method string) (int64, bool) {
+	id, ok := ix.methodsByType[methodKey(pkg, typ, method)]
+	return id, ok
+}
+
+// IsInterface reports whether pkg declares a named interface type typ.
+func (ix *Index) IsInterface(pkg, typ string) bool {
+	return ix.interfaces[pkgName(pkg, typ)]
 }
 
 // CallerID returns the symbol id of the declaration at path/startLine, falling
@@ -168,7 +198,7 @@ func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex) ([]Ed
 			case c.Name != "":
 				edges, st = analyzeIdentifier(edges, st, callerID, c, d, pkg, ix, names)
 			case c.Qualifier != "":
-				edges, st = analyzeQualified(edges, st, callerID, c, d, info.Aliases, ix, names)
+				edges, st = analyzeQualified(edges, st, callerID, c, d, pkg, info.Aliases, ix, names)
 			default:
 				// A receiver-style selector or a chained call: deferred.
 				st.DeferredSelector++
@@ -213,12 +243,17 @@ func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, p
 	}), st
 }
 
-// analyzeQualified classifies an alias-qualified selector call `alias.Name`
-// (Rule 2): a same-package function in the aliased package is exact, an
-// unindexed import path is external, and an indexed package without a matching
-// function is a conversion (declared type) or no_match. A shadowed alias or an
-// unknown qualifier stays deferred.
-func analyzeQualified(edges []Edge, st Stats, callerID int64, c Call, d Decl, aliases map[string]string, ix *Index, names *NameIndex) ([]Edge, Stats) {
+// analyzeQualified classifies a selector call `qualifier.Field` whose operand is
+// a bare identifier. It is Rule 3 when the qualifier is a receiver or parameter
+// with a written type, Rule 2 when it is an import alias (a same-package
+// function in the aliased package is exact, an unindexed import path is
+// external, and an indexed package without a matching function is a conversion
+// or no_match), and otherwise a deferred selector. A qualifier shadowed by a
+// local declaration is not a typed name and not an alias, so it stays deferred.
+func analyzeQualified(edges []Edge, st Stats, callerID int64, c Call, d Decl, pkg string, aliases map[string]string, ix *Index, names *NameIndex) ([]Edge, Stats) {
+	if typ, ok := d.Types[c.Qualifier]; ok {
+		return analyzeReceiver(edges, st, callerID, c, typ, pkg, aliases, ix, names, d.TypeParams)
+	}
 	if d.Locals[c.Qualifier] {
 		st.DeferredSelector++
 		return edges, st
@@ -258,6 +293,77 @@ func analyzeQualified(edges []Edge, st Stats, callerID int64, c Call, d Decl, al
 		Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
 		UnresolvedReason: ReasonNoMatch,
 	}), st
+}
+
+// analyzeReceiver classifies a selector call on a name whose written type is
+// known (Rule 3): the receiver of the enclosing method or a parameter. When the
+// written type resolves to a named type the package actually declares, a method
+// of that name with a matching receiver base (value or pointer; Go
+// auto-addresses) is exact with kind concrete_method. A known interface type is
+// counted deferred_interface until Rule 4 lands and never stored. Any other form
+// (unknown, type parameter, no such method, embedded-only promotion) stays
+// deferred_selector: types are never guessed.
+func analyzeReceiver(edges []Edge, st Stats, callerID int64, c Call, typ, pkg string, aliases map[string]string, ix *Index, names *NameIndex, typeParams map[string]bool) ([]Edge, Stats) {
+	targetPkg, typeName, ok := receiverType(typ, pkg, aliases, names, typeParams)
+	if !ok {
+		st.DeferredSelector++
+		return edges, st
+	}
+	if ix.IsInterface(targetPkg, typeName) {
+		st.DeferredInterface++
+		return edges, st
+	}
+	if id, ok := ix.ConcreteMethod(targetPkg, typeName, c.Field); ok {
+		st.Exact++
+		st.ByKind[KindConcreteMethod]++
+		return append(edges, Edge{
+			CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
+			Resolution: ResolutionExact, CallKind: KindConcreteMethod, CallLine: c.Line,
+		}), st
+	}
+	st.DeferredSelector++
+	return edges, st
+}
+
+// receiverType resolves a written type text to a named type: a bare identifier
+// is a type in the same package, `alias.Type` (where alias is a known import
+// alias) is a type in the aliased package, and one leading `*` is stripped so a
+// pointer and a value base resolve alike. The name must be a type the package
+// actually declares (from the declared-name index), so an undeclared or
+// dot-imported name is not guessed, and a type parameter name is never a type.
+// Any other form (slice, map, func, generic instantiation, inline struct,
+// qualified type through an unknown alias) is not a named type and returns
+// ok=false. Builtin type names pass through as same-package names and simply
+// find no declared type.
+func receiverType(typ, pkg string, aliases map[string]string, names *NameIndex, typeParams map[string]bool) (string, string, bool) {
+	t := strings.TrimSpace(typ)
+	if strings.HasPrefix(t, "*") {
+		t = strings.TrimSpace(t[1:])
+	}
+	if t == "" || strings.HasPrefix(t, "*") || strings.ContainsAny(t, "[](){} ,") {
+		return "", "", false
+	}
+	if i := strings.LastIndexByte(t, '.'); i >= 0 {
+		alias, name := t[:i], t[i+1:]
+		if alias == "" || name == "" {
+			return "", "", false
+		}
+		importPath, ok := aliases[alias]
+		if !ok || !declaresType(names, importPath, name) {
+			return "", "", false
+		}
+		return importPath, name, true
+	}
+	if typeParams[t] || !declaresType(names, pkg, t) {
+		return "", "", false
+	}
+	return pkg, t, true
+}
+
+// declaresType reports whether the declared-name index knows name as a named
+// type of pkg. A nil index declares nothing.
+func declaresType(names *NameIndex, pkg, name string) bool {
+	return names != nil && names.Declared(pkg, name) == "type"
 }
 
 // Fingerprint is the freshness fingerprint (D-076, amended to cover declared
@@ -319,6 +425,10 @@ type callLine struct {
 }
 
 func pkgName(pkg, name string) string { return pkg + "\x00" + name }
+
+func methodKey(pkg, typ, method string) string {
+	return pkg + "\x00" + typ + "\x00" + method
+}
 
 func pathNameRecv(path, name, receiver string) string {
 	return path + "\x00" + name + "\x00" + receiver

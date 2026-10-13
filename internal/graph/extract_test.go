@@ -82,6 +82,122 @@ func F() {
 	}
 }
 
+// TestExtractTypeEnvironment proves the per-function type environment records
+// the receiver and parameter types as written, keeps an unknown written form
+// (func(), error, slices, maps) so the resolver can reject it, and removes a
+// name redeclared in the body (an inner := shadows the parameter, so it is
+// unknown and never a wrong exact).
+func TestExtractTypeEnvironment(t *testing.T) {
+	src := []byte(`package p
+
+func (s *S) M(a *Foo, i Interface, f func(), xs []int, err error, b byte, p, q Foo) {
+	x := 1
+	_ = x
+}
+
+type S struct{}
+type Foo struct{}
+type Interface interface{ N() }
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(info.Decls) != 1 {
+		t.Fatalf("decls = %d, want 1", len(info.Decls))
+	}
+	types := info.Decls[0].Types
+	want := map[string]string{
+		"s": "*S", "a": "*Foo", "i": "Interface", "f": "func()", "xs": "[]int", "err": "error",
+		"p": "Foo", "q": "Foo",
+	}
+	for name, typ := range want {
+		if types[name] != typ {
+			t.Errorf("type of %q = %q, want %q (types = %v)", name, types[name], typ, types)
+		}
+	}
+	if _, ok := types["x"]; ok {
+		t.Errorf("shadowed name x still has a type: %v", types)
+	}
+}
+
+// TestExtractTypeParameters proves the declaration's own type parameters are
+// collected, so the resolver can treat a receiver or parameter typed as a type
+// parameter as unknown and never guess a same-named package type.
+func TestExtractTypeParameters(t *testing.T) {
+	src := []byte(`package p
+
+func F[T any](x T) {
+	x.M()
+}
+
+func G() {}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !info.Decls[0].TypeParams["T"] {
+		t.Errorf("type parameter T not recorded: %v", info.Decls[0].TypeParams)
+	}
+	if len(info.Decls[1].TypeParams) != 0 {
+		t.Errorf("G type parameters = %v, want none", info.Decls[1].TypeParams)
+	}
+}
+
+// TestExtractTypeEnvironmentShadowedParam proves an inner declaration of a name
+// removes the parameter's type (the flat per-declaration local scope), so a
+// call through the shadowed name is deferred rather than a wrong exact.
+func TestExtractTypeEnvironmentShadowedParam(t *testing.T) {
+	src := []byte(`package p
+
+func F(a *Foo) {
+	{
+		a := 1
+		_ = a
+	}
+}
+
+type Foo struct{}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if _, ok := info.Decls[0].Types["a"]; ok {
+		t.Errorf("shadowed parameter a still has a type: %v", info.Decls[0].Types)
+	}
+}
+
+// TestExtractTypeSwitchAndReceiveLocals proves a type-switch guard and a select
+// receive variable count as locals, so a bare identifier call through one is
+// deferred_local rather than a stored no_match.
+func TestExtractTypeSwitchAndReceiveLocals(t *testing.T) {
+	src := []byte(`package p
+
+func F(y interface{}, ch chan int) {
+	switch s := y.(type) {
+	case int:
+		s()
+	}
+	select {
+	case r := <-ch:
+		r()
+	}
+}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	locals := info.Decls[0].Locals
+	for _, name := range []string{"s", "r"} {
+		if !locals[name] {
+			t.Errorf("%q is not a local (locals = %v)", name, locals)
+		}
+	}
+}
+
 // TestExtractQualifiedCallShape proves a selector call whose operand is a bare
 // identifier carries the alias-qualified shape (qualifier and field), while a
 // receiver-style selector and a chained call carry neither and so stay deferred.
