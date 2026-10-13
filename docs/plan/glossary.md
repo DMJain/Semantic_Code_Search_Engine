@@ -14,7 +14,7 @@
 - **Hop**: one iteration of the `/ask` loop (fetch more evidence or answer).
 - **Evidence set**: code snippets and symbols collected during `/ask`; citations must fall inside it.
 - **Edge resolution**: how a tree-sitter call edge was resolved (D-073): `exact`, `name_only` (a guess; always has a callee), `ambiguous` (one row per candidate callee), or `unresolved` (no callee; carries a reason).
-- **Unresolved edge**: an edge with `callee_id NULL` and an `unresolved_reason` (`external`, `no_match`, `unknown_receiver`, `candidates_capped`); kept for recall accounting, never followed by retrievers.
+- **Unresolved edge**: an edge with `callee_id NULL` and an `unresolved_reason` (`external`, `no_match`, `unknown_receiver`, `func_value`, `candidates_capped`); kept for recall accounting, never followed by retrievers.
 - **Exact (edge)**: resolved with certainty by the source that produced the edge; for `source='gopackages'` (GT) rows every edge is `exact`, so `source` disambiguates (D-077).
 - **Skip counters**: `skipped_builtin` and `skipped_conversion` in `graph --stats`: call expressions that are predeclared builtins or type conversions and are therefore not stored as edges (D-073).
 - **Rule 4 candidate**: a concrete indexed type declaring every method name of the called interface; signatures are not compared, and methods promoted from embedded structs are not seen (D-075). `interfaces_partial` counts interfaces with an unresolvable embedded interface.

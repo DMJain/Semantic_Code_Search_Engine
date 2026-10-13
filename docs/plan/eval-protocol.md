@@ -68,7 +68,7 @@ Accuracy versus labeled route type, confusion matrix, percent rule-routed versus
 
 ## Call-graph metrics
 
-Tree-sitter edge precision and recall versus the go/packages VTA graph on the slice, broken down by call kind (plain function, concrete method, interface method, function value). Edges are compared as `(caller, callee)` symbol pairs. Precision counts one unit per call site: an ambiguous tree-sitter call is a true positive only if the ground-truth callee is among its candidates; report ambiguous-rate and candidate-set size separately.
+Tree-sitter edge precision and recall versus the go/packages VTA graph on the slice, broken down by call kind (plain function, concrete method, interface method, function value). Edges are compared as `(caller, callee)` symbol pairs. Precision counts one unit per call site: an ambiguous tree-sitter call is a true positive only if the ground-truth callee is among its candidates; report ambiguous-rate and candidate-set size separately. Scope is in-slice only (D-074): every tree-sitter edge from an in-slice caller falls in one bucket (scored in slice, resolved out of slice, unresolved by reason; skipped and deferred counters reconcile), the buckets must sum to the total, and the out-of-slice share is reported with the numbers.
 
 ## Indexing metrics
 

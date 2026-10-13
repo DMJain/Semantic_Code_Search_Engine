@@ -28,7 +28,7 @@ Initial schema is `internal/store/migrations/00001_init.sql` (never edited). Lat
 - 00002 (S0): `chunks.search_tsv` becomes a regular `tsvector NOT NULL DEFAULT ''` column populated from Go; GIN index recreated.
 - 00003 (S1): `symbols.raw_calls text[]`, `files.parsed_sha text`, `summaries.reason text`, unique index `summaries_uniq (level, target_id, prompt_version)`.
 - 00004 (S1): `summaries.completed_at timestamptz` (nullable).
-- 00005 (S2): `edges.call_line int`, `edges.call_kind text`, `edges.unresolved_reason text`, `resolution` gains `unresolved` (D-073), `edges_callee_id_fkey` becomes ON DELETE CASCADE (D-076), `files.graphed_sha text`, `files.graphed_symbols_fp text`, unique edge index.
+- 00005 (S2): `edges.call_line int`, `edges.call_kind text`, `edges.unresolved_reason text` (external, no_match, unknown_receiver, func_value, candidates_capped), `resolution` gains `unresolved` (D-073), `edges_callee_id_fkey` becomes ON DELETE CASCADE (D-076), `files.graphed_sha text`, `files.graphed_symbols_fp text`, unique edge index.
 - 00006 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`, `chunks.start_line int NOT NULL`, `chunks.end_line int NOT NULL`, table `embed_failures(target_kind, target_id, model, reason, created_at, primary key (target_kind, target_id, model))` (per part; a grouped chunk lives in one file and stores the span of both declarations).
 - 00007 (S5): `packages` table.
 - 00008 (S9): summaries unique index also includes `model`, so 7B and 3B summary sets coexist.
@@ -59,11 +59,11 @@ tree-sitter extraction of functions, methods (with receiver), structs, interface
 
 ## Stage: graph
 
-Re-parses each file with tree-sitter (D-019) and resolves call expressions to `edges(source='treesitter')`. Needs local variable types and file import aliases. Resolution order: same package, import aliases, receiver types from local declarations. `resolution` in {exact, name_only, ambiguous}. An ambiguous call stores one row per candidate callee. `callee_raw` is always stored. Interface method calls are expected to be mostly ambiguous. `call_kind` is a best-effort syntactic guess (func, concrete_method, interface_method, func_value, unknown).
+Re-parses each file with tree-sitter (D-019) and resolves call expressions to `edges(source='treesitter')`. Needs local variable types and file import aliases. Resolution order: same package, import aliases, receiver types from local declarations. `resolution` in {exact, name_only, ambiguous, unresolved} (D-073): `name_only` is a guess and always has a callee; `unresolved` has no callee and an `unresolved_reason` (external, no_match, unknown_receiver, func_value, candidates_capped). An ambiguous call stores one row per candidate callee, up to a cap (D-075; Rule 4 candidates are concrete types declaring every method name of the interface). `callee_raw` is always stored. Builtin calls and type conversions are not stored (counted). Freshness is by symbol-set fingerprint (D-076). Interface method calls are expected to be mostly ambiguous or capped. `call_kind` is a best-effort syntactic guess (func, concrete_method, interface_method, func_value, unknown).
 
 ## Stage: callgraph-gt
 
-Separate command `cmd/callgraph-gt`. Type-checked VTA call graph (D-011) of the SLICE via `go/packages` under the build context of [#corpus-and-slice](#corpus-and-slice) (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=vendor`); the set of slice `.go` files that `walk` marks equals the set `go/packages` loads for the slice (checked in S2), stored as `edges(source='gopackages')` with `call_kind` from SSA call mode. Evaluation only; never read by the server. The working invocation (env, flags) is recorded in D-025.
+Separate command `cmd/callgraph-gt`. Type-checked VTA call graph (D-011) of the SLICE via `go/packages` under the build context of [#corpus-and-slice](#corpus-and-slice) (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOTOOLCHAIN=local`, workspace load; D-058 amended, D-071); the set of slice `.go` files that `walk` marks equals the set `go/packages` loads for the slice (checked in S2), stored as `edges(source='gopackages')`, `resolution='exact'` (D-077), with `call_kind` from SSA call mode. Evaluation only; never read by the server. The working invocation (env, flags) is recorded in D-025.
 
 ## Stage: chunk
 
