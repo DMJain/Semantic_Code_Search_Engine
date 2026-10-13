@@ -1,0 +1,17 @@
+{
+  "total": 15254,
+  "mapped": 12780,
+  "gt_unmapped": 484,
+  "rows": 12586,
+  "dropped": {
+    "bound_method": 327,
+    "init": 777,
+    "wrapper": 886
+  },
+  "by_kind": {
+    "concrete_method": 4559,
+    "func": 4389,
+    "func_value": 523,
+    "interface_method": 3115
+  }
+}

@@ -102,30 +102,14 @@ type graphFile struct {
 	graphedFP  *string
 }
 
-// Stale reasons printed by --status and used to classify files.
-const (
-	reasonNeverGraphed  = "never graphed"
-	reasonContentChange = "content changed"
-	reasonSymbolsChange = "symbols changed"
-)
-
 // graphStatusCap caps the stale-file list --status prints.
 const graphStatusCap = 50
 
 // staleReasons returns why f is stale against the current fingerprint fp, or
-// nil when fresh (D-076). A never-graphed file is reported as such alone.
+// nil when fresh (D-076). It delegates to the shared predicate so the eval
+// callgraph report refuses on exactly the files graph --status lists.
 func staleReasons(f graphFile, fp string) []string {
-	if f.graphedSHA == nil {
-		return []string{reasonNeverGraphed}
-	}
-	var reasons []string
-	if *f.graphedSHA != f.sha {
-		reasons = append(reasons, reasonContentChange)
-	}
-	if f.graphedFP == nil || *f.graphedFP != fp {
-		reasons = append(reasons, reasonSymbolsChange)
-	}
-	return reasons
+	return graph.StaleReasons(f.sha, f.graphedSHA, f.graphedFP, fp)
 }
 
 // graphStage re-parses the stale files and writes their tree-sitter edges, one
@@ -138,7 +122,7 @@ func staleReasons(f graphFile, fp string) []string {
 func graphStage(ctx context.Context, pool *pgxpool.Pool, root string, opts graphOptions, out io.Writer) error {
 	dbCtx := context.WithoutCancel(ctx)
 
-	symbols, err := loadSymbols(dbCtx, pool)
+	symbols, err := graph.LoadSymbols(dbCtx, pool)
 	if err != nil {
 		return err
 	}
@@ -151,7 +135,7 @@ func graphStage(ctx context.Context, pool *pgxpool.Pool, root string, opts graph
 	// The freshness fingerprint covers the declared-name index (D-076, amended
 	// to include the declared names the resolver reads), so both --status and
 	// the graph path need it built first.
-	names, err := buildNameIndex(dbCtx, pool, root)
+	names, err := graph.BuildNameIndex(dbCtx, pool, root)
 	if err != nil {
 		return err
 	}
@@ -290,7 +274,7 @@ func printGraphStatus(out io.Writer, files []graphFile, fp string) {
 		return
 	}
 	fmt.Fprintf(out, "  reasons (a file may have more than one, so these sum above the total):\n")
-	for _, reason := range []string{reasonNeverGraphed, reasonContentChange, reasonSymbolsChange} {
+	for _, reason := range []string{graph.ReasonNeverGraphed, graph.ReasonContentChange, graph.ReasonSymbolsChange} {
 		fmt.Fprintf(out, "    %s: %d\n", reason, counts[reason])
 	}
 	for i, f := range stale {
@@ -300,67 +284,6 @@ func printGraphStatus(out io.Writer, files []graphFile, fp string) {
 		}
 		fmt.Fprintf(out, "  %s: %s\n", f.path, strings.Join(staleReasons(f, fp), ", "))
 	}
-}
-
-// loadSymbols reads the whole symbol index, ordered by id, joined to its file
-// so each symbol carries its package and path.
-func loadSymbols(ctx context.Context, pool *pgxpool.Pool) ([]graph.Symbol, error) {
-	rows, err := pool.Query(ctx, `
-		SELECT s.id, s.file_id, f.path, f.package, s.name, s.qualified_name,
-		       coalesce(s.receiver, ''), s.kind, s.start_line
-		FROM symbols s JOIN files f ON f.id = s.file_id
-		ORDER BY s.id`)
-	if err != nil {
-		return nil, fmt.Errorf("load symbols: %w", err)
-	}
-	defer rows.Close()
-
-	var out []graph.Symbol
-	for rows.Next() {
-		var s graph.Symbol
-		if err := rows.Scan(&s.ID, &s.FileID, &s.Path, &s.Package, &s.Name,
-			&s.QualifiedName, &s.Receiver, &s.Kind, &s.StartLine); err != nil {
-			return nil, fmt.Errorf("scan symbol: %w", err)
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
-}
-
-// buildNameIndex builds the cross-package declared-name index (spec story 101)
-// by scanning the source of every indexed file once. It covers every indexed
-// package, not only the selected --package, so alias-qualified calls resolve
-// against the whole indexed set (an import path absent from it is external). The
-// package lookup already stores the Go import path (walk.ImportPath maps
-// staging/src/k8s.io/client-go/... to k8s.io/client-go/...), so files.package is
-// the import path and no staging/vendor mapping is added here.
-func buildNameIndex(ctx context.Context, pool *pgxpool.Pool, root string) (*graph.NameIndex, error) {
-	rows, err := pool.Query(ctx, `SELECT path, package FROM files ORDER BY path`)
-	if err != nil {
-		return nil, fmt.Errorf("list indexed files: %w", err)
-	}
-	defer rows.Close()
-
-	names := graph.NewNameIndex()
-	for rows.Next() {
-		var path, pkg string
-		if err := rows.Scan(&path, &pkg); err != nil {
-			return nil, fmt.Errorf("scan indexed file: %w", err)
-		}
-		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		facts, err := graph.SourceFacts(src)
-		if err != nil {
-			return nil, fmt.Errorf("facts %s: %w", path, err)
-		}
-		names.Add(pkg, facts.Declared)
-		names.AddFields(pkg, facts.Fields)
-		names.AddResults(pkg, facts.Results)
-		names.AddInterfaces(pkg, facts.Interfaces)
-	}
-	return names, rows.Err()
 }
 
 // selectGraphFiles returns the files to consider, ordered by package then path,

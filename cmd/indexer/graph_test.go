@@ -693,11 +693,11 @@ func TestGraphResolverVersionBumpStalesFiles(t *testing.T) {
 	pool, root := graphFixture(t)
 	runGraphStage(t, pool, root, graphOptions{})
 
-	symbols, err := loadSymbols(context.Background(), pool)
+	symbols, err := graph.LoadSymbols(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("loadSymbols: %v", err)
 	}
-	names, err := buildNameIndex(context.Background(), pool, root)
+	names, err := graph.BuildNameIndex(context.Background(), pool, root)
 	if err != nil {
 		t.Fatalf("buildNameIndex: %v", err)
 	}
@@ -719,8 +719,8 @@ func TestGraphResolverVersionBumpStalesFiles(t *testing.T) {
 	sha := "same-content"
 	f := graphFile{id: 1, path: "plain/plain.go", pkg: "k8s.io/kubernetes/plain",
 		sha: sha, graphedSHA: &sha, graphedFP: &oldFP}
-	if got := staleReasons(f, newFP); len(got) != 1 || got[0] != reasonSymbolsChange {
-		t.Errorf("staleReasons with the previous version's fingerprint = %v, want [%s]", got, reasonSymbolsChange)
+	if got := graph.StaleReasons(f.sha, f.graphedSHA, f.graphedFP, newFP); len(got) != 1 || got[0] != graph.ReasonSymbolsChange {
+		t.Errorf("staleReasons with the previous version's fingerprint = %v, want [%s]", got, graph.ReasonSymbolsChange)
 	}
 }
 

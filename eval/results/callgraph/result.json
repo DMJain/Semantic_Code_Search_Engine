@@ -1,0 +1,106 @@
+{
+  "scope": "in-slice only: caller and callee both in slice; identity is the (caller, callee) symbol pair",
+  "note": "in-slice only; out-of-slice share 0.1066 (6289 of 59001 stored tree-sitter edges from in-slice callers resolved out of slice); resolved out-of-slice and unresolved units are neither TP nor FP (excluded share 0.7215); precision is over scored_units, recall over gt_pairs, ambiguous_rate and mean_candidates over all units of the kind (so zero-candidate units dilute the mean); a rate with a zero denominator is undefined and is null (n/a in the table); skip counters are in `indexer graph --stats`",
+  "precision": 0.8612538540596094,
+  "recall": 0.8387643624034659,
+  "by_kind": {
+    "concrete_method": {
+      "precision": 0.99869041382923,
+      "recall": 0.9412211806435268,
+      "ambiguous_rate": 0,
+      "mean_candidates": 1,
+      "units": 4196,
+      "scored_units": 3818,
+      "ambiguous_units": 0,
+      "tp": 3813,
+      "gt_pairs": 3947,
+      "found": 3715
+    },
+    "func": {
+      "precision": 0.9977483112334251,
+      "recall": 0.9248038950500406,
+      "ambiguous_rate": 0,
+      "mean_candidates": 1,
+      "units": 7686,
+      "scored_units": 3997,
+      "ambiguous_units": 0,
+      "tp": 3988,
+      "gt_pairs": 3697,
+      "found": 3419
+    },
+    "func_value": {
+      "precision": null,
+      "recall": 0.0025906735751295338,
+      "ambiguous_rate": 0,
+      "mean_candidates": 0,
+      "units": 823,
+      "scored_units": 0,
+      "ambiguous_units": 0,
+      "tp": 0,
+      "gt_pairs": 386,
+      "found": 1
+    },
+    "interface_method": {
+      "precision": 0.7610413761041376,
+      "recall": 0.6843122102009274,
+      "ambiguous_rate": 0.4733664772727273,
+      "mean_candidates": 2.2286931818181817,
+      "units": 2816,
+      "scored_units": 2151,
+      "ambiguous_units": 1333,
+      "tp": 1637,
+      "gt_pairs": 2588,
+      "found": 1771
+    },
+    "unknown": {
+      "precision": 0.36140350877192984,
+      "recall": null,
+      "ambiguous_rate": 0.028514086640411995,
+      "mean_candidates": 0.570925477128143,
+      "units": 26408,
+      "scored_units": 1710,
+      "ambiguous_units": 753,
+      "tp": 618,
+      "gt_pairs": 0,
+      "found": 0
+    }
+  },
+  "counts": {
+    "ts_edges_in_slice_caller": 59001,
+    "ts_edges_all": 262420,
+    "ts_caller_out_of_slice": 203419,
+    "ts_scored_in_slice": 26946,
+    "ts_resolved_out_of_slice": 6289,
+    "ts_unresolved": 25766,
+    "ts_unresolved_by_reason": {
+      "candidates_capped": 19,
+      "external": 7474,
+      "func_value": 823,
+      "no_match": 1490,
+      "unknown_receiver": 15960
+    },
+    "out_of_slice_share": 0.10659141370485246,
+    "precision_universe": 11676,
+    "precision_excluded_share": 0.7215292518304753,
+    "tp": 10056,
+    "fp": 1620,
+    "recall_universe": 10618,
+    "found": 8906,
+    "fn": 1712,
+    "gt_total": 15254,
+    "gt_mapped": 12780,
+    "gt_unmapped": 484,
+    "gt_dropped": {
+      "bound_method": 327,
+      "init": 777,
+      "wrapper": 886
+    },
+    "gt_stored_rows": 12586,
+    "gt_by_kind": {
+      "concrete_method": 4559,
+      "func": 4389,
+      "func_value": 523,
+      "interface_method": 3115
+    }
+  }
+}

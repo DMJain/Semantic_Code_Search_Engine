@@ -49,6 +49,13 @@ const (
 	// DefaultOllamaSummaryNumCtx is the summary request context size (D-015).
 	DefaultOllamaSummaryNumCtx = 4096
 	DefaultKubeDir             = "./data/kubernetes"
+
+	// DefaultCallgraphResultPath and DefaultGTStorePath are the call-graph
+	// evaluation artifacts. The report reads the GT store partition that
+	// callgraph-gt writes, so both commands share one source of truth and the
+	// two paths cannot drift.
+	DefaultCallgraphResultPath = "eval/results/callgraph/result.json"
+	DefaultGTStorePath         = "eval/results/callgraph/gt-store.json"
 )
 
 // Load reads the configuration from the process environment.

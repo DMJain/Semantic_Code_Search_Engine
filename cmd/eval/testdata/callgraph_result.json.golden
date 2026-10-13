@@ -1,0 +1,101 @@
+{
+  "scope": "in-slice only: caller and callee both in slice; identity is the (caller, callee) symbol pair",
+  "note": "in-slice only; out-of-slice share 0.0000 (0 of 6 stored tree-sitter edges from in-slice callers resolved out of slice); resolved out-of-slice and unresolved units are neither TP nor FP (excluded share 0.4000); precision is over scored_units, recall over gt_pairs, ambiguous_rate and mean_candidates over all units of the kind (so zero-candidate units dilute the mean); a rate with a zero denominator is undefined and is null (n/a in the table); skip counters are in `indexer graph --stats`",
+  "precision": 0.6666666666666666,
+  "recall": 0.6666666666666666,
+  "by_kind": {
+    "concrete_method": {
+      "precision": 0,
+      "recall": null,
+      "ambiguous_rate": 0,
+      "mean_candidates": 1,
+      "units": 1,
+      "scored_units": 1,
+      "ambiguous_units": 0,
+      "tp": 0,
+      "gt_pairs": 0,
+      "found": 0
+    },
+    "func": {
+      "precision": 1,
+      "recall": 1,
+      "ambiguous_rate": 0,
+      "mean_candidates": 1,
+      "units": 1,
+      "scored_units": 1,
+      "ambiguous_units": 0,
+      "tp": 1,
+      "gt_pairs": 1,
+      "found": 1
+    },
+    "func_value": {
+      "precision": null,
+      "recall": 0,
+      "ambiguous_rate": 0,
+      "mean_candidates": 0,
+      "units": 1,
+      "scored_units": 0,
+      "ambiguous_units": 0,
+      "tp": 0,
+      "gt_pairs": 1,
+      "found": 0
+    },
+    "interface_method": {
+      "precision": 1,
+      "recall": 1,
+      "ambiguous_rate": 1,
+      "mean_candidates": 2,
+      "units": 1,
+      "scored_units": 1,
+      "ambiguous_units": 1,
+      "tp": 1,
+      "gt_pairs": 1,
+      "found": 1
+    },
+    "unknown": {
+      "precision": null,
+      "recall": null,
+      "ambiguous_rate": 0,
+      "mean_candidates": 0,
+      "units": 1,
+      "scored_units": 0,
+      "ambiguous_units": 0,
+      "tp": 0,
+      "gt_pairs": 0,
+      "found": 0
+    }
+  },
+  "counts": {
+    "ts_edges_in_slice_caller": 6,
+    "ts_edges_all": 6,
+    "ts_caller_out_of_slice": 0,
+    "ts_scored_in_slice": 4,
+    "ts_resolved_out_of_slice": 0,
+    "ts_unresolved": 2,
+    "ts_unresolved_by_reason": {
+      "func_value": 1,
+      "unknown_receiver": 1
+    },
+    "out_of_slice_share": 0,
+    "precision_universe": 3,
+    "precision_excluded_share": 0.4,
+    "tp": 2,
+    "fp": 1,
+    "recall_universe": 3,
+    "found": 2,
+    "fn": 1,
+    "gt_total": 6,
+    "gt_mapped": 3,
+    "gt_unmapped": 0,
+    "gt_dropped": {
+      "init": 2,
+      "wrapper": 1
+    },
+    "gt_stored_rows": 3,
+    "gt_by_kind": {
+      "func": 1,
+      "func_value": 1,
+      "interface_method": 1
+    }
+  }
+}

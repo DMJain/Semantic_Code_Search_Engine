@@ -1409,3 +1409,94 @@ only edges with a callee and lists unresolved rows separately with their reason.
 Checks. `make test` green (throwaway database per test, no new skips); `make
 ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
 actionlint).
+
+### `eval callgraph` precision and recall report (S2 ticket 11)
+
+`go run ./cmd/eval callgraph` compares the tree-sitter graph with the
+`source='gopackages'` ground truth. The scored universe is caller and callee both
+in the slice; identity is the `(caller, callee)` symbol pair and the call line is
+used only to collapse same-line duplicates (D-074). Every stored tree-sitter edge
+from an in-slice caller falls in exactly one bucket and the report asserts the
+buckets sum to the total; the GT side has its own partition that is read from the
+GT store's result file and asserted. The report refuses to run while any file is
+stale (the `graph --status` predicate) and every scoring query filters by
+`source`.
+
+Scored universe (dev DB): 876 in-slice files, 10006 in-slice symbols; 262420
+stored tree-sitter edges of which 59001 have an in-slice caller; 12586 stored
+`gopackages` rows. The 203419 tree-sitter edges from out-of-slice callers are not
+scored.
+
+TS bucket partition (in-slice callers, sums to 59001): `scored_in_slice` 26946,
+`resolved_out_of_slice` 6289, `unresolved` 25766 by reason (external 7474,
+no_match 1490, unknown_receiver 15960, func_value 823, candidates_capped 19). The
+skip counters (`skipped_builtin`, `skipped_conversion`) are in
+`indexer graph --stats`, not stored.
+
+GT partition (`eval/results/callgraph/gt-store.json`, written by the store action
+and asserted by the report): total 15254 = mapped 12780 (pre-dedup) + dropped 1990
+(init 777, bound_method 327, wrapper 886) + gt_unmapped 484; 12586 stored rows
+after 194 `edges_uniq` duplicate collapses.
+
+Headline (in-slice only): **precision 0.8613 (10056/11676), recall 0.8388
+(8906/10618)**. Out-of-slice share 0.1066 (6289/59001); the precision-universe
+excluded share (resolved-out-of-slice plus unresolved units) is 0.7215.
+
+```
+**Call-graph precision/recall (in-slice only).** in-slice only: caller and callee both in slice; identity is the (caller, callee) symbol pair
+
+| kind | precision | recall | ambiguous rate | mean candidates |
+| --- | --- | --- | --- | --- |
+| **overall** | 0.8613 | 0.8388 | | |
+| func | 0.9977 | 0.9248 | 0.0000 | 1.0000 |
+| concrete_method | 0.9987 | 0.9412 | 0.0000 | 1.0000 |
+| interface_method | 0.7610 | 0.6843 | 0.4734 | 2.2287 |
+| func_value | n/a | 0.0026 | 0.0000 | 0.0000 |
+| unknown | 0.3614 | n/a | 0.0285 | 0.5709 |
+
+TS buckets: scored_in_slice 26946, resolved_out_of_slice 6289, unresolved 25766 (sum 59001)
+unresolved by reason: external=7474 no_match=1490 unknown_receiver=15960 func_value=823 candidates_capped=19
+GT partition: total 15254 = mapped 12780 + dropped 1990 + gt_unmapped 484
+precision 10056/11676 TP, recall 8906/10618 found
+out-of-slice share 0.1066; precision-excluded share 0.7215
+```
+
+Rates: precision is over scored units (in-slice candidates), recall over GT
+pairs, and `ambiguous_rate` / `mean_candidates` over all units of the kind
+(including unresolved and zero-candidate units, which dilute the mean). A rate
+with a zero denominator is undefined and is `null` in the JSON (`n/a` in the
+table): `func_value.precision` has no scored unit (tree-sitter never resolves a
+function value, D-073) and `unknown.recall` has no GT pair, so both are undefined
+rather than 0.
+
+By-kind counts behind the table: func precision 3988/3997, recall 3419/3697;
+concrete_method 3813/3818, 3715/3947; interface_method 1637/2151, 1771/2588;
+func_value 0/0 (undefined), 1/386; unknown 618/1710, 0/0 (undefined). Interface
+precision is the ambiguity cost (1333 of 2816 units ambiguous, mean 2.23
+candidates); `func_value` is tree-sitter's known blind spot (SSA call mode,
+D-073), and the `unknown` bucket (the Rule 5 name-only guesses and
+unresolved-receiver units that happen to resolve in slice) is reported
+separately.
+
+Edge counts by source: `treesitter` 262420, `gopackages` 12586. Tree-sitter by
+resolution: exact 75778, name_only 4802, ambiguous 62248, unresolved 119592.
+Tree-sitter by kind: func 57649, concrete_method 18129, interface_method 36499,
+func_value 3804, unknown 146339. GT by kind (stored): func 4389,
+concrete_method 4559, interface_method 3115, func_value 523.
+
+Real run (dev DB, machine otherwise idle; wall times include the `go run` build):
+
+```
+set -a; source .env; set +a
+go run ./cmd/indexer graph --status   # 0 files stale (6.1 s with build)
+GOMEMLIMIT=14GiB go run ./cmd/callgraph-gt   # 21.52 s real, 5,389,205,504 B peak RSS
+go run ./cmd/eval callgraph   # 6.77 s with build
+```
+
+The GT store re-run wrote `eval/results/callgraph/gt-store.json` and reproduced
+the committed counts (total 15254 = 12780 + 1990 + 484, 12586 stored rows, 194
+collapses), so the report's GT partition assertion is against the file the store
+itself produced.
+
+Checks. `make test` green (throwaway database per test, no new skips); `make
+ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck, actionlint).

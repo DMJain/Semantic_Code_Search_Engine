@@ -19,6 +19,8 @@ package main
 import (
 	"flag"
 	"os"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/config"
 )
 
 func main() {
@@ -33,6 +35,7 @@ func run(args []string) int {
 	check := fs.Bool("check", false, "check that the walk and go/packages file sets are equal (falls back to the workspace load because the pinned tag has no vendored client-go; Q-05)")
 	measure := fs.Bool("measure", false, "read-only run: load the slice, build SSA and the VTA call graph over the slice functions only, and write result metadata (Q-04)")
 	out := fs.String("out", defaultMeasureOut, "path for --measure result metadata (ignored by --check and the store)")
+	storeOut := fs.String("store-out", config.DefaultGTStorePath, "path for the store action's GT partition result file (read and asserted by `eval callgraph`)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -42,6 +45,6 @@ func run(args []string) int {
 	case *check:
 		return runCheck()
 	default:
-		return runStore()
+		return runStore(*storeOut)
 	}
 }

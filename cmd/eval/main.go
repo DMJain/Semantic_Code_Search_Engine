@@ -13,6 +13,7 @@ import (
 
 var commands = []cli.Command{
 	{Name: "mine-yield", Short: "probe GitHub for minable merged PRs in the candidate slice", Run: runMineYield},
+	{Name: "callgraph", Short: "precision/recall of the tree-sitter graph versus the ground truth (in-slice)", Run: runCallgraph},
 }
 
 func main() {

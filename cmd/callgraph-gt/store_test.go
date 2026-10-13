@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -123,6 +124,34 @@ func symbolID(t *testing.T, pool *pgxpool.Pool, qn string) int64 {
 // all four call kinds, attributes a closure to its enclosing function, counts
 // dropped synthetic callers, prints gt_unmapped, sums the GT partition and
 // gives identical counts on a second run.
+// TestWriteGTStoreResult writes the committed GT partition file and reads it
+// back: the file carries the partition `eval callgraph` asserts.
+func TestWriteGTStoreResult(t *testing.T) {
+	st := gtStore{
+		Total: 15, Mapped: 13, Unmapped: 0, Rows: 12,
+		Dropped: map[string]int{"init": 1, "wrapper": 1},
+		ByKind:  map[string]int{"func": 8, "concrete_method": 3, "interface_method": 1, "func_value": 1},
+	}
+	path := filepath.Join(t.TempDir(), "gt-store.json")
+	if err := writeGTStoreResult(path, st); err != nil {
+		t.Fatalf("writeGTStoreResult: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var got gtStoreResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Total != st.Total || got.Mapped != st.Mapped || got.Rows != st.Rows {
+		t.Errorf("round trip = %+v, want %+v", got, st)
+	}
+	if got.Dropped["init"] != 1 || got.Dropped["wrapper"] != 1 {
+		t.Errorf("dropped = %+v", got.Dropped)
+	}
+}
+
 func TestStoreGTFixture(t *testing.T) {
 	pool := testdb.New(t)
 	root, err := filepath.Abs("testdata/module")

@@ -1,0 +1,17 @@
+**Call-graph precision/recall (in-slice only).** in-slice only: caller and callee both in slice; identity is the (caller, callee) symbol pair
+
+| kind | precision | recall | ambiguous rate | mean candidates |
+| --- | --- | --- | --- | --- |
+| **overall** | 0.6667 | 0.6667 | | |
+| func | 1.0000 | 1.0000 | 0.0000 | 1.0000 |
+| concrete_method | 0.0000 | n/a | 0.0000 | 1.0000 |
+| interface_method | 1.0000 | 1.0000 | 1.0000 | 2.0000 |
+| func_value | n/a | 0.0000 | 0.0000 | 0.0000 |
+| unknown | n/a | n/a | 0.0000 | 0.0000 |
+
+TS buckets: scored_in_slice 4, resolved_out_of_slice 0, unresolved 2 (sum 6)
+unresolved by reason: external=0 no_match=0 unknown_receiver=1 func_value=1 candidates_capped=0
+GT partition: total 6 = mapped 3 + dropped 3 + gt_unmapped 0
+precision 2/3 TP, recall 2/3 found
+out-of-slice share 0.0000; precision-excluded share 0.4000
+rates: precision over scored_units, recall over gt_pairs, ambiguous rate and mean candidates over all units of the kind; a zero denominator is n/a

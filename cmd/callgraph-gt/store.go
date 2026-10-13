@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"go/types"
 	"io"
@@ -57,10 +58,34 @@ func (s gtStore) check() error {
 	return nil
 }
 
+// gtStoreResult is the committed JSON partition of the GT store run. Total =
+// Mapped + sum(Dropped) + Unmapped, asserted before it is written.
+type gtStoreResult struct {
+	Total    int            `json:"total"`
+	Mapped   int            `json:"mapped"`
+	Unmapped int            `json:"gt_unmapped"`
+	Rows     int            `json:"rows"`
+	Dropped  map[string]int `json:"dropped"`
+	ByKind   map[string]int `json:"by_kind"`
+}
+
+// writeGTStoreResult writes the GT partition result file, creating its
+// directory. `eval callgraph` reads it back and asserts the partition.
+func writeGTStoreResult(path string, st gtStore) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(gtStoreResult(st), "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
 // runStore implements the default action: load the slice, build the VTA graph,
 // map its in-slice edges to symbol ids and replace every source='gopackages'
-// row in one transaction.
-func runStore() int {
+// row in one transaction. It writes the partition to out when out is non-empty.
+func runStore(out string) int {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "callgraph-gt: %v\n", err)
@@ -88,6 +113,12 @@ func runStore() int {
 	if err := st.check(); err != nil {
 		fmt.Fprintf(os.Stderr, "callgraph-gt: %v\n", err)
 		return 2
+	}
+	if out != "" {
+		if err := writeGTStoreResult(out, st); err != nil {
+			fmt.Fprintf(os.Stderr, "callgraph-gt: write %s: %v\n", out, err)
+			return 2
+		}
 	}
 	return 0
 }
@@ -118,9 +149,10 @@ func storeGT(ctx context.Context, pool *pgxpool.Pool, root string, environ []str
 		return st, err
 	}
 
-	// Pass 1 counts every in-slice edge independently of the categorisation
-	// below, so the partition assertion cannot be a tautology: a categorisation
-	// bug (a missed or double-counted edge) makes the sums disagree.
+	// Pass 1 counts every in-slice edge; pass 2 assigns each to exactly one
+	// partition bucket and the check compares the two. It is a structural sum
+	// guard (each edge increments one bucket), not an independent recount, but
+	// it still catches a categorisation that drops or double-counts an edge.
 	for _, n := range sg.graph.Nodes {
 		for _, e := range n.Out {
 			if sg.inSliceEndpoint(e.Caller.Func) && sg.inSliceEndpoint(e.Callee.Func) {
