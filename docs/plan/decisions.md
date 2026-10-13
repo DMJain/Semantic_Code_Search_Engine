@@ -77,7 +77,10 @@ One `edges` row per candidate callee, `resolution='ambiguous'`.
 PRs merged within 12 months before the tag, labeled on the tag's file state. Rules, fallbacks and the leakage filter: [eval-protocol.md#sources](eval-protocol.md#sources). Limitation: the fix is already in the tag.
 
 ## D-025 callgraph-gt invocation (2026-10-08)
-`go list -deps ./pkg/scheduler/...` must succeed inside the clone with the network disabled. Starts from the workspace load (D-071), not `GOWORK=off -mod=vendor`. Working invocation: PENDING (S2 ticket 01).
+`go list -deps ./pkg/scheduler/...` must succeed inside the clone with the network disabled. Starts from the workspace load (D-071), not `GOWORK=off -mod=vendor`.
+Working invocation (S2 ticket 01, refs D-071): inside `data/kubernetes`,
+`GOOS=linux GOARCH=amd64 GOWORK=auto GOTOOLCHAIN=local CGO_ENABLED=0 go list -deps ./pkg/scheduler/... ./pkg/kubelet/... ./pkg/controller/...`
+(client-go is dropped from the frozen slice, D-070). The load is read-only: it builds SSA and VTA in memory and writes no database row. The offline attempt with `GOPROXY=off GOFLAGS=-mod=readonly` FAILS: `k8s.io/klog/v2@v2.140.0` is not in the module cache (`module lookup disabled by GOPROXY=off`), so the workspace load needs the network for that dependency and Q-05 stays open with that reason.
 
 ## D-027 ANN overlap probe set before DEV exists (2026-10-08)
 S3 precedes S4, so S3 measures ANN overlap@10 on 30 seeded queries made from doc-comment first sentences; re-run on DEV in S4 and S8; below 95% means tune `ef_search` first.

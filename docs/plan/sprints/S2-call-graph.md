@@ -120,4 +120,38 @@ Both graphs populated and re-runnable; D-025 filled; call-graph report recorded;
 `indexer graph --stats`, `callgraph-gt`, then `eval callgraph` prints the precision/recall table by call kind.
 
 ## Results
-(empty)
+
+### GT memory measurement (S2 ticket 01, Q-04, Q-05)
+
+Run alone on 2026-10-13 with the model server stopped, no summary or embedding
+job running and no other session on the machine; Go runtime memory limit
+`GOMEMLIMIT=14GiB`. Command:
+
+```
+set -a; source .env; set +a
+GOMEMLIMIT=14GiB /usr/bin/time -l go run ./cmd/callgraph-gt --measure --out eval/results/callgraph/gt-memory.json
+```
+
+Result metadata in `eval/results/callgraph/gt-memory.json`:
+
+| field | value |
+| --- | --- |
+| peak RSS (`peak_rss_bytes`) | 5,407,965,184 bytes (5.04 GiB); `/usr/bin/time -l` agrees (5,407,997,952) |
+| wall time | 13,242 ms (~13.2 s) |
+| packages loaded | 332 |
+| SSA functions | 263,605 |
+| VTA edges | 39,616 |
+| in-slice edges (caller and callee both in slice files) | 14,469 |
+| GOMEMLIMIT | 14GiB |
+| offline load (`GOPROXY=off GOFLAGS=-mod=readonly`) | **FAILED** (`k8s.io/klog/v2@v2.140.0: module lookup disabled by GOPROXY=off`) |
+
+Peak RSS is far under the 16 GiB escalation threshold, so no escalation report
+is needed and Q-04 is closed. The VTA input is the slice functions plus the
+initial (CHA) call graph only. `select count(*) from edges` was 0 before and 0
+after the run: the measurement writes no database row. `go run
+./cmd/callgraph-gt --check` still exits 0 and prints `file-set: equal (876
+files)`. The offline attempt with `GOPROXY=off GOFLAGS=-mod=readonly` fails
+because `k8s.io/klog/v2@v2.140.0` is not in the module cache, so Q-05 stays
+open with that reason (D-025 records the working online invocation; refs
+D-071).
+

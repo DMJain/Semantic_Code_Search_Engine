@@ -95,28 +95,18 @@ func loadSlice(root string, patterns []string, mode loadMode, environ []string) 
 		return res, err
 	}
 
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
 	seen := map[string]bool{}
 	for _, p := range pkgs {
 		for _, e := range p.Errors {
 			res.errs = append(res.errs, e.Error())
 		}
 		for _, abs := range p.GoFiles {
-			if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-				abs = resolved
-			}
-			rel, err := filepath.Rel(root, abs)
-			if err != nil {
-				continue
-			}
-			rel = filepath.ToSlash(rel)
-			if !walk.InSlice(rel) {
-				continue
-			}
-			if rule, excluded := walk.Excluded(root, abs); excluded {
+			rel, rule, included := inSliceRel(root, abs)
+			if rule != "" {
 				res.excluded[rule]++
+				continue
+			}
+			if !included {
 				continue
 			}
 			if !seen[rel] {
@@ -127,6 +117,34 @@ func loadSlice(root string, patterns []string, mode loadMode, environ []string) 
 	}
 	sort.Strings(res.kept)
 	return res, nil
+}
+
+// inSliceRel maps an absolute Go file path to its repo-root-relative slash path
+// and says whether it is in the frozen slice. root may be absolute or not;
+// symlinks are resolved on both sides so the walk and go/packages sets cannot
+// drift. A file is in the slice when walk.InSlice(rel) holds and walk.Excluded
+// does not reject it. rule names the exclusion rule when the file was rejected
+// by Excluded (and is then not in the slice); it is "" otherwise. The mapping
+// is shared by loadSlice and the measurement so the two sides stay identical.
+func inSliceRel(root, abs string) (rel, rule string, included bool) {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if !walk.InSlice(rel) {
+		return rel, "", false
+	}
+	if rule, excluded := walk.Excluded(root, abs); excluded {
+		return rel, rule, false
+	}
+	return rel, "", true
 }
 
 // loadSliceWithFallback tries the pinned invocation first and, when it cannot
