@@ -71,6 +71,9 @@ type Index struct {
 	// value call resolves to a pointer-receiver method and vice versa (Go
 	// auto-addresses).
 	methodsByType map[string]int64
+	// methodsByPkgName maps (package, method name) to every method symbol id of
+	// that name in the package, in symbol-id order, for Rule 5.
+	methodsByPkgName map[string][]int64
 	// interfaces is the set of (package, name) named interface types, so a
 	// known interface receiver is interface_method rather than a concrete one.
 	interfaces map[string]bool
@@ -85,11 +88,12 @@ type fileLine struct {
 // same-name duplicates resolve to the lowest id deterministically.
 func NewIndex(symbols []Symbol) *Index {
 	ix := &Index{
-		byFileLine:     make(map[fileLine]int64, len(symbols)),
-		byPathNameRecv: make(map[string]int64, len(symbols)),
-		funcsByPkgName: make(map[string]int64, len(symbols)),
-		methodsByType:  make(map[string]int64, len(symbols)),
-		interfaces:     make(map[string]bool, len(symbols)),
+		byFileLine:       make(map[fileLine]int64, len(symbols)),
+		byPathNameRecv:   make(map[string]int64, len(symbols)),
+		funcsByPkgName:   make(map[string]int64, len(symbols)),
+		methodsByType:    make(map[string]int64, len(symbols)),
+		methodsByPkgName: make(map[string][]int64, len(symbols)),
+		interfaces:       make(map[string]bool, len(symbols)),
 	}
 	for _, s := range symbols {
 		ix.byFileLine[fileLine{s.Path, s.StartLine}] = s.ID
@@ -105,6 +109,8 @@ func NewIndex(symbols []Symbol) *Index {
 			if _, ok := ix.methodsByType[k]; !ok {
 				ix.methodsByType[k] = s.ID
 			}
+			ix.methodsByPkgName[pkgName(s.Package, s.Name)] = append(
+				ix.methodsByPkgName[pkgName(s.Package, s.Name)], s.ID)
 		case parse.KindInterface:
 			ix.interfaces[pkgName(s.Package, s.Name)] = true
 		}
@@ -122,6 +128,12 @@ func (ix *Index) ConcreteMethod(pkg, typ, method string) (int64, bool) {
 // IsInterface reports whether pkg declares a named interface type typ.
 func (ix *Index) IsInterface(pkg, typ string) bool {
 	return ix.interfaces[pkgName(pkg, typ)]
+}
+
+// MethodsByName returns every method symbol id named name declared in pkg, in
+// symbol-id order, for Rule 5 (an unknown receiver).
+func (ix *Index) MethodsByName(pkg, name string) []int64 {
+	return ix.methodsByPkgName[pkgName(pkg, name)]
 }
 
 // CallerID returns the symbol id of the declaration at path/startLine, falling
@@ -149,11 +161,22 @@ func (ix *Index) SamePackageFunc(pkg, name string) (int64, bool) {
 type NameIndex struct {
 	byPkgName map[string]string
 	packages  map[string]bool
+	// fields maps (package, struct name, field name) to the field's resolved
+	// type, for Rule 3 field chains within one package.
+	fields map[string]TypeRef
+	// results maps (package, function name) to the function's single declared
+	// result resolved type, so a same-package constructor call can be typed.
+	results map[string]TypeRef
 }
 
 // NewNameIndex returns an empty index.
 func NewNameIndex() *NameIndex {
-	return &NameIndex{byPkgName: map[string]string{}, packages: map[string]bool{}}
+	return &NameIndex{
+		byPkgName: map[string]string{},
+		packages:  map[string]bool{},
+		fields:    map[string]TypeRef{},
+		results:   map[string]TypeRef{},
+	}
 }
 
 // Add records one file's package and its package-level declared names, marking
@@ -165,10 +188,40 @@ func (ni *NameIndex) Add(pkg string, declared map[string]string) {
 	}
 }
 
+// AddFields records one file's named struct fields, keyed "<struct>\x00<field>".
+func (ni *NameIndex) AddFields(pkg string, fields map[string]TypeRef) {
+	ni.packages[pkg] = true
+	for key, ref := range fields {
+		ni.fields[pkg+"\x00"+key] = ref
+	}
+}
+
+// AddResults records one file's single-result functions by name.
+func (ni *NameIndex) AddResults(pkg string, results map[string]TypeRef) {
+	ni.packages[pkg] = true
+	for name, ref := range results {
+		ni.results[pkgName(pkg, name)] = ref
+	}
+}
+
 // Declared returns the kind of a package-level name ("type", "func", "var" or
 // "const"), or "" when the package does not declare it.
 func (ni *NameIndex) Declared(pkg, name string) string {
 	return ni.byPkgName[pkgName(pkg, name)]
+}
+
+// FieldType returns the resolved type of structName's field in pkg, if the index
+// records it.
+func (ni *NameIndex) FieldType(pkg, structName, field string) (TypeRef, bool) {
+	ref, ok := ni.fields[pkg+"\x00"+structName+"\x00"+field]
+	return ref, ok
+}
+
+// FunctionResult returns the single declared result type of a same-package
+// function, if the index records one.
+func (ni *NameIndex) FunctionResult(pkg, name string) (TypeRef, bool) {
+	ref, ok := ni.results[pkgName(pkg, name)]
+	return ref, ok
 }
 
 // IsIndexed reports whether pkg is an indexed package (has files).
@@ -185,6 +238,16 @@ func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex) ([]Ed
 		if !ok {
 			continue
 		}
+		// Resolve constructor locals (`x := NewT(...)`) to their constructor's
+		// single declared result type, a package-level fact (spec story 39). The
+		// result carries the declaring file's package path, so a caller file
+		// that binds the same alias to a different package cannot redirect it.
+		ctors := make(map[string]TypeRef, len(d.ConstructorLocals))
+		for name, ctor := range d.ConstructorLocals {
+			if ref, ok := names.FunctionResult(pkg, ctor); ok {
+				ctors[name] = ref
+			}
+		}
 		seen := make(map[callLine]bool)
 		for _, c := range d.Calls {
 			key := callLine{c.Raw, c.Line}
@@ -198,10 +261,11 @@ func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex) ([]Ed
 			case c.Name != "":
 				edges, st = analyzeIdentifier(edges, st, callerID, c, d, pkg, ix, names)
 			case c.Qualifier != "":
-				edges, st = analyzeQualified(edges, st, callerID, c, d, pkg, info.Aliases, ix, names)
+				edges, st = analyzeSelector(edges, st, callerID, c, d, ctors, pkg, info.Aliases, ix, names)
 			default:
-				// A receiver-style selector or a chained call: deferred.
-				st.DeferredSelector++
+				// A selector on a call result (a method chain) or a call on a
+				// call result: the receiver is unknown, so Rule 5 (spec story 56).
+				edges, st = analyzeUnknownReceiver(edges, st, callerID, c, pkg, ix)
 			}
 		}
 	}
@@ -243,26 +307,58 @@ func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, p
 	}), st
 }
 
-// analyzeQualified classifies a selector call `qualifier.Field` whose operand is
-// a bare identifier. It is Rule 3 when the qualifier is a receiver or parameter
-// with a written type, Rule 2 when it is an import alias (a same-package
-// function in the aliased package is exact, an unindexed import path is
-// external, and an indexed package without a matching function is a conversion
-// or no_match), and otherwise a deferred selector. A qualifier shadowed by a
-// local declaration is not a typed name and not an alias, so it stays deferred.
-func analyzeQualified(edges []Edge, st Stats, callerID int64, c Call, d Decl, pkg string, aliases map[string]string, ix *Index, names *NameIndex) ([]Edge, Stats) {
-	if typ, ok := d.Types[c.Qualifier]; ok {
-		return analyzeReceiver(edges, st, callerID, c, typ, pkg, aliases, ix, names, d.TypeParams)
+// analyzeSelector classifies a selector call whose operand is a bare identifier.
+// It is Rule 3 when the qualifier is a receiver, parameter or inferable local
+// with a written type and the (possibly field-chained) type resolves to a named
+// type with that method; a known interface type is counted deferred_interface.
+// It is Rule 2 when the qualifier is an import alias. Anything else (an unknown
+// type, a shadowed local, an embedded-only promotion, a type without that
+// method) has an unknown receiver: Rule 5 (spec story 56).
+func analyzeSelector(edges []Edge, st Stats, callerID int64, c Call, d Decl, ctors map[string]TypeRef, pkg string, aliases map[string]string, ix *Index, names *NameIndex) ([]Edge, Stats) {
+	if base, ok := baseType(c.Qualifier, d, ctors, pkg, aliases, names); ok {
+		if targetPkg, typeName, ok := resolveChain(base, c.Fields, pkg, names); ok {
+			if ix.IsInterface(targetPkg, typeName) {
+				st.DeferredInterface++
+				return edges, st
+			}
+			if id, ok := ix.ConcreteMethod(targetPkg, typeName, c.Field); ok {
+				st.Exact++
+				st.ByKind[KindConcreteMethod]++
+				return append(edges, Edge{
+					CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
+					Resolution: ResolutionExact, CallKind: KindConcreteMethod, CallLine: c.Line,
+				}), st
+			}
+		}
+		return analyzeUnknownReceiver(edges, st, callerID, c, pkg, ix)
 	}
-	if d.Locals[c.Qualifier] {
-		st.DeferredSelector++
-		return edges, st
+	// Rule 2: an import alias, unless a local declaration shadows it (local scope
+	// wins, so the receiver is unknown and Rule 5 applies).
+	if importPath, ok := aliases[c.Qualifier]; ok && !d.Locals[c.Qualifier] {
+		return analyzeAlias(edges, st, callerID, c, importPath, ix, names)
 	}
-	importPath, ok := aliases[c.Qualifier]
-	if !ok {
-		st.DeferredSelector++
-		return edges, st
+	return analyzeUnknownReceiver(edges, st, callerID, c, pkg, ix)
+}
+
+// baseType returns the base type reference of a selector's qualifier: a written
+// type from the function's type environment (a receiver, parameter or inferred
+// local, resolved against the caller file's aliases), or a constructor result
+// already resolved against the declaring file's aliases.
+func baseType(name string, d Decl, ctors map[string]TypeRef, pkg string, aliases map[string]string, names *NameIndex) (TypeRef, bool) {
+	if raw, ok := d.Types[name]; ok {
+		return resolveWrittenType(raw, pkg, aliases, names, d.TypeParams)
 	}
+	if ref, ok := ctors[name]; ok {
+		return ref, true
+	}
+	return TypeRef{}, false
+}
+
+// analyzeAlias classifies an alias-qualified call (Rule 2): a same-package
+// function in the aliased package is exact; an import path with no indexed file
+// is external; an indexed package without a matching function is a declared-type
+// conversion (skipped_conversion) or no_match.
+func analyzeAlias(edges []Edge, st Stats, callerID int64, c Call, importPath string, ix *Index, names *NameIndex) ([]Edge, Stats) {
 	if id, ok := ix.SamePackageFunc(importPath, c.Field); ok {
 		st.Exact++
 		st.ByKind[KindFunc]++
@@ -295,34 +391,96 @@ func analyzeQualified(edges []Edge, st Stats, callerID int64, c Call, d Decl, pk
 	}), st
 }
 
-// analyzeReceiver classifies a selector call on a name whose written type is
-// known (Rule 3): the receiver of the enclosing method or a parameter. When the
-// written type resolves to a named type the package actually declares, a method
-// of that name with a matching receiver base (value or pointer; Go
-// auto-addresses) is exact with kind concrete_method. A known interface type is
-// counted deferred_interface until Rule 4 lands and never stored. Any other form
-// (unknown, type parameter, no such method, embedded-only promotion) stays
-// deferred_selector: types are never guessed.
-func analyzeReceiver(edges []Edge, st Stats, callerID int64, c Call, typ, pkg string, aliases map[string]string, ix *Index, names *NameIndex, typeParams map[string]bool) ([]Edge, Stats) {
-	targetPkg, typeName, ok := receiverType(typ, pkg, aliases, names, typeParams)
-	if !ok {
-		st.DeferredSelector++
-		return edges, st
-	}
-	if ix.IsInterface(targetPkg, typeName) {
-		st.DeferredInterface++
-		return edges, st
-	}
-	if id, ok := ix.ConcreteMethod(targetPkg, typeName, c.Field); ok {
-		st.Exact++
-		st.ByKind[KindConcreteMethod]++
+// analyzeUnknownReceiver classifies a selector call whose receiver is still
+// unknown (Rule 5, spec story 56): every method of the called name in the
+// caller's package is looked up. Exactly one is stored name_only (a guess that
+// always has a callee); several are stored as one ambiguous row per candidate
+// with identical raw text; none is unresolved with reason unknown_receiver.
+// Cross-package widening is deliberately not done.
+func analyzeUnknownReceiver(edges []Edge, st Stats, callerID int64, c Call, pkg string, ix *Index) ([]Edge, Stats) {
+	cands := ix.MethodsByName(pkg, c.Field)
+	switch len(cands) {
+	case 0:
+		st.Unresolved++
+		st.Reasons[ReasonUnknownReceiver]++
+		st.ByKind[KindUnknown]++
 		return append(edges, Edge{
-			CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
-			Resolution: ResolutionExact, CallKind: KindConcreteMethod, CallLine: c.Line,
+			CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
+			Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
+			UnresolvedReason: ReasonUnknownReceiver,
 		}), st
+	case 1:
+		st.NameOnly++
+		st.ByKind[KindUnknown]++
+		return append(edges, Edge{
+			CallerID: callerID, CalleeID: cands[0], CalleeRaw: c.Raw,
+			Resolution: ResolutionNameOnly, CallKind: KindUnknown, CallLine: c.Line,
+		}), st
+	default:
+		for _, id := range cands {
+			edges = append(edges, Edge{
+				CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
+				Resolution: ResolutionAmbiguous, CallKind: KindUnknown, CallLine: c.Line,
+			})
+		}
+		st.Ambiguous += len(cands)
+		st.ByKind[KindUnknown] += len(cands)
+		// An ambiguous call site stores one row per candidate; each row is a
+		// stored edge, so it contributes one call unit to the invariant.
+		st.CallSites += len(cands) - 1
+		return edges, st
 	}
-	st.DeferredSelector++
-	return edges, st
+}
+
+// resolveChain resolves a base type reference followed by a chain of struct
+// field names to a final named type (a concrete package path and name), for
+// Rule 3 field chains within one package (`s.cache.Assume`). Field types carry
+// the package path resolved in the declaring file, so a caller file that binds
+// the same alias to a different package cannot redirect a step. A base that is
+// not a named type, a field chain that leaves the package, or a field whose type
+// is unknown or embedded (promotion is unseen) returns ok=false.
+func resolveChain(base TypeRef, fields []string, pkg string, names *NameIndex) (string, string, bool) {
+	targetPkg, typeName := refPkg(base.Pkg, pkg), base.Name
+	if typeName == "" || !declaresType(names, targetPkg, typeName) {
+		return "", "", false
+	}
+	for _, field := range fields {
+		if targetPkg != pkg {
+			return "", "", false
+		}
+		ref, ok := names.FieldType(pkg, typeName, field)
+		if !ok {
+			return "", "", false
+		}
+		targetPkg, typeName = refPkg(ref.Pkg, pkg), ref.Name
+		if typeName == "" || !declaresType(names, targetPkg, typeName) {
+			return "", "", false
+		}
+	}
+	return targetPkg, typeName, true
+}
+
+// refPkg returns a concrete package path for a resolved type reference: the
+// stored path, or fallback when the reference is same-package (Pkg "").
+func refPkg(pkg, fallback string) string {
+	if pkg == "" {
+		return fallback
+	}
+	return pkg
+}
+
+// resolveWrittenType resolves a written type text (a receiver, parameter or
+// inferred-local type from the same file) to a TypeRef against the caller file's
+// aliases, normalising a same-package type to an empty Pkg.
+func resolveWrittenType(raw, pkg string, aliases map[string]string, names *NameIndex, typeParams map[string]bool) (TypeRef, bool) {
+	target, name, ok := receiverType(raw, pkg, aliases, names, typeParams)
+	if !ok {
+		return TypeRef{}, false
+	}
+	if target == pkg {
+		target = ""
+	}
+	return TypeRef{Pkg: target, Name: name}, true
 }
 
 // receiverType resolves a written type text to a named type: a bare identifier
@@ -386,37 +544,70 @@ func Fingerprint(symbols []Symbol, names *NameIndex, resolverVersion int) string
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// digest renders the declared-name index deterministically: packages sorted by
-// import path, each package's declared names sorted, with each name's kind.
+// digest renders the resolver index deterministically: declared names (with
+// kind), struct fields (with resolved type) and function single results (with
+// resolved type), each package's entries sorted. It is order-independent so the
+// same facts inserted in any order give the same fingerprint.
 func (ni *NameIndex) digest() string {
-	byPkg := make(map[string][]string, len(ni.packages))
-	for p := range ni.packages {
-		byPkg[p] = nil
-	}
-	for k, kind := range ni.byPkgName {
-		i := strings.IndexByte(k, 0)
-		if i < 0 {
-			continue
+	var b strings.Builder
+	{
+		byPkg := make(map[string][]string, len(ni.packages))
+		for p := range ni.packages {
+			byPkg[p] = nil
 		}
-		pkg, name := k[:i], k[i+1:]
-		byPkg[pkg] = append(byPkg[pkg], name+"\x00"+kind)
+		for k, kind := range ni.byPkgName {
+			i := strings.IndexByte(k, 0)
+			if i < 0 {
+				continue
+			}
+			pkg, name := k[:i], k[i+1:]
+			byPkg[pkg] = append(byPkg[pkg], name+"\x00"+kind)
+		}
+		writeDigest(&b, "decl", byPkg)
 	}
+	{
+		byPkg := map[string][]string{}
+		for k, ref := range ni.fields {
+			i := strings.IndexByte(k, 0)
+			if i < 0 {
+				continue
+			}
+			pkg, rest := k[:i], k[i+1:]
+			byPkg[pkg] = append(byPkg[pkg], rest+"\x00"+ref.Pkg+"\x00"+ref.Name)
+		}
+		writeDigest(&b, "field", byPkg)
+	}
+	{
+		byPkg := map[string][]string{}
+		for k, ref := range ni.results {
+			i := strings.IndexByte(k, 0)
+			if i < 0 {
+				continue
+			}
+			pkg, name := k[:i], k[i+1:]
+			byPkg[pkg] = append(byPkg[pkg], name+"\x00"+ref.Pkg+"\x00"+ref.Name)
+		}
+		writeDigest(&b, "result", byPkg)
+	}
+	return b.String()
+}
+
+// writeDigest renders one section (tag) of package keyed entries, packages and
+// entries sorted, so the output is deterministic.
+func writeDigest(b *strings.Builder, tag string, byPkg map[string][]string) {
 	pkgs := make([]string, 0, len(byPkg))
 	for p := range byPkg {
 		pkgs = append(pkgs, p)
 	}
 	sort.Strings(pkgs)
-
-	var b strings.Builder
 	for _, p := range pkgs {
-		decls := byPkg[p]
-		sort.Strings(decls)
-		fmt.Fprintf(&b, "pkg\x00%s\n", p)
-		for _, d := range decls {
-			fmt.Fprintf(&b, "decl\x00%s\x00%s\n", p, d)
+		entries := byPkg[p]
+		sort.Strings(entries)
+		fmt.Fprintf(b, "pkg\x00%s\n", p)
+		for _, e := range entries {
+			fmt.Fprintf(b, "%s\x00%s\x00%s\n", tag, p, e)
 		}
 	}
-	return b.String()
 }
 
 type callLine struct {

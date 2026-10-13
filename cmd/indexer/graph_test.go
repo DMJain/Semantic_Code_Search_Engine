@@ -56,7 +56,7 @@ func edgesFor(t *testing.T, pool *pgxpool.Pool, callerQN string) []edgeRow {
 		JOIN symbols caller ON caller.id = e.caller_id
 		LEFT JOIN symbols c ON c.id = e.callee_id
 		WHERE e.source = 'treesitter' AND caller.qualified_name = $1
-		ORDER BY e.call_line, e.callee_raw`, callerQN)
+		ORDER BY e.call_line, e.callee_raw, coalesce(c.qualified_name, '')`, callerQN)
 	if err != nil {
 		t.Fatalf("query edges: %v", err)
 	}
@@ -101,6 +101,7 @@ func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 	got := edgesFor(t, pool, "k8s.io/kubernetes/plain.caller")
 	want := []edgeRow{
 		{"exact", "", "func", "Target", 8, "k8s.io/kubernetes/plain.Target"},
+		{"unresolved", "unknown_receiver", "unknown", "a.Method", 14, ""},
 		{"unresolved", "no_match", "unknown", "Missing", 15, ""},
 		{"exact", "", "func", "Target", 16, "k8s.io/kubernetes/plain.Target"},
 	}
@@ -108,17 +109,17 @@ func TestGraphStagePlainFixtureGoldens(t *testing.T) {
 
 	for _, line := range []string{
 		"resolution exact: 2",
-		"resolution unresolved: 1",
+		"resolution unresolved: 2",
 		"reason no_match: 1",
+		"reason unknown_receiver: 1",
 		"reason external: 0",
 		"call kind func: 2",
-		"call kind unknown: 1",
+		"call kind unknown: 2",
 		"skipped_builtin: 2",
 		"skipped_conversion: 1",
 		"deferred_local: 1",
-		"deferred_selector: 1",
 		"deferred_interface: 0",
-		"invariant: call sites 8 = stored 3 + skipped 3 + deferred 2 [ok]",
+		"invariant: call sites 8 = stored 4 + skipped 3 + deferred 1 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -185,15 +186,22 @@ func TestGraphStageAliasGoldens(t *testing.T) {
 	// so it is a stored no_match rather than an exact edge.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callDot"),
 		[]edgeRow{{"unresolved", "no_match", "unknown", "DotOnly", 23, ""}})
-	// Blank import ignored: it adds no alias, so the qualifier is unknown and the
-	// call stays deferred.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callBlank"), nil)
+	// Blank import ignored: it adds no alias, so the qualifier is unknown and,
+	// under Rule 5, the method name is looked up in the caller's package; there
+	// is no BlankOnly method, so the call is unresolved unknown_receiver.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callBlank"),
+		[]edgeRow{{"unresolved", "unknown_receiver", "unknown", "blankpkg.BlankOnly", 27, ""}})
 	// Conversion to a declared non-struct type is skipped, never stored.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callConvert"), nil)
 	// External: klog is not an indexed package, so the inner klog.V(2) call is
-	// stored unresolved external; the outer chained call stays deferred.
+	// stored unresolved external; the outer chained call has an unknown receiver
+	// and Rule 5 finds exactly one same-package method named InfoS, so it is
+	// stored name_only.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callExternal"),
-		[]edgeRow{{"unresolved", "external", "unknown", "klog.V", 35, ""}})
+		[]edgeRow{
+			{"unresolved", "external", "unknown", "klog.V", 35, ""},
+			{"name_only", "", "unknown", "klog.V(2).InfoS", 35, "k8s.io/kubernetes/alias.(fakeKlog).InfoS"},
+		})
 	// A missed symbol in an indexed package is no_match.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callMissing"),
 		[]edgeRow{{"unresolved", "no_match", "unknown", "depone.Missing", 39, ""}})
@@ -202,22 +210,26 @@ func TestGraphStageAliasGoldens(t *testing.T) {
 		[]edgeRow{{"exact", "", "func", "cache.SomeFunc", 43, "k8s.io/client-go/tools/cache.SomeFunc"}})
 	// A parameter named like the alias shadows the alias (Rule 2 does not
 	// apply), but its own written type *fakeKlog is known, so Rule 3 resolves
-	// the inner klog.V to the concrete method; the outer chained call stays
-	// deferred.
+	// the inner klog.V to the concrete method; the outer chained call has an
+	// unknown receiver, and Rule 5 finds the one same-package InfoS method.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callShadowed"),
-		[]edgeRow{{"exact", "", "concrete_method", "klog.V", 47, "k8s.io/kubernetes/alias.(fakeKlog).V"}})
+		[]edgeRow{
+			{"exact", "", "concrete_method", "klog.V", 47, "k8s.io/kubernetes/alias.(fakeKlog).V"},
+			{"name_only", "", "unknown", "klog.V(2).InfoS", 47, "k8s.io/kubernetes/alias.(fakeKlog).InfoS"},
+		})
 
 	for _, line := range []string{
 		"resolution exact: 4",
-		"resolution unresolved: 3",
+		"resolution name_only: 2",
+		"resolution unresolved: 4",
 		"reason external: 1",
 		"reason no_match: 2",
+		"reason unknown_receiver: 1",
 		"call kind func: 3",
 		"call kind concrete_method: 1",
-		"call kind unknown: 3",
+		"call kind unknown: 6",
 		"skipped_conversion: 1",
-		"deferred_selector: 3",
-		"invariant: call sites 11 = stored 7 + skipped 1 + deferred 3 [ok]",
+		"invariant: call sites 11 = stored 10 + skipped 1 + deferred 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -251,26 +263,154 @@ func TestGraphStageMethodGoldens(t *testing.T) {
 	// An interface-typed parameter is interface_method and counted
 	// deferred_interface; no Rule 4 row is stored yet.
 	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.interfaceParam"), nil)
-	// Embedded structs are left unknown: M is promoted from Inner but never seen.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.embeddedUnknown"), nil)
-	// A parameter shadowed by an inner := is unknown, so the call is deferred and
-	// never a wrong exact.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.shadowedParameter"), nil)
-	// A type-switch guard binding a name that shadows a receiver is unknown, so
-	// the call inside the case is deferred and never the outer receiver's method.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.typeSwitchShadow"), nil)
-	// A receive-statement binding that shadows a receiver is unknown too.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.receiveShadow"), nil)
-	// A bare type that is the declaration's own type parameter is never guessed,
-	// even when the package declares a type of the same name with that method.
-	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.typeParam"), nil)
+	// Embedded structs are left unknown: M is promoted from Inner but never
+	// seen, so the receiver is unknown and Rule 5 stores one ambiguous row per
+	// same-package method named M.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.embeddedUnknown"),
+		[]edgeRow{
+			{"ambiguous", "", "unknown", "o.M", 57, "k8s.io/kubernetes/methods.(Box).M"},
+			{"ambiguous", "", "unknown", "o.M", 57, "k8s.io/kubernetes/methods.(Crate).M"},
+			{"ambiguous", "", "unknown", "o.M", 57, "k8s.io/kubernetes/methods.(Inner).M"},
+			{"ambiguous", "", "unknown", "o.M", 57, "k8s.io/kubernetes/methods.(T).M"},
+		})
+	// A parameter shadowed by an inner := is unknown: Rule 5 again, never a
+	// wrong exact.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.shadowedParameter"),
+		[]edgeRow{
+			{"ambiguous", "", "unknown", "x.M", 62, "k8s.io/kubernetes/methods.(Box).M"},
+			{"ambiguous", "", "unknown", "x.M", 62, "k8s.io/kubernetes/methods.(Crate).M"},
+			{"ambiguous", "", "unknown", "x.M", 62, "k8s.io/kubernetes/methods.(Inner).M"},
+			{"ambiguous", "", "unknown", "x.M", 62, "k8s.io/kubernetes/methods.(T).M"},
+		})
+	// A type-switch guard binding a name that shadows a receiver is unknown:
+	// Rule 5 finds both Tick methods.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.typeSwitchShadow"),
+		[]edgeRow{
+			{"ambiguous", "", "unknown", "s.Tick", 68, "k8s.io/kubernetes/methods.(*Scheduler).Tick"},
+			{"ambiguous", "", "unknown", "s.Tick", 68, "k8s.io/kubernetes/methods.(Widget).Tick"},
+		})
+	// A receive-statement binding that shadows a receiver is unknown too; Rule 5
+	// finds the one Run method, so it is a name_only guess with a callee.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.receiveShadow"),
+		[]edgeRow{{"name_only", "", "unknown", "s.Run", 75, "k8s.io/kubernetes/methods.(*Scheduler).Run"}})
+	// A bare type that is the declaration's own type parameter is never guessed
+	// as a concrete type, so Rule 5 stores one ambiguous row per same-name
+	// method.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/methods.typeParam"),
+		[]edgeRow{
+			{"ambiguous", "", "unknown", "x.M", 84, "k8s.io/kubernetes/methods.(Box).M"},
+			{"ambiguous", "", "unknown", "x.M", 84, "k8s.io/kubernetes/methods.(Crate).M"},
+			{"ambiguous", "", "unknown", "x.M", 84, "k8s.io/kubernetes/methods.(Inner).M"},
+			{"ambiguous", "", "unknown", "x.M", 84, "k8s.io/kubernetes/methods.(T).M"},
+		})
 
 	for _, line := range []string{
 		"resolution exact: 6",
+		"resolution name_only: 1",
+		"resolution ambiguous: 14",
+		"resolution unresolved: 0",
 		"call kind concrete_method: 6",
-		"deferred_selector: 5",
+		"call kind unknown: 15",
+		"deferred_local: 0",
 		"deferred_interface: 1",
-		"invariant: call sites 12 = stored 6 + skipped 0 + deferred 6 [ok]",
+		"invariant: call sites 22 = stored 21 + skipped 0 + deferred 1 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphStageLocalsGoldens covers the inferred local type environment and
+// same-package facts (spec story 39): `var x T`, `var x = T{}`, `x := T{}`,
+// `x := &T{}` and a single-result constructor all resolve via Rule 3; a
+// two-result constructor stays unknown (Rule 5); a struct field chain
+// `s.cache.Assume` resolves through the field type; an embedded struct's
+// promoted method is unseen (Rule 5); a shadowed local is unknown (Rule 5); and
+// a method chain `a.B().C()` has an unknown receiver for the outer call (Rule
+// 5) while the inner call is Rule 3.
+func TestGraphStageLocalsGoldens(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/locals", Stats: true})
+
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.varDecl"),
+		[]edgeRow{{"exact", "", "concrete_method", "x.M", 34, "k8s.io/kubernetes/locals.(T).M"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.varLiteral"),
+		[]edgeRow{{"exact", "", "concrete_method", "x.M", 39, "k8s.io/kubernetes/locals.(T).M"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.composite"),
+		[]edgeRow{{"exact", "", "concrete_method", "x.M", 44, "k8s.io/kubernetes/locals.(T).M"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.address"),
+		[]edgeRow{{"exact", "", "concrete_method", "x.M", 49, "k8s.io/kubernetes/locals.(T).M"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.constructor"),
+		[]edgeRow{
+			{"exact", "", "func", "NewT", 53, "k8s.io/kubernetes/locals.NewT"},
+			{"exact", "", "concrete_method", "x.M", 54, "k8s.io/kubernetes/locals.(T).M"},
+		})
+	// NewT2 has two results, so x stays unknown and x.M is a Rule 5 name_only.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.constructorTwo"),
+		[]edgeRow{
+			{"exact", "", "func", "NewT2", 58, "k8s.io/kubernetes/locals.NewT2"},
+			{"name_only", "", "unknown", "x.M", 59, "k8s.io/kubernetes/locals.(T).M"},
+		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.fieldChain"),
+		[]edgeRow{{"exact", "", "concrete_method", "s.cache.Assume", 63, "k8s.io/kubernetes/locals.(*Cache).Assume"}})
+	// Promoted from the embedded Inner, so the receiver is unknown and Rule 5
+	// stores the one same-package Promoted method as name_only.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.embedded"),
+		[]edgeRow{{"name_only", "", "unknown", "o.Promoted", 67, "k8s.io/kubernetes/locals.(Inner).Promoted"}})
+	// A redeclared local is unknown; Rule 5 stores the one M method.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.shadowed"),
+		[]edgeRow{{"name_only", "", "unknown", "x.M", 74, "k8s.io/kubernetes/locals.(T).M"}})
+	// The inner a.B is Rule 3; the outer chain has an unknown receiver and Rule 5
+	// finds the one C method.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/locals.chain"),
+		[]edgeRow{
+			{"exact", "", "concrete_method", "a.B", 79, "k8s.io/kubernetes/locals.(*Builder).B"},
+			{"name_only", "", "unknown", "a.B().C", 79, "k8s.io/kubernetes/locals.(*Builder).C"},
+		})
+
+	for _, line := range []string{
+		"resolution exact: 9",
+		"resolution name_only: 4",
+		"resolution ambiguous: 0",
+		"resolution unresolved: 0",
+		"call kind func: 2",
+		"call kind concrete_method: 7",
+		"call kind unknown: 4",
+		"invariant: call sites 13 = stored 13 + skipped 0 + deferred 0 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphStageRule5Goldens covers Rule 5 (spec story 56) with a controlled
+// package: one same-package method named Only gives a name_only row with a
+// callee, two named Two give two ambiguous rows with identical raw text, and no
+// method named Missing gives one unresolved row with reason unknown_receiver.
+func TestGraphStageRule5Goldens(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/rule5", Stats: true})
+
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/rule5.one"),
+		[]edgeRow{{"name_only", "", "unknown", "y.Only", 16, "k8s.io/kubernetes/rule5.(A).Only"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/rule5.two"),
+		[]edgeRow{
+			{"ambiguous", "", "unknown", "y.Two", 20, "k8s.io/kubernetes/rule5.(B).Two"},
+			{"ambiguous", "", "unknown", "y.Two", 20, "k8s.io/kubernetes/rule5.(C).Two"},
+		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/rule5.none"),
+		[]edgeRow{{"unresolved", "unknown_receiver", "unknown", "y.Missing", 24, ""}})
+
+	for _, line := range []string{
+		"resolution exact: 0",
+		"resolution name_only: 1",
+		"resolution ambiguous: 2",
+		"resolution unresolved: 1",
+		"reason unknown_receiver: 1",
+		"call kind unknown: 4",
+		"invariant: call sites 4 = stored 4 + skipped 0 + deferred 0 [ok]",
 	} {
 		if !bytes.Contains([]byte(out), []byte(line)) {
 			t.Errorf("stats output missing %q\n%s", line, out)
@@ -390,8 +530,8 @@ func TestGraphStageRerunIdempotent(t *testing.T) {
 		`SELECT count(*) FROM edges WHERE (resolution = 'unresolved') <> (callee_id IS NULL)`); n != 0 {
 		t.Errorf("rows breaking the unresolved shape = %d, want 0", n)
 	}
-	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 17 {
-		t.Errorf("tree-sitter edge count = %d, want 17", n)
+	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 53 {
+		t.Errorf("tree-sitter edge count = %d, want 53", n)
 	}
 }
 
@@ -596,8 +736,8 @@ func TestGraphStatusNeverGraphed(t *testing.T) {
 	pool, root := graphFixture(t)
 
 	before := runGraphStage(t, pool, root, graphOptions{Status: true})
-	if !strings.Contains(before, "11 files stale") || !strings.Contains(before, "never graphed: 11") {
-		t.Errorf("status before graphing should list 11 never-graphed files:\n%s", before)
+	if !strings.Contains(before, "13 files stale") || !strings.Contains(before, "never graphed: 13") {
+		t.Errorf("status before graphing should list 13 never-graphed files:\n%s", before)
 	}
 	if !strings.Contains(before, "plain.go: never graphed") {
 		t.Errorf("status should name the never-graphed file:\n%s", before)

@@ -5,10 +5,13 @@ import "fmt"
 // Stats reconciles call sites for one graph run. Every unique call site
 // (enclosing caller, raw callee text, call line) is counted exactly once, so
 // CallSites equals the sum of stored resolutions plus the skip and deferred
-// counters (the S2 invariant). The per-(resolution, reason) counts sum to the
-// stored rows.
+// counters (the S2 invariant). An ambiguous call site stores one row per
+// candidate, and each such row counts as one call unit, so CallSites equals the
+// stored rows plus the skip and deferred counters. The per-(resolution, reason)
+// counts sum to the stored rows.
 type Stats struct {
-	// CallSites is the number of unique call sites seen.
+	// CallSites is the number of call units seen: one per unique call site, plus
+	// one extra per additional ambiguous candidate row.
 	CallSites int
 	// Stored rows by resolution.
 	Exact      int
@@ -23,7 +26,6 @@ type Stats struct {
 	SkippedBuiltin    int
 	SkippedConversion int
 	// Deferred counters: kinds not yet handled, never counted as no_match.
-	DeferredSelector  int
 	DeferredLocal     int
 	DeferredInterface int
 	// InterfacesPartial counts interfaces with an unresolvable embedded
@@ -44,7 +46,7 @@ func (s Stats) Skipped() int { return s.SkippedBuiltin + s.SkippedConversion }
 
 // Deferred is the number of call sites counted by deferred counters.
 func (s Stats) Deferred() int {
-	return s.DeferredSelector + s.DeferredLocal + s.DeferredInterface
+	return s.DeferredLocal + s.DeferredInterface
 }
 
 // Add merges another Stats into s.
@@ -62,7 +64,6 @@ func (s *Stats) Add(o Stats) {
 	}
 	s.SkippedBuiltin += o.SkippedBuiltin
 	s.SkippedConversion += o.SkippedConversion
-	s.DeferredSelector += o.DeferredSelector
 	s.DeferredLocal += o.DeferredLocal
 	s.DeferredInterface += o.DeferredInterface
 	s.InterfacesPartial += o.InterfacesPartial

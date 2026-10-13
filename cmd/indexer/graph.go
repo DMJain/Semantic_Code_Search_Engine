@@ -282,11 +282,13 @@ func buildNameIndex(ctx context.Context, pool *pgxpool.Pool, root string) (*grap
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
-		declared, err := graph.DeclaredNames(src)
+		facts, err := graph.SourceFacts(src)
 		if err != nil {
-			return nil, fmt.Errorf("declared names %s: %w", path, err)
+			return nil, fmt.Errorf("facts %s: %w", path, err)
 		}
-		names.Add(pkg, declared)
+		names.Add(pkg, facts.Declared)
+		names.AddFields(pkg, facts.Fields)
+		names.AddResults(pkg, facts.Results)
 	}
 	return names, rows.Err()
 }
@@ -407,7 +409,6 @@ func printGraphStats(out io.Writer, s graph.Stats) {
 	fmt.Fprintf(out, "unresolved: %d\n", s.Unresolved)
 	fmt.Fprintf(out, "skipped_builtin: %d\n", s.SkippedBuiltin)
 	fmt.Fprintf(out, "skipped_conversion: %d\n", s.SkippedConversion)
-	fmt.Fprintf(out, "deferred_selector: %d\n", s.DeferredSelector)
 	fmt.Fprintf(out, "deferred_local: %d\n", s.DeferredLocal)
 	fmt.Fprintf(out, "deferred_interface: %d\n", s.DeferredInterface)
 	fmt.Fprintf(out, "interfaces_partial: %d\n", s.InterfacesPartial)

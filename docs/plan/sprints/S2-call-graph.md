@@ -890,3 +890,170 @@ no `call_kind`; only the `deferred_interface` counter moves (the `interface_meth
 kind is not observable until Rule 4 lands).
 
 
+### Locals, fields, constructors and unknown receivers (S2 ticket 06)
+
+What changed. The per-function type environment now also infers local variable
+types (spec story 39): `var x T` and `var x = T{...}` give x the written type T,
+`x := T{...}` and `x := &T{...}` give T (the leading `&` is stripped), and
+`x := NewT(...)` records the constructor name for the resolver to resolve
+through the package's single declared result type. A local redeclared in the
+body (twice, or shadowing the receiver or a parameter) is left unknown, matching
+the flat per-declaration scope. The surviving `deferred_selector` call sites are
+now classified: a selector whose receiver type is known resolves via Rule 3; a
+selector whose receiver is still unknown (an unknown type, a shadowed local, an
+embedded-only promotion, a type parameter, a method chain `a.B().C()`, or a
+known type without that method) reaches Rule 5. Rule 5 looks up every method of
+the called name in the caller's package only: one is `name_only` with that
+callee, several are one `ambiguous` row per candidate with identical raw text,
+none is `unresolved` with reason `unknown_receiver`. `deferred_selector` is
+removed from the code and `--stats`; `deferred_local` and `deferred_interface`
+stay.
+
+Type inference and field chains. `extractDecl` builds `Decl.Types` from the
+receiver and parameters (as before) and then `addInferredLocals` walks the body:
+`inferLocals` counts every local declaration (short var, var, range, receive,
+type-switch guard, function-literal parameter and const) so a redeclaration
+makes a name unknown, and infers a type only for a single-name short var or var
+declaration whose initialiser is a composite literal (or its address) or a bare
+same-package constructor call; every other initialiser is unknown and never
+guessed. Constructor results are a package-level fact: the names-only pass now
+also collects each named struct's field written types (grouped `a, b T` give
+both names T; an embedded field is skipped) and each function's single declared
+result type, both merged into the cross-package `NameIndex` and its freshness
+digest. `resolveChain` walks a field chain `s.cache.Assume` within the package:
+it resolves the base type, then each intermediate field through the struct field
+map, then the final method via Rule 3. A chain that leaves the package or hits an
+unknown or embedded field is unknown and falls to Rule 5. Embedded structs are
+never expanded, so their promoted methods are unseen: the glossary now states
+this for Rules 3 and 5 as well as Rule 4.
+
+Rule 5 and the invariant. Rule 5 rows carry `call_kind='unknown'` (spec story
+44's "otherwise unknown"), since the receiver type is not known. An ambiguous
+call site stores one row per candidate, and each row is a stored edge, so it
+adds one call unit to `Stats.CallSites`; the invariant `call sites = stored +
+skipped + deferred` therefore still holds with the ambiguous rows (an ambiguous
+site with N candidates counts N call units). The resolver version is bumped
+3 -> 4.
+
+Fixture goldens (`cmd/indexer/testdata/graph/`, real Postgres). A new `locals`
+package exercises `var x T`, `var x = T{}`, `x := T{}`, `x := &T{}`, a
+single-result constructor (`x := NewT()` then `x.M()` -> Rule 3 exact), a
+two-result constructor (`x := NewT2()` -> unknown, Rule 5 name_only), the field
+chain `s.cache.Assume` -> Rule 3 exact `(*Cache).Assume`, an embedded `Outer`
+whose promoted `Promoted` is unseen (Rule 5 name_only), a shadowed local (Rule 5
+name_only), and the method chain `a.B().C()` (inner `a.B` Rule 3 exact, outer
+Rule 5 name_only): `invariant: call sites 13 = stored 13 + skipped 0 + deferred
+0 [ok]`, exact 9 (func 2, concrete_method 7), name_only 4. A new `rule5` package
+pins Rule 5's three outcomes exactly: `y.Only()` -> one match, `name_only` with
+callee `(A).Only`; `y.Two()` -> two matches, two `ambiguous` rows with identical
+raw text and callees `(B).Two`/`(C).Two`; `y.Missing()` -> none,
+`unresolved`/`unknown_receiver` with a NULL callee (`invariant: call sites 4 =
+stored 4 + skipped 0 + deferred 0 [ok]`).
+
+Existing goldens changed as intended: `plain`'s `a.Method()` (a Foo with no such
+method) is now `unresolved`/`unknown_receiver` instead of deferred (invariant
+`call sites 8 = stored 4 + skipped 3 + deferred 1`); `alias`'s blank-import call
+is `unresolved`/`unknown_receiver` and the two chained `klog.V(2).InfoS` calls
+now resolve through Rule 5 to the one same-package `InfoS` method as `name_only`
+(invariant `call sites 11 = stored 10 + skipped 1 + deferred 0`); `methods`'
+embedded, shadowed, type-switch, receive and type-parameter selectors now reach
+Rule 5: `embeddedUnknown`, `shadowedParameter` and `typeParam` each give four
+`ambiguous` rows (M on Box/Crate/Inner/T), `typeSwitchShadow` gives two
+(Scheduler/Widget Tick), `receiveShadow` gives one `name_only` (Scheduler Run)
+(invariant `call sites 22 = stored 21 + skipped 0 + deferred 1`, exact 6,
+name_only 1, ambiguous 14, deferred_interface 1).
+
+Real runs (dev DB, `--package`, the rest of the tree stays stale until ticket
+09). Two scheduler packages:
+
+```
+$ go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/scheduler --stats
+5 files to graph
+graphed 5 files, stored 1287 edges
+edges stored: 1287
+  resolution exact: 464
+  resolution name_only: 29
+  resolution ambiguous: 0
+  resolution unresolved: 794
+  reason external: 236
+  reason no_match: 73
+  reason unknown_receiver: 485
+call kind func: 282
+call kind concrete_method: 182
+call kind unknown: 823
+skipped_builtin: 159
+skipped_conversion: 4
+deferred_local: 25
+deferred_interface: 137
+invariant: call sites 1612 = stored 1287 + skipped 163 + deferred 162 [ok]
+
+$ go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/scheduler/backend/cache --stats
+5 files to graph
+graphed 5 files, stored 649 edges
+edges stored: 649
+  resolution exact: 220
+  resolution name_only: 23
+  resolution ambiguous: 120
+  resolution unresolved: 286
+  reason external: 92
+  reason no_match: 6
+  reason unknown_receiver: 188
+call kind func: 149
+call kind concrete_method: 71
+call kind unknown: 429
+skipped_builtin: 183
+skipped_conversion: 0
+deferred_local: 0
+deferred_interface: 3
+percent ambiguous: 18.5%
+invariant: call sites 835 = stored 649 + skipped 183 + deferred 3 [ok]
+```
+
+Both invariants pass and `deferred_selector` is gone. In `pkg/scheduler` the
+previous ticket's `deferred_selector: 710` is now 464 exact (func 282 +
+concrete_method 182) + 29 name_only + 485 unknown_receiver + 73 no_match (+ 236
+external); concrete_method grew 158 -> 182. In `backend/cache` the previous
+deferred selectors are 220 exact + 23 name_only + 120 ambiguous + 188
+unknown_receiver + 6 no_match. DB check: 0 rows break the unresolved shape rule,
+120 `ambiguous` rows, 0 `name_only` rows with a NULL callee.
+
+Review fixes (same ticket). Three corrections after review. (1) A grouped named
+result `func F() (a, b T)` is two results, not one: `singleResult` now counts
+result NAMES per `parameter_declaration` (so `(a, b T)`, `(T, error)` and
+`NoResult()` are not constructors). (2) The same-package facts are part of the
+freshness fingerprint: D-076 is amended (2026-10-14) to cover named struct field
+types and single-result constructor return types, with tests that changing either
+changes the digest. (3) A qualified field or constructor result type is resolved
+against the DECLARING file's import aliases at extraction time and stored as an
+import path (`TypeRef{Pkg, Name}`), not the raw alias text, so a caller file that
+binds the same alias to a different package cannot redirect a field chain or a
+constructor to a wrong `exact`. This moved interface-typed fields such as
+`Scheduler.SchedulingQueue` (imported as `internalqueue` where the struct is
+declared, bound as `queue` in the caller) from `unknown_receiver` to
+`deferred_interface`: `pkg/scheduler` unknown_receiver fell 582 -> 485 and
+deferred_interface rose 63 -> 137, with exact 440 -> 464. `backend/cache` is
+unchanged. New tests: `TestSourceFacts` (grouped named results are not
+constructors), `TestSourceFactsResolvesDeclaringAlias`, `TestAnalyzeFieldTypeUsesDeclaringAlias`
+(a colliding field type resolves to the declaring package, never the caller's
+other package), `TestAnalyzeInterfaceFieldFallsToDeferred`, and
+`TestAnalyzeConstructorShadowedByLocal` (a local shadowing the constructor name
+stops the constructor inference); the fingerprint test now also changes a field
+type and a constructor result. `inferLocals` also counts `const` declarations so
+a const shadowing a name is handled.
+
+Checks. `make test` green (throwaway database per test, no new skips);
+`make ci-local` green.
+
+Ambiguity. Rule 5 is a name-only guess: it ignores the receiver type, so a
+chained `klog.V(2).InfoS` in the `alias` fixture matches the unrelated
+same-package `fakeKlog.InfoS` (name_only, a documented guess) and an embedded
+receiver's promoted method matches the one same-package method of that name. A
+receiver whose written type is known but that lacks the method also reaches Rule
+5 (there is no deferred selector any more). Cross-package unknown receivers are
+not widened, so a chained call cannot cross a package boundary; a field chain is
+resolved only within one package (a field whose type is qualified is resolved to
+its declaring package path, but the chain does not cross into a second
+package's fields). A constructor is a package-level function with exactly one
+declared result (results are counted by name); methods, multi-result functions
+and unclear written result types stay unknown. `func_value` locals remain
+`deferred_local` until ticket 09.

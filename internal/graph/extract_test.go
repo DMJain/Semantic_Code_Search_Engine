@@ -1,6 +1,9 @@
 package graph
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestExtractImportAliases proves the per-file import alias map (spec story 38):
 // an explicit alias wins, an unaliased import uses the last path segment, and
@@ -198,10 +201,11 @@ func F(y interface{}, ch chan int) {
 	}
 }
 
-// TestExtractQualifiedCallShape proves a selector call whose operand is a bare
-// identifier carries the alias-qualified shape (qualifier and field), while a
-// receiver-style selector and a chained call carry neither and so stay deferred.
-func TestExtractQualifiedCallShape(t *testing.T) {
+// TestExtractCallShape proves a call's selector shape: an identifier is a bare
+// call, an alias-qualified selector carries its qualifier, a chained call
+// carries its field with no qualifier, and a field chain carries the base
+// qualifier, the intermediate field names and the called field.
+func TestExtractCallShape(t *testing.T) {
 	src := []byte(`package p
 
 import klog "k8s.io/klog/v2"
@@ -219,16 +223,19 @@ func F() {
 	if len(info.Decls) != 1 {
 		t.Fatalf("decls = %d, want 1", len(info.Decls))
 	}
-	type shape struct{ raw, name, qualifier, field string }
+	type shape struct {
+		raw, name, qualifier, field string
+		fields                      string
+	}
 	var got []shape
 	for _, c := range info.Decls[0].Calls {
-		got = append(got, shape{c.Raw, c.Name, c.Qualifier, c.Field})
+		got = append(got, shape{c.Raw, c.Name, c.Qualifier, c.Field, strings.Join(c.Fields, ",")})
 	}
 	want := []shape{
-		{"klog.V(2).InfoS", "", "", ""},
-		{"klog.V", "", "klog", "V"},
-		{"s.Method", "", "s", "Method"},
-		{"s.field.Method", "", "", ""},
+		{"klog.V(2).InfoS", "", "", "InfoS", ""},
+		{"klog.V", "", "klog", "V", ""},
+		{"s.Method", "", "s", "Method", ""},
+		{"s.field.Method", "", "s", "Method", "field"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("calls = %+v, want %+v", got, want)
@@ -238,4 +245,180 @@ func F() {
 			t.Errorf("call %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
+}
+
+// TestExtractLocalTypes proves the inferred local type environment (spec story
+// 39): `var x T`, `var x = T{}`, `x := T{}` and `x := &T{}` give the written
+// type T, a constructor call records the constructor name for the resolver, and
+// the field chain of `s.cache.Assume` carries the base qualifier, the
+// intermediate field and the called field.
+func TestExtractLocalTypes(t *testing.T) {
+	src := []byte(`package p
+
+type T struct{}
+type Cache struct{}
+type Scheduler struct{ cache *Cache }
+
+func (T) M() {}
+func (*Cache) Assume() {}
+func NewT() T { return T{} }
+func NewT2() (T, error) { return T{}, nil }
+
+func F(s *Scheduler) {
+	var x T
+	x.M()
+	y := T{}
+	y.M()
+	z := &T{}
+	z.M()
+	w := NewT()
+	w.M()
+	v := NewT2()
+	v.M()
+	s.cache.Assume()
+}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	d := findDecl(t, info, "F")
+	for name, want := range map[string]string{"s": "*Scheduler", "x": "T", "y": "T", "z": "T"} {
+		if got := d.Types[name]; got != want {
+			t.Errorf("type of %q = %q, want %q (types = %v)", name, got, want, d.Types)
+		}
+	}
+	if _, ok := d.Types["w"]; ok {
+		t.Errorf("constructor local w should not have a written type yet: %v", d.Types)
+	}
+	if got := d.ConstructorLocals["w"]; got != "NewT" {
+		t.Errorf("constructor local w = %q, want NewT", got)
+	}
+	if got := d.ConstructorLocals["v"]; got != "NewT2" {
+		t.Errorf("constructor local v = %q, want NewT2 (two results stay unknown at Analyze)", got)
+	}
+	var chain *Call
+	for i := range d.Calls {
+		if d.Calls[i].Raw == "s.cache.Assume" {
+			chain = &d.Calls[i]
+		}
+	}
+	if chain == nil {
+		t.Fatalf("field chain call not extracted: %+v", d.Calls)
+	}
+	if chain.Qualifier != "s" || chain.Field != "Assume" || strings.Join(chain.Fields, ",") != "cache" {
+		t.Errorf("field chain = %+v, want qualifier s, field Assume, fields [cache]", *chain)
+	}
+}
+
+// TestExtractShadowedLocalStaysUnknown proves a local redeclared in the body
+// (here a var then a nested :=) is unknown, so shadowing wins and the resolver
+// never inherits an outer type.
+func TestExtractShadowedLocalStaysUnknown(t *testing.T) {
+	src := []byte(`package p
+
+type T struct{}
+
+func F() {
+	var x T
+	{
+		x := 0
+		_ = x
+	}
+}
+`)
+	info, err := Extract(src)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	d := findDecl(t, info, "F")
+	if _, ok := d.Types["x"]; ok {
+		t.Errorf("redeclared local x still has a type: %v", d.Types)
+	}
+}
+
+// TestSourceFacts proves the names-only facts: grouped struct fields both get
+// their type, an embedded field is skipped (promotion is unseen), a bare type is
+// a same-package TypeRef, and a single-result function is a constructor while
+// zero-, two- and grouped-named-result functions are not.
+func TestSourceFacts(t *testing.T) {
+	src := []byte(`package p
+
+type Scheduler struct {
+	cache *Cache
+	Inner
+	a, b int
+}
+type Cache struct{}
+type Inner struct{}
+
+func NewT() T { return T{} }
+func NewT2() (T, error) { return T{}, nil }
+func NamedTwo() (x, y T) { return T{}, T{} }
+func NoResult() {}
+`)
+	facts, err := SourceFacts(src)
+	if err != nil {
+		t.Fatalf("SourceFacts: %v", err)
+	}
+	for key, want := range map[string]TypeRef{
+		"Scheduler\x00cache": {Name: "Cache"},
+		"Scheduler\x00a":     {Name: "int"},
+		"Scheduler\x00b":     {Name: "int"},
+	} {
+		if got := facts.Fields[key]; got != want {
+			t.Errorf("field %q = %+v, want %+v (fields = %v)", key, got, want, facts.Fields)
+		}
+	}
+	if _, ok := facts.Fields["Scheduler\x00Inner"]; ok {
+		t.Errorf("embedded field should be skipped: %v", facts.Fields)
+	}
+	if got := facts.Results["NewT"]; got != (TypeRef{Name: "T"}) {
+		t.Errorf("constructor NewT = %+v, want {T}", got)
+	}
+	for _, name := range []string{"NewT2", "NamedTwo", "NoResult"} {
+		if ref, ok := facts.Results[name]; ok {
+			t.Errorf("%s should not be a single-result constructor, got %+v", name, ref)
+		}
+	}
+}
+
+// TestSourceFactsResolvesDeclaringAlias proves a qualified field and constructor
+// result type is resolved against the DECLARING file's import aliases at
+// extraction time, storing the import path rather than the raw alias text, so a
+// caller file binding the same alias to another package cannot redirect it.
+func TestSourceFactsResolvesDeclaringAlias(t *testing.T) {
+	src := []byte(`package p
+
+import foo "example.com/x"
+
+type Scheduler struct {
+	queue foo.Queue
+}
+
+func NewQueue() foo.Queue { return foo.Queue{} }
+`)
+	facts, err := SourceFacts(src)
+	if err != nil {
+		t.Fatalf("SourceFacts: %v", err)
+	}
+	want := TypeRef{Pkg: "example.com/x", Name: "Queue"}
+	if got := facts.Fields["Scheduler\x00queue"]; got != want {
+		t.Errorf("field queue = %+v, want %+v", got, want)
+	}
+	if got := facts.Results["NewQueue"]; got != want {
+		t.Errorf("constructor NewQueue = %+v, want %+v", got, want)
+	}
+}
+
+// findDecl returns the declaration with the given name or fails.
+func findDecl(t *testing.T, info FileInfo, name string) Decl {
+	t.Helper()
+	for _, d := range info.Decls {
+		if d.Name == name {
+			return d
+		}
+	}
+	t.Fatalf("declaration %q not found in %+v", name, info.Decls)
+	return Decl{}
 }
