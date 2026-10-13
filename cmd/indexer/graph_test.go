@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/graph"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
 )
 
@@ -163,6 +165,146 @@ func TestGraphStageShadowedBuiltin(t *testing.T) {
 	assertEdges(t, got, want)
 }
 
+// TestGraphStageAliasGoldens covers Rule 2 and the import alias map on the alias
+// fixture package: an aliased import (exact, func) for two packages declaring the
+// same name (the collision resolves by alias), a dot import ignored, a blank
+// import ignored, a shadowed alias left deferred, an external alias (klog.V),
+// a missed symbol in an indexed package (no_match), a conversion to a declared
+// non-struct type (skipped_conversion), and a staging-style import path mapped
+// to its k8s.io/client-go/... package.
+func TestGraphStageAliasGoldens(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/alias", Stats: true})
+
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callOne"),
+		[]edgeRow{{"exact", "", "func", "depone.Name", 15, "k8s.io/kubernetes/depone.Name"}})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callTwo"),
+		[]edgeRow{{"exact", "", "func", "deptwo.Name", 19, "k8s.io/kubernetes/deptwo.Name"}})
+
+	// Dot import ignored: the dot-imported name is not a same-package function,
+	// so it is a stored no_match rather than an exact edge.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callDot"),
+		[]edgeRow{{"unresolved", "no_match", "unknown", "DotOnly", 23, ""}})
+	// Blank import ignored: it adds no alias, so the qualifier is unknown and the
+	// call stays deferred.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callBlank"), nil)
+	// Conversion to a declared non-struct type is skipped, never stored.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callConvert"), nil)
+	// External: klog is not an indexed package, so the inner klog.V(2) call is
+	// stored unresolved external; the outer chained call stays deferred.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callExternal"),
+		[]edgeRow{{"unresolved", "external", "unknown", "klog.V", 35, ""}})
+	// A missed symbol in an indexed package is no_match.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callMissing"),
+		[]edgeRow{{"unresolved", "no_match", "unknown", "depone.Missing", 39, ""}})
+	// A staging-style import path resolves to its k8s.io/client-go/... package.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callStaging"),
+		[]edgeRow{{"exact", "", "func", "cache.SomeFunc", 43, "k8s.io/client-go/tools/cache.SomeFunc"}})
+	// A local parameter named like the alias shadows it, so the call stays
+	// deferred instead of being external.
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/alias.callShadowed"), nil)
+
+	for _, line := range []string{
+		"resolution exact: 3",
+		"resolution unresolved: 3",
+		"reason external: 1",
+		"reason no_match: 2",
+		"call kind func: 3",
+		"call kind unknown: 3",
+		"skipped_conversion: 1",
+		"deferred_selector: 4",
+		"invariant: call sites 11 = stored 6 + skipped 1 + deferred 4 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphResolverVersionBumpStalesFiles proves the resolver version is part of
+// the freshness fingerprint (D-076): bumping it changes the fingerprint, a file
+// graphed at the previous version's fingerprint is stale (symbols changed), and
+// a fresh graph stores the current version's fingerprint.
+func TestGraphResolverVersionBumpStalesFiles(t *testing.T) {
+	pool, root := graphFixture(t)
+	runGraphStage(t, pool, root, graphOptions{})
+
+	symbols, err := loadSymbols(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("loadSymbols: %v", err)
+	}
+	names, err := buildNameIndex(context.Background(), pool, root)
+	if err != nil {
+		t.Fatalf("buildNameIndex: %v", err)
+	}
+	oldFP := graph.Fingerprint(symbols, names, graph.ResolverVersion-1)
+	newFP := graph.Fingerprint(symbols, names, graph.ResolverVersion)
+	if oldFP == newFP {
+		t.Fatal("bumping the resolver version did not change the fingerprint")
+	}
+
+	var storedFP string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT graphed_symbols_fp FROM files WHERE path = 'plain/plain.go'`).Scan(&storedFP); err != nil {
+		t.Fatalf("read stored fingerprint: %v", err)
+	}
+	if storedFP != newFP {
+		t.Errorf("stored fingerprint = %q, want the current version's %q", storedFP, newFP)
+	}
+
+	sha := "same-content"
+	f := graphFile{id: 1, path: "plain/plain.go", pkg: "k8s.io/kubernetes/plain",
+		sha: sha, graphedSHA: &sha, graphedFP: &oldFP}
+	if got := staleReasons(f, newFP); len(got) != 1 || got[0] != reasonSymbolsChange {
+		t.Errorf("staleReasons with the previous version's fingerprint = %v, want [%s]", got, reasonSymbolsChange)
+	}
+}
+
+// TestGraphStalenessDeclaredNameChange proves the fingerprint covers the
+// declared-name index (D-076 amended to include declared names): adding a
+// non-struct type (which is not stored as a symbol) to the aliased package
+// changes the fingerprint, so a file that stored a no_match for `dep.Thing(x)`
+// is reported stale (symbols changed), and after re-graphing the call is a
+// skipped conversion with no stored edge.
+func TestGraphStalenessDeclaredNameChange(t *testing.T) {
+	root := t.TempDir()
+	writeSrc(t, root, "p/dep/dep.go", "package dep\n")
+	writeSrc(t, root, "p/use/use.go",
+		"package use\n\nimport dep \"k8s.io/kubernetes/p/dep\"\n\nfunc F() {\n\tdep.Thing(1)\n}\n")
+	pool := testdb.New(t)
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	runGraphStage(t, pool, root, graphOptions{})
+
+	got := edgesFor(t, pool, "k8s.io/kubernetes/p/use.F")
+	want := []edgeRow{{"unresolved", "no_match", "unknown", "dep.Thing", 6, ""}}
+	assertEdges(t, got, want)
+
+	rewriteAndReparse(t, pool, root, "p/dep/dep.go", "package dep\n\ntype Thing int\n")
+
+	status := runGraphStage(t, pool, root, graphOptions{Status: true})
+	for _, line := range []string{
+		"2 files stale",
+		"content changed: 1",
+		"symbols changed: 2",
+		"use.go: symbols changed",
+		"dep.go: content changed, symbols changed",
+	} {
+		if !strings.Contains(status, line) {
+			t.Errorf("status missing %q after a declared-name-only change:\n%s", line, status)
+		}
+	}
+
+	runGraphStage(t, pool, root, graphOptions{})
+	if got := edgesFor(t, pool, "k8s.io/kubernetes/p/use.F"); len(got) != 0 {
+		t.Errorf("after the conversion is declared, edges for use.F = %+v, want none", got)
+	}
+	last := runGraphStage(t, pool, root, graphOptions{Status: true})
+	if !strings.Contains(last, "0 files stale") {
+		t.Errorf("a settled tree should report 0 files stale:\n%s", last)
+	}
+}
+
 // TestGraphStageRerunIdempotent proves a rerun of a fully graphed tree is a
 // no-op: the second run prints 0 files to graph, rebuilds nothing, leaves the
 // rows unchanged, and the shape rule holds in the database.
@@ -175,8 +317,9 @@ func TestGraphStageRerunIdempotent(t *testing.T) {
 	second := runGraphStage(t, pool, root, opts)
 	after := edgesFor(t, pool, "k8s.io/kubernetes/plain.caller")
 
-	if !strings.Contains(first, "3 files to graph") {
-		t.Errorf("first run should report 3 files to graph\n%s", first)
+	filesN := scalarInt(t, pool, `SELECT count(*) FROM files`)
+	if want := fmt.Sprintf("%d files to graph", filesN); !strings.Contains(first, want) {
+		t.Errorf("first run should report %q\n%s", want, first)
 	}
 	if !strings.Contains(second, "0 files to graph") {
 		t.Errorf("second run should report 0 files to graph\n%s", second)
@@ -190,8 +333,8 @@ func TestGraphStageRerunIdempotent(t *testing.T) {
 		`SELECT count(*) FROM edges WHERE (resolution = 'unresolved') <> (callee_id IS NULL)`); n != 0 {
 		t.Errorf("rows breaking the unresolved shape = %d, want 0", n)
 	}
-	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 4 {
-		t.Errorf("tree-sitter edge count = %d, want 4", n)
+	if n := scalarInt(t, pool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`); n != 10 {
+		t.Errorf("tree-sitter edge count = %d, want 10", n)
 	}
 }
 
@@ -396,8 +539,8 @@ func TestGraphStatusNeverGraphed(t *testing.T) {
 	pool, root := graphFixture(t)
 
 	before := runGraphStage(t, pool, root, graphOptions{Status: true})
-	if !strings.Contains(before, "3 files stale") || !strings.Contains(before, "never graphed: 3") {
-		t.Errorf("status before graphing should list 3 never-graphed files:\n%s", before)
+	if !strings.Contains(before, "10 files stale") || !strings.Contains(before, "never graphed: 10") {
+		t.Errorf("status before graphing should list 10 never-graphed files:\n%s", before)
 	}
 	if !strings.Contains(before, "plain.go: never graphed") {
 		t.Errorf("status should name the never-graphed file:\n%s", before)

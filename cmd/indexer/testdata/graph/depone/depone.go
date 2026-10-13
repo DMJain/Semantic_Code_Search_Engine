@@ -1,0 +1,3 @@
+package depone
+
+func Name() {}

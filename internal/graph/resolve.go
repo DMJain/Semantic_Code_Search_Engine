@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 )
@@ -109,10 +111,43 @@ func (ix *Index) SamePackageFunc(pkg, name string) (int64, bool) {
 	return id, ok
 }
 
-// Analyze classifies one file's call sites (the plain-call subset) and returns the
-// edges to store plus the stats for those call sites. declared is the
-// package-level declared-name index of the package being graphed.
-func Analyze(path, pkg string, info FileInfo, ix *Index, declared map[string]string) ([]Edge, Stats) {
+// NameIndex is the cross-package declared-name index (spec story 101): every
+// indexed package's package-level declared names by kind, plus the set of
+// indexed packages so a lookup can tell an indexed package (no_match or a
+// conversion) from an external one. It is built by scanning the source of every
+// indexed file once.
+type NameIndex struct {
+	byPkgName map[string]string
+	packages  map[string]bool
+}
+
+// NewNameIndex returns an empty index.
+func NewNameIndex() *NameIndex {
+	return &NameIndex{byPkgName: map[string]string{}, packages: map[string]bool{}}
+}
+
+// Add records one file's package and its package-level declared names, marking
+// the package indexed even when it declares nothing.
+func (ni *NameIndex) Add(pkg string, declared map[string]string) {
+	ni.packages[pkg] = true
+	for name, kind := range declared {
+		ni.byPkgName[pkgName(pkg, name)] = kind
+	}
+}
+
+// Declared returns the kind of a package-level name ("type", "func", "var" or
+// "const"), or "" when the package does not declare it.
+func (ni *NameIndex) Declared(pkg, name string) string {
+	return ni.byPkgName[pkgName(pkg, name)]
+}
+
+// IsIndexed reports whether pkg is an indexed package (has files).
+func (ni *NameIndex) IsIndexed(pkg string) bool { return ni.packages[pkg] }
+
+// Analyze classifies one file's call sites and returns the edges to store plus
+// the stats for those call sites. names is the cross-package declared-name index
+// (spec story 101).
+func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex) ([]Edge, Stats) {
 	st := NewStats()
 	var edges []Edge
 	for _, d := range info.Decls {
@@ -129,57 +164,153 @@ func Analyze(path, pkg string, info FileInfo, ix *Index, declared map[string]str
 			seen[key] = true
 			st.CallSites++
 
-			if c.Name == "" {
+			switch {
+			case c.Name != "":
+				edges, st = analyzeIdentifier(edges, st, callerID, c, d, pkg, ix, names)
+			case c.Qualifier != "":
+				edges, st = analyzeQualified(edges, st, callerID, c, d, info.Aliases, ix, names)
+			default:
+				// A receiver-style selector or a chained call: deferred.
 				st.DeferredSelector++
-				continue
 			}
-			if d.Locals[c.Name] {
-				st.DeferredLocal++
-				continue
-			}
-			if id, ok := ix.SamePackageFunc(pkg, c.Name); ok {
-				edges = append(edges, Edge{
-					CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
-					Resolution: ResolutionExact, CallKind: KindFunc, CallLine: c.Line,
-				})
-				st.Exact++
-				st.ByKind[KindFunc]++
-				continue
-			}
-			if parse.IsBuiltin(c.Name) && declared[c.Name] == "" {
-				st.SkippedBuiltin++
-				continue
-			}
-			if declared[c.Name] == "type" {
-				st.SkippedConversion++
-				continue
-			}
-			// A missing identifier, or a package-level var/const used as a call
-			// (a function value; a later slice reclassifies it).
-			edges = append(edges, Edge{
-				CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
-				Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
-				UnresolvedReason: ReasonNoMatch,
-			})
-			st.Unresolved++
-			st.Reasons[ReasonNoMatch]++
-			st.ByKind[KindUnknown]++
 		}
 	}
 	return edges, st
 }
 
-// Fingerprint is the freshness fingerprint (D-076): sha256 over
-// (id, kind, package, qualified name, receiver) of every indexed symbol ordered
-// by id, plus the resolver version. Line numbers and body hashes are excluded,
-// so a body-only edit does not invalidate the graph.
-func Fingerprint(symbols []Symbol, resolverVersion int) string {
+// analyzeIdentifier classifies a bare identifier call: local scope, same-package
+// function (Rule 1), builtin or conversion, then no_match (spec story 102).
+func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, pkg string, ix *Index, names *NameIndex) ([]Edge, Stats) {
+	if d.Locals[c.Name] {
+		st.DeferredLocal++
+		return edges, st
+	}
+	if id, ok := ix.SamePackageFunc(pkg, c.Name); ok {
+		st.Exact++
+		st.ByKind[KindFunc]++
+		return append(edges, Edge{
+			CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
+			Resolution: ResolutionExact, CallKind: KindFunc, CallLine: c.Line,
+		}), st
+	}
+	if parse.IsBuiltin(c.Name) && names.Declared(pkg, c.Name) == "" {
+		st.SkippedBuiltin++
+		return edges, st
+	}
+	if names.Declared(pkg, c.Name) == "type" {
+		st.SkippedConversion++
+		return edges, st
+	}
+	// A missing identifier, or a package-level var/const used as a call
+	// (a function value; a later slice reclassifies it).
+	st.Unresolved++
+	st.Reasons[ReasonNoMatch]++
+	st.ByKind[KindUnknown]++
+	return append(edges, Edge{
+		CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
+		Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
+		UnresolvedReason: ReasonNoMatch,
+	}), st
+}
+
+// analyzeQualified classifies an alias-qualified selector call `alias.Name`
+// (Rule 2): a same-package function in the aliased package is exact, an
+// unindexed import path is external, and an indexed package without a matching
+// function is a conversion (declared type) or no_match. A shadowed alias or an
+// unknown qualifier stays deferred.
+func analyzeQualified(edges []Edge, st Stats, callerID int64, c Call, d Decl, aliases map[string]string, ix *Index, names *NameIndex) ([]Edge, Stats) {
+	if d.Locals[c.Qualifier] {
+		st.DeferredSelector++
+		return edges, st
+	}
+	importPath, ok := aliases[c.Qualifier]
+	if !ok {
+		st.DeferredSelector++
+		return edges, st
+	}
+	if id, ok := ix.SamePackageFunc(importPath, c.Field); ok {
+		st.Exact++
+		st.ByKind[KindFunc]++
+		return append(edges, Edge{
+			CallerID: callerID, CalleeID: id, CalleeRaw: c.Raw,
+			Resolution: ResolutionExact, CallKind: KindFunc, CallLine: c.Line,
+		}), st
+	}
+	if !names.IsIndexed(importPath) {
+		st.Unresolved++
+		st.Reasons[ReasonExternal]++
+		st.ByKind[KindUnknown]++
+		return append(edges, Edge{
+			CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
+			Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
+			UnresolvedReason: ReasonExternal,
+		}), st
+	}
+	if names.Declared(importPath, c.Field) == "type" {
+		st.SkippedConversion++
+		return edges, st
+	}
+	st.Unresolved++
+	st.Reasons[ReasonNoMatch]++
+	st.ByKind[KindUnknown]++
+	return append(edges, Edge{
+		CallerID: callerID, CalleeID: 0, CalleeRaw: c.Raw,
+		Resolution: ResolutionUnresolved, CallKind: KindUnknown, CallLine: c.Line,
+		UnresolvedReason: ReasonNoMatch,
+	}), st
+}
+
+// Fingerprint is the freshness fingerprint (D-076, amended to cover declared
+// names): sha256 over the indexed symbols (id, kind, package, qualified name,
+// receiver) ordered by id, the declared-name index (package -> name -> kind)
+// ordered deterministically, and the resolver version. Line numbers and body
+// hashes are excluded, so a body-only edit does not invalidate the graph. The
+// declared-name part is included because Rule 2 and the builtin/conversion
+// classification depend on package-level declared names that are not stored as
+// symbols (for example `type Foo int`).
+func Fingerprint(symbols []Symbol, names *NameIndex, resolverVersion int) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "resolver:%d\n", resolverVersion)
 	for _, s := range symbols {
 		fmt.Fprintf(h, "%d\x00%s\x00%s\x00%s\x00%s\n", s.ID, s.Kind, s.Package, s.QualifiedName, s.Receiver)
 	}
+	if names != nil {
+		fmt.Fprintf(h, "%s\n", names.digest())
+	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// digest renders the declared-name index deterministically: packages sorted by
+// import path, each package's declared names sorted, with each name's kind.
+func (ni *NameIndex) digest() string {
+	byPkg := make(map[string][]string, len(ni.packages))
+	for p := range ni.packages {
+		byPkg[p] = nil
+	}
+	for k, kind := range ni.byPkgName {
+		i := strings.IndexByte(k, 0)
+		if i < 0 {
+			continue
+		}
+		pkg, name := k[:i], k[i+1:]
+		byPkg[pkg] = append(byPkg[pkg], name+"\x00"+kind)
+	}
+	pkgs := make([]string, 0, len(byPkg))
+	for p := range byPkg {
+		pkgs = append(pkgs, p)
+	}
+	sort.Strings(pkgs)
+
+	var b strings.Builder
+	for _, p := range pkgs {
+		decls := byPkg[p]
+		sort.Strings(decls)
+		fmt.Fprintf(&b, "pkg\x00%s\n", p)
+		for _, d := range decls {
+			fmt.Fprintf(&b, "decl\x00%s\x00%s\n", p, d)
+		}
+	}
+	return b.String()
 }
 
 type callLine struct {

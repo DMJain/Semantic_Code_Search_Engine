@@ -1,0 +1,3 @@
+package deptwo
+
+func Name() {}

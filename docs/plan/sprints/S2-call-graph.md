@@ -643,3 +643,127 @@ $ go run ./cmd/indexer graph --status   -> 0 files stale
 $ go run ./cmd/indexer graph            -> 0 files to graph
 ```
 
+### Import aliases, externals and cross-package conversions (S2 ticket 04)
+
+What changed. Each extracted file now carries an import alias map (spec story 38):
+an explicit alias (`import a "p"`), or the default package name of an unaliased
+import (`import "p"`); dot (`.`) and blank (`_`) imports are ignored. The default
+package name is the last path segment, except a major-version module suffix `/vN`
+(N >= 2), whose package name is the parent segment: `k8s.io/klog/v2` binds `klog`,
+while `k8s.io/api/core/v1` (v1 is a real package name) and `v1beta1`/`v1alpha1`
+segments stay as written. A call written `alias.Name` (a selector whose operand is
+a bare identifier) is Rule 2: the aliased package's same-package function `Name`
+is `exact` kind `func`; an import path that is not an indexed package is stored
+`unresolved` reason `external`; an indexed package without the function is a
+declared-type conversion (`skipped_conversion`) or `unresolved` reason `no_match`.
+A qualifier that is not a known import alias, or an alias hidden by a
+local/parameter (local scope wins), stays `deferred_selector`, as do receiver-style
+selector and chained calls. The declared-name index is now cross-package: `graph`
+scans the source of every indexed file once with a names-only tree-sitter pass
+(`graph.DeclaredNames`) to build `package -> declared names (type/func/var/const)`
+plus the set of indexed packages; an import path absent from that set is external.
+`files.package` already stores the Go import path (`walk.ImportPath` maps
+`staging/src/k8s.io/client-go/...` to `k8s.io/client-go/...`), so the staging
+mapping is the existing package lookup and no vendor/staging mapping was added.
+`graph.ResolverVersion` is bumped 1 -> 2, and the freshness fingerprint now covers
+the declared-name index as well as the symbols (D-076 amended for this ticket), so
+every file graphed before is stale. Out of scope here:
+receiver/parameter/local/field types and Rules 3 to 5; the rest of
+`deferred_selector` is ticket 06.
+
+Cross-package index cost. The index scan reads and parses every indexed file on
+every `graph` run, selected package or not; each of the two real runs below took
+~4.4-4.8 s wall including the `go run` build and the scan of all 6633 indexed
+files (names-only tree-sitter, no call extraction), so the whole-repo cost is a
+single extra parse pass.
+
+Fixture goldens (`cmd/indexer/testdata/graph/`, real Postgres,
+`TestGraphStageAliasGoldens`, `TestExtractImportAliases`,
+`TestExtractQualifiedCallShape`, `TestDefaultAlias`,
+`TestExtractUnaliasedVersionedImport`). The `alias` package imports two packages
+that both declare `Name` (the collision resolves by alias: `depone.Name` -> exact
+`k8s.io/kubernetes/depone.Name`, `deptwo.Name` -> exact `deptwo.Name`), a dot
+import (its name is not a same-package function, so `DotOnly()` is `no_match`), a
+blank import (no alias, so the qualifier is unknown and the call is deferred), a
+non-struct declared type (`typed.Type(x)` -> `skipped_conversion`, not stored), an
+UNALIASED versioned import (`"k8s.io/klog/v2"`; the default alias is `klog`, and
+`klog.V(2).InfoS`: the inner `klog.V` is `external`, the outer chained call is
+deferred and not stored), a missed symbol in an indexed package
+(`depone.Missing` -> `no_match`), a staging-style import path
+(`cache "k8s.io/client-go/tools/cache"` -> exact
+`k8s.io/client-go/tools/cache.SomeFunc`), and a parameter named `klog` shadowing
+the alias (both calls stay deferred). `TestDefaultAlias` pins the derivation
+cases (`k8s.io/klog/v2` -> `klog`, `k8s.io/api/core/v1` -> `v1`,
+`github.com/onsi/ginkgo/v2` -> `ginkgo`, `example.com/foo/v10` -> `foo`). `--stats`
+for the alias package: `call sites 11 = stored 6 + skipped 1 + deferred 4 [ok]`
+with exact 3, external 1, no_match 2, skipped_conversion 1, deferred_selector 4, no
+bare alias-qualified deferrals. `TestGraphResolverVersionBumpStalesFiles` proves
+the fingerprint changes with the version and a file graphed at version 1's
+fingerprint is stale `symbols changed` while a fresh graph stores version 2's
+fingerprint. `TestGraphStalenessDeclaredNameChange` proves the fingerprint covers
+declared names: after a file stores a `no_match` for `dep.Thing(1)`, adding a
+non-struct `type Thing int` (not a symbol) in the aliased package makes the
+resolving file stale (`symbols changed`) and the call a `skipped_conversion`.
+
+Real DB. The version bump makes the whole graphed tree stale:
+
+```
+$ go run ./cmd/indexer graph --status
+6633 files stale
+  reasons (a file may have more than one, so these sum above the total):
+    never graphed: 0
+    content changed: 0
+    symbols changed: 6633
+```
+
+Real run on the tracer package and a client-go-importing package (only these
+packages were re-graphed; the rest stay stale until ticket 09's whole-repo run):
+
+```
+$ go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/kubelet/envvars --stats
+2 files to graph
+graphed 2 files, stored 20 edges
+edges stored: 20
+  resolution exact: 6
+  resolution unresolved: 14
+  reason external: 14
+  reason no_match: 0
+call kind func: 6
+call kind unknown: 14
+skipped_builtin: 12
+skipped_conversion: 0
+deferred_selector: 0
+invariant: call sites 32 = stored 20 + skipped 12 + deferred 0 [ok]
+
+$ go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/scheduler --stats
+5 files to graph
+graphed 5 files, stored 518 edges
+edges stored: 518
+  resolution exact: 282
+  resolution unresolved: 236
+  reason external: 236
+  reason no_match: 0
+call kind func: 282
+call kind unknown: 236
+skipped_builtin: 159
+skipped_conversion: 4
+deferred_selector: 906
+deferred_local: 25
+invariant: call sites 1612 = stored 518 + skipped 163 + deferred 931 [ok]
+```
+
+Interpretation. The 14 external rows in `pkg/kubelet/envvars` and the 236 in
+`pkg/scheduler` are alias-qualified calls to unindexed import paths (standard
+library, `k8s.io/klog/v2`, and the excluded generated client-go trees such as
+`listers`); a real-package `no_match` count of 0 is reported as 0 (every
+alias-qualified `alias.Name` in these two packages either resolved to an indexed
+function or hit an unindexed path). 114 of the scheduler's external rows are
+`klog.*` (confirmed with `SELECT ... WHERE callee_raw LIKE 'klog.%' GROUP BY
+unresolved_reason` -> `external|114`): before the versioned-path alias fix these
+were counted `deferred_selector`, so the fix moved 114 call sites out of the
+interim counter (scheduler external 122 -> 236, deferred_selector 1020 -> 906).
+The alias-qualified part of `deferred_selector` is gone; what remains in
+`pkg/scheduler` (906) is receiver-style selector and chained calls, handled by
+tickets 05 and 06.
+
+

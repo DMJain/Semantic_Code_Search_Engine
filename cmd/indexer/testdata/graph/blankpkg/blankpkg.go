@@ -1,0 +1,3 @@
+package blankpkg
+
+func BlankOnly() {}

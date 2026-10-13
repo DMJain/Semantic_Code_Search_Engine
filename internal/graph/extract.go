@@ -23,59 +23,182 @@ type Decl struct {
 }
 
 // Call is one call expression. Name is the identifier for a bare identifier
-// call, and empty for any other operand (a selector or a chained call), which is
-// a deferred selector.
+// call. Qualifier and Field are set for a selector call whose operand is a bare
+// identifier (the alias-qualified `alias.Name` shape). Raw is set for every
+// call; a call with neither Name nor Qualifier is a receiver-style selector or a
+// chained call and stays a deferred selector.
 type Call struct {
-	Raw  string
-	Name string
-	Line int
+	Raw       string
+	Name      string
+	Qualifier string
+	Field     string
+	Line      int
 }
 
 // FileInfo is the extraction result for one file: its declared functions and
-// methods, and its package-level declared names. Declared maps a name to its
-// kind ("type", "func", "var" or "const") so the resolver can tell a type
-// conversion from a call through a package-level function variable.
+// methods, its package-level declared names, and its import alias map. Declared
+// maps a name to its kind ("type", "func", "var" or "const") so the resolver can
+// tell a type conversion from a call through a package-level function variable.
+// Aliases maps a file import alias to its import path (dot and blank imports are
+// ignored).
 type FileInfo struct {
 	Decls    []Decl
 	Declared map[string]string
+	Aliases  map[string]string
 }
 
 // Extract re-parses src and returns its declared functions/methods with their
-// call sites and its package-level declared names (spec story 101). Import
-// aliases and receiver/parameter types are not resolved here (this slice needs
-// only identifier calls and local scope).
+// call sites, its package-level declared names and its import alias map (spec
+// stories 38, 101). Receiver/parameter types are not resolved here (this slice
+// needs identifier calls, alias-qualified calls and local scope).
 func Extract(src []byte) (FileInfo, error) {
-	p := sitter.NewParser()
-	defer p.Close()
-	p.SetLanguage(golang.GetLanguage())
-
-	tree, err := p.ParseCtx(context.Background(), nil, src)
+	tree, err := parseTree(src)
 	if err != nil {
 		return FileInfo{}, err
 	}
 	defer tree.Close()
 	root := tree.RootNode()
 
-	info := FileInfo{Declared: map[string]string{}}
+	info := FileInfo{Declared: map[string]string{}, Aliases: map[string]string{}}
+	collectDeclaredNames(root, src, info.Declared)
+	collectImports(root, src, info.Aliases)
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		switch n := root.NamedChild(i); n.Type() {
+		case "function_declaration", "method_declaration":
+			info.Decls = append(info.Decls, extractDecl(n, src))
+		}
+	}
+	return info, nil
+}
+
+// DeclaredNames re-parses src and returns only its package-level declared names
+// by kind. It is the names-only path used to build the cross-package
+// declared-name index (spec story 101) without extracting call sites.
+func DeclaredNames(src []byte) (map[string]string, error) {
+	tree, err := parseTree(src)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	out := map[string]string{}
+	collectDeclaredNames(tree.RootNode(), src, out)
+	return out, nil
+}
+
+// collectDeclaredNames records the package-level declared names (functions,
+// named types, vars and consts) of every top-level declaration.
+func collectDeclaredNames(root *sitter.Node, src []byte, into map[string]string) {
 	for i := 0; i < int(root.NamedChildCount()); i++ {
 		n := root.NamedChild(i)
 		switch n.Type() {
 		case "function_declaration":
 			if name := fieldName(n, src); name != "" {
-				info.Declared[name] = "func"
+				into[name] = "func"
 			}
-			info.Decls = append(info.Decls, extractDecl(n, src))
-		case "method_declaration":
-			info.Decls = append(info.Decls, extractDecl(n, src))
 		case "type_declaration":
-			collectTypeNames(n, src, info.Declared)
+			collectTypeNames(n, src, into)
 		case "var_declaration":
-			collectSpecNames(n, src, "var", info.Declared)
+			collectSpecNames(n, src, "var", into)
 		case "const_declaration":
-			collectSpecNames(n, src, "const", info.Declared)
+			collectSpecNames(n, src, "const", into)
 		}
 	}
-	return info, nil
+}
+
+// collectImports records the file's import alias map: an explicit alias
+// (`import a "p"`) or the last path segment of an unaliased import
+// (`import "p"`). Dot and blank imports are ignored (spec story 38).
+func collectImports(root *sitter.Node, src []byte, into map[string]string) {
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		n := root.NamedChild(i)
+		if n.Type() != "import_declaration" {
+			continue
+		}
+		for j := 0; j < int(n.NamedChildCount()); j++ {
+			spec := n.NamedChild(j)
+			switch spec.Type() {
+			case "import_spec":
+				addImport(spec, src, into)
+			case "import_spec_list":
+				for k := 0; k < int(spec.NamedChildCount()); k++ {
+					if s := spec.NamedChild(k); s.Type() == "import_spec" {
+						addImport(s, src, into)
+					}
+				}
+			}
+		}
+	}
+}
+
+// addImport records one import_spec. An explicit alias wins; otherwise the alias
+// is the last path segment. A dot or blank name is skipped.
+func addImport(spec *sitter.Node, src []byte, into map[string]string) {
+	pathNode := spec.ChildByFieldName("path")
+	if pathNode == nil {
+		return
+	}
+	importPath := strings.Trim(pathNode.Content(src), "\"`")
+	if importPath == "" {
+		return
+	}
+	name := ""
+	if nameNode := spec.ChildByFieldName("name"); nameNode != nil {
+		name = nameNode.Content(src)
+	}
+	switch name {
+	case ".", "_":
+		return
+	case "":
+		name = defaultAlias(importPath)
+	}
+	into[name] = importPath
+}
+
+// defaultAlias returns the package name Go binds for an unaliased import. It is
+// the last path segment, except for a major-version module suffix `/vN` (N >= 2)
+// whose package name is the parent segment: `k8s.io/klog/v2` binds `klog`, while
+// `k8s.io/api/core/v1` (v1 is a real package name) keeps `v1`.
+func defaultAlias(importPath string) string {
+	base := importPath
+	slash := strings.LastIndexByte(base, '/')
+	if slash >= 0 {
+		base = base[slash+1:]
+	}
+	if !isMajorVersion(base) || slash < 0 {
+		return base
+	}
+	parent := importPath[:len(importPath)-len(base)-1]
+	if i := strings.LastIndexByte(parent, '/'); i >= 0 {
+		return parent[i+1:]
+	}
+	return parent
+}
+
+// isMajorVersion reports whether s is a major-version suffix `vN` with N >= 2
+// (v1 and v1beta1/v1alpha1 are package names, not version suffixes).
+func isMajorVersion(s string) bool {
+	if len(s) < 2 || s[0] != 'v' {
+		return false
+	}
+	n := 0
+	for _, c := range s[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n >= 2
+}
+
+// parseTree parses src with tree-sitter and returns the tree; the caller
+// closes it.
+func parseTree(src []byte) (*sitter.Tree, error) {
+	p := sitter.NewParser()
+	defer p.Close()
+	p.SetLanguage(golang.GetLanguage())
+
+	return p.ParseCtx(context.Background(), nil, src)
 }
 
 // extractDecl builds one Decl from a function_declaration or method_declaration.
@@ -109,8 +232,16 @@ func collectCalls(body *sitter.Node, src []byte) []Call {
 			if fn := n.ChildByFieldName("function"); fn != nil {
 				if raw := strings.TrimSpace(fn.Content(src)); raw != "" {
 					c := Call{Raw: raw, Line: int(n.StartPoint().Row) + 1}
-					if fn.Type() == "identifier" {
+					switch fn.Type() {
+					case "identifier":
 						c.Name = raw
+					case "selector_expression":
+						operand := fn.ChildByFieldName("operand")
+						field := fn.ChildByFieldName("field")
+						if operand != nil && field != nil && operand.Type() == "identifier" {
+							c.Qualifier = operand.Content(src)
+							c.Field = field.Content(src)
+						}
 					}
 					out = append(out, c)
 				}
