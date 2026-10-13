@@ -21,6 +21,7 @@ var commands = []cli.Command{
 	{Name: "fetch-repo", Short: "shallow-clone Kubernetes at KUBE_TAG into KUBE_DIR", Run: runFetchRepo},
 	{Name: "walk", Short: "walk the corpus and fill the files table", Run: runWalk},
 	{Name: "parse", Short: "parse Go files into function and method symbols", Run: runParse},
+	{Name: "graph", Short: "resolve call expressions into tree-sitter edges", Run: runGraph},
 	{Name: "audit", Short: "check a seeded sample of stored symbols against the source", Run: runAudit},
 	{Name: "chunk", Short: "split symbols into chunks (not implemented)", Run: stub("chunk")},
 	{Name: "summarize", Short: "summarize in-slice functions with a local LLM", Run: runSummarize},

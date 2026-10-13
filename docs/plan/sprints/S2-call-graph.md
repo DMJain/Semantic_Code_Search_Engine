@@ -155,3 +155,380 @@ because `k8s.io/klog/v2@v2.140.0` is not in the module cache, so Q-05 stays
 open with that reason (D-025 records the working online invocation; refs
 D-071).
 
+
+### Tree-sitter tracer: plain calls for one package (S2 ticket 02)
+
+Chosen package: `k8s.io/kubernetes/pkg/kubelet/envvars`.
+
+The tracer package is chosen by rule: rank the in-slice packages by function-plus-method
+count (ties by import path ascending), dry-run the extractor with no writes from the
+lowest count upward with `indexer graph --package <p> --dry-run --stats`, and take the
+first with at least five same-package plain-function call sites resolving `exact` and at
+least one `skipped_builtin`. The first match is `pkg/kubelet/envvars` (3 declared
+functions, 5 exact edges, 12 skipped builtins). Its dry run:
+
+```
+2 files to graph
+would graph 2 files, 5 edges
+edges stored: 5
+  resolution exact: 5
+  resolution name_only: 0
+  resolution ambiguous: 0
+  resolution unresolved: 0
+  reason external: 0
+  reason no_match: 0
+  reason unknown_receiver: 0
+  reason func_value: 0
+  reason candidates_capped: 0
+call kind func: 5
+call kind concrete_method: 0
+call kind interface_method: 0
+call kind func_value: 0
+call kind unknown: 0
+percent ambiguous: 0.0%
+unresolved: 0
+skipped_builtin: 12
+skipped_conversion: 0
+deferred_selector: 15
+deferred_local: 0
+deferred_interface: 0
+interfaces_partial: 0
+invariant: call sites 32 = stored 5 + skipped 12 + deferred 15 [ok]
+```
+
+The ranked in-slice packages (294), function-plus-method count, ties by import path ascending:
+
+| # | package | func+method |
+| --- | --- | --- |
+| 1 | `k8s.io/kubernetes/pkg/kubelet` | 348 |
+| 2 | `k8s.io/kubernetes/pkg/kubelet/cm` | 279 |
+| 3 | `k8s.io/kubernetes/pkg/kubelet/container/testing` | 271 |
+| 4 | `k8s.io/kubernetes/pkg/kubelet/kuberuntime` | 258 |
+| 5 | `k8s.io/kubernetes/pkg/kubelet/cm/testing` | 239 |
+| 6 | `k8s.io/kubernetes/pkg/scheduler/testing` | 237 |
+| 7 | `k8s.io/kubernetes/pkg/scheduler/framework` | 191 |
+| 8 | `k8s.io/kubernetes/pkg/scheduler/backend/queue` | 182 |
+| 9 | `k8s.io/kubernetes/pkg/scheduler/backend/cache` | 171 |
+| 10 | `k8s.io/kubernetes/pkg/controller/job` | 165 |
+| 11 | `k8s.io/kubernetes/pkg/scheduler/framework/runtime` | 160 |
+| 12 | `k8s.io/kubernetes/pkg/scheduler` | 140 |
+| 13 | `k8s.io/kubernetes/pkg/kubelet/cm/cpumanager` | 138 |
+| 14 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources` | 123 |
+| 15 | `k8s.io/kubernetes/pkg/controller/garbagecollector` | 112 |
+| 16 | `k8s.io/kubernetes/pkg/controller/statefulset` | 111 |
+| 17 | `k8s.io/kubernetes/pkg/scheduler/testing/framework` | 110 |
+| 18 | `k8s.io/kubernetes/pkg/controller` | 106 |
+| 19 | `k8s.io/kubernetes/pkg/kubelet/stats` | 106 |
+| 20 | `k8s.io/kubernetes/pkg/kubelet/container` | 104 |
+| 21 | `k8s.io/kubernetes/pkg/kubelet/server/stats/testing` | 99 |
+| 22 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding` | 99 |
+| 23 | `k8s.io/kubernetes/pkg/kubelet/volumemanager/cache` | 94 |
+| 24 | `k8s.io/kubernetes/pkg/scheduler/framework/preemption` | 94 |
+| 25 | `k8s.io/kubernetes/pkg/controller/volume/persistentvolume` | 92 |
+| 26 | `k8s.io/kubernetes/pkg/kubelet/cm/memorymanager` | 92 |
+| 27 | `k8s.io/kubernetes/pkg/kubelet/images/pullmanager` | 90 |
+| 28 | `k8s.io/kubernetes/pkg/kubelet/eviction` | 88 |
+| 29 | `k8s.io/kubernetes/pkg/kubelet/cm/topologymanager` | 86 |
+| 30 | `k8s.io/kubernetes/pkg/kubelet/pod/testing` | 84 |
+| 31 | `k8s.io/kubernetes/pkg/controller/podautoscaler` | 83 |
+| 32 | `k8s.io/kubernetes/pkg/kubelet/cm/devicemanager` | 77 |
+| 33 | `k8s.io/kubernetes/pkg/kubelet/apis/podresources/testing` | 75 |
+| 34 | `k8s.io/kubernetes/pkg/kubelet/cm/dra` | 63 |
+| 35 | `k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/state` | 62 |
+| 36 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/noderesources` | 62 |
+| 37 | `k8s.io/kubernetes/pkg/controller/daemon` | 57 |
+| 38 | `k8s.io/kubernetes/pkg/kubelet/cadvisor/testing` | 56 |
+| 39 | `k8s.io/kubernetes/pkg/controller/devicetainteviction` | 54 |
+| 40 | `k8s.io/kubernetes/pkg/controller/deployment/util` | 53 |
+| 41 | `k8s.io/kubernetes/pkg/controller/deployment` | 52 |
+| 42 | `k8s.io/kubernetes/pkg/kubelet/server` | 52 |
+| 43 | `k8s.io/kubernetes/pkg/kubelet/cm/memorymanager/state` | 51 |
+| 44 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity` | 51 |
+| 45 | `k8s.io/kubernetes/pkg/controller/endpointslicemirroring` | 50 |
+| 46 | `k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/plugin/v1beta1` | 50 |
+| 47 | `k8s.io/kubernetes/pkg/kubelet/config` | 50 |
+| 48 | `k8s.io/kubernetes/pkg/controller/storageversionmigrator` | 48 |
+| 49 | `k8s.io/kubernetes/pkg/kubelet/status` | 48 |
+| 50 | `k8s.io/kubernetes/pkg/controller/resourceclaim` | 46 |
+| 51 | `k8s.io/kubernetes/pkg/controller/cronjob` | 45 |
+| 52 | `k8s.io/kubernetes/pkg/controller/serviceaccount` | 45 |
+| 53 | `k8s.io/kubernetes/pkg/controller/volume/selinuxwarning` | 45 |
+| 54 | `k8s.io/kubernetes/pkg/scheduler/metrics` | 45 |
+| 55 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach` | 44 |
+| 56 | `k8s.io/kubernetes/pkg/kubelet/allocation/state` | 44 |
+| 57 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/podtopologyspread` | 43 |
+| 58 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/cache` | 41 |
+| 59 | `k8s.io/kubernetes/pkg/kubelet/images` | 41 |
+| 60 | `k8s.io/kubernetes/pkg/controller/disruption` | 39 |
+| 61 | `k8s.io/kubernetes/pkg/controller/replication` | 39 |
+| 62 | `k8s.io/kubernetes/pkg/kubelet/prober` | 39 |
+| 63 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/testing` | 38 |
+| 64 | `k8s.io/kubernetes/pkg/kubelet/allocation` | 38 |
+| 65 | `k8s.io/kubernetes/pkg/kubelet/volumemanager` | 38 |
+| 66 | `k8s.io/kubernetes/pkg/controller/replicaset` | 34 |
+| 67 | `k8s.io/kubernetes/pkg/kubelet/podcertificate` | 33 |
+| 68 | `k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology` | 32 |
+| 69 | `k8s.io/kubernetes/pkg/kubelet/pleg` | 32 |
+| 70 | `k8s.io/kubernetes/pkg/kubelet/util/manager` | 32 |
+| 71 | `k8s.io/kubernetes/pkg/controller/util/protectionutil` | 31 |
+| 72 | `k8s.io/kubernetes/pkg/kubelet/lifecycle` | 31 |
+| 73 | `k8s.io/kubernetes/pkg/scheduler/util/assumecache` | 30 |
+| 74 | `k8s.io/kubernetes/pkg/controller/nodelifecycle` | 29 |
+| 75 | `k8s.io/kubernetes/pkg/controller/tainteviction` | 29 |
+| 76 | `k8s.io/kubernetes/pkg/controller/testutil` | 29 |
+| 77 | `k8s.io/kubernetes/pkg/controller/volume/expand` | 29 |
+| 78 | `k8s.io/kubernetes/pkg/controller/endpoint` | 27 |
+| 79 | `k8s.io/kubernetes/pkg/controller/endpointslice` | 27 |
+| 80 | `k8s.io/kubernetes/pkg/controller/resourcepoolstatusrequest` | 27 |
+| 81 | `k8s.io/kubernetes/pkg/controller/volume/pvcprotection` | 27 |
+| 82 | `k8s.io/kubernetes/pkg/kubelet/metrics/collectors` | 27 |
+| 83 | `k8s.io/kubernetes/pkg/kubelet/pluginmanager/pluginwatcher` | 27 |
+| 84 | `k8s.io/kubernetes/pkg/kubelet/pod` | 27 |
+| 85 | `k8s.io/kubernetes/pkg/kubelet/util` | 27 |
+| 86 | `k8s.io/kubernetes/pkg/scheduler/apis/config/validation` | 27 |
+| 87 | `k8s.io/kubernetes/pkg/controller/certificates/clustertrustbundlepublisher` | 26 |
+| 88 | `k8s.io/kubernetes/pkg/controller/history` | 26 |
+| 89 | `k8s.io/kubernetes/pkg/controller/namespace/deletion` | 26 |
+| 90 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodevolumelimits` | 26 |
+| 91 | `k8s.io/kubernetes/pkg/kubelet/clustertrustbundle` | 25 |
+| 92 | `k8s.io/kubernetes/pkg/kubelet/cm/dra/plugin` | 25 |
+| 93 | `k8s.io/kubernetes/pkg/kubelet/volumemanager/reconciler` | 25 |
+| 94 | `k8s.io/kubernetes/pkg/scheduler/apis/config/v1` | 25 |
+| 95 | `k8s.io/kubernetes/pkg/controller/resourcequota` | 23 |
+| 96 | `k8s.io/kubernetes/pkg/kubelet/server/stats` | 22 |
+| 97 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumerestrictions` | 22 |
+| 98 | `k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask` | 21 |
+| 99 | `k8s.io/kubernetes/pkg/kubelet/types` | 21 |
+| 100 | `k8s.io/kubernetes/pkg/scheduler/backend/api_dispatcher` | 21 |
+| 101 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/gangscheduling` | 21 |
+| 102 | `k8s.io/kubernetes/pkg/controller/certificates/signer` | 20 |
+| 103 | `k8s.io/kubernetes/pkg/controller/volume/persistentvolume/testing` | 20 |
+| 104 | `k8s.io/kubernetes/pkg/kubelet/nodeshutdown` | 20 |
+| 105 | `k8s.io/kubernetes/pkg/controller/bootstrap` | 19 |
+| 106 | `k8s.io/kubernetes/pkg/kubelet/apis/pods` | 19 |
+| 107 | `k8s.io/kubernetes/pkg/kubelet/cadvisor` | 19 |
+| 108 | `k8s.io/kubernetes/pkg/controller/nodelifecycle/scheduler` | 18 |
+| 109 | `k8s.io/kubernetes/pkg/kubelet/logs` | 18 |
+| 110 | `k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache` | 18 |
+| 111 | `k8s.io/kubernetes/pkg/kubelet/volumemanager/populator` | 18 |
+| 112 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeaffinity` | 18 |
+| 113 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumezone` | 18 |
+| 114 | `k8s.io/kubernetes/pkg/controller/certificates/cleaner` | 17 |
+| 115 | `k8s.io/kubernetes/pkg/controller/podgc` | 17 |
+| 116 | `k8s.io/kubernetes/pkg/controller/servicecidrs` | 17 |
+| 117 | `k8s.io/kubernetes/pkg/controller/volume/persistentvolume/metrics` | 17 |
+| 118 | `k8s.io/kubernetes/pkg/scheduler/backend/heap` | 17 |
+| 119 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/tainttoleration` | 17 |
+| 120 | `k8s.io/kubernetes/pkg/controller/nodeipam/ipam` | 16 |
+| 121 | `k8s.io/kubernetes/pkg/controller/util/selectors` | 16 |
+| 122 | `k8s.io/kubernetes/pkg/scheduler/framework/api_calls` | 16 |
+| 123 | `k8s.io/kubernetes/pkg/scheduler/util` | 16 |
+| 124 | `k8s.io/kubernetes/pkg/controller/ttlafterfinished` | 15 |
+| 125 | `k8s.io/kubernetes/pkg/controller/util/consistency` | 15 |
+| 126 | `k8s.io/kubernetes/pkg/controller/volume/vacprotection` | 15 |
+| 127 | `k8s.io/kubernetes/pkg/kubelet/network/dns` | 15 |
+| 128 | `k8s.io/kubernetes/pkg/kubelet/secret` | 15 |
+| 129 | `k8s.io/kubernetes/pkg/kubelet/userns` | 15 |
+| 130 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultpreemption` | 15 |
+| 131 | `k8s.io/kubernetes/pkg/controller/storageversiongc` | 14 |
+| 132 | `k8s.io/kubernetes/pkg/kubelet/configmap` | 14 |
+| 133 | `k8s.io/kubernetes/pkg/controller/certificates/rootcacertpublisher` | 13 |
+| 134 | `k8s.io/kubernetes/pkg/controller/clusterroleaggregation` | 13 |
+| 135 | `k8s.io/kubernetes/pkg/controller/nodeipam/ipam/sync` | 13 |
+| 136 | `k8s.io/kubernetes/pkg/controller/scheduling/podgroupprotection` | 13 |
+| 137 | `k8s.io/kubernetes/pkg/controller/ttl` | 13 |
+| 138 | `k8s.io/kubernetes/pkg/kubelet/certificate` | 13 |
+| 139 | `k8s.io/kubernetes/pkg/kubelet/nodestatus` | 13 |
+| 140 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeports` | 12 |
+| 141 | `k8s.io/kubernetes/pkg/controller/certificates` | 11 |
+| 142 | `k8s.io/kubernetes/pkg/controller/util/node` | 11 |
+| 143 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/reconciler` | 11 |
+| 144 | `k8s.io/kubernetes/pkg/scheduler/backend/cache/debugger` | 11 |
+| 145 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodedeclaredfeatures` | 11 |
+| 146 | `k8s.io/kubernetes/pkg/controller/endpointslicemirroring/metrics` | 10 |
+| 147 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/util` | 10 |
+| 148 | `k8s.io/kubernetes/pkg/kubelet/apis/podresources` | 10 |
+| 149 | `k8s.io/kubernetes/pkg/kubelet/cm/dra/state` | 10 |
+| 150 | `k8s.io/kubernetes/pkg/kubelet/preemption` | 10 |
+| 151 | `k8s.io/kubernetes/pkg/controller/daemon/util` | 9 |
+| 152 | `k8s.io/kubernetes/pkg/controller/nodeipam/ipam/cidrset` | 9 |
+| 153 | `k8s.io/kubernetes/pkg/controller/podautoscaler/metrics` | 9 |
+| 154 | `k8s.io/kubernetes/pkg/controller/podautoscaler/monitor` | 9 |
+| 155 | `k8s.io/kubernetes/pkg/controller/volume/pvprotection` | 9 |
+| 156 | `k8s.io/kubernetes/pkg/controller/volume/selinuxwarning/cache` | 9 |
+| 157 | `k8s.io/kubernetes/pkg/kubelet/certificate/bootstrap` | 9 |
+| 158 | `k8s.io/kubernetes/pkg/kubelet/pluginmanager/operationexecutor` | 9 |
+| 159 | `k8s.io/kubernetes/pkg/kubelet/token` | 9 |
+| 160 | `k8s.io/kubernetes/pkg/kubelet/util/store` | 9 |
+| 161 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/deferredpodscheduling` | 9 |
+| 162 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/imagelocality` | 9 |
+| 163 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeunschedulable` | 9 |
+| 164 | `k8s.io/kubernetes/pkg/controller/certificates/approver` | 8 |
+| 165 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/metrics` | 8 |
+| 166 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/statusupdater` | 8 |
+| 167 | `k8s.io/kubernetes/pkg/controller/volume/ephemeral` | 8 |
+| 168 | `k8s.io/kubernetes/pkg/kubelet/cm/containermap` | 8 |
+| 169 | `k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/checkpoint` | 8 |
+| 170 | `k8s.io/kubernetes/pkg/kubelet/nodeshutdown/systemd` | 8 |
+| 171 | `k8s.io/kubernetes/pkg/kubelet/prober/results` | 8 |
+| 172 | `k8s.io/kubernetes/pkg/kubelet/status/testing` | 8 |
+| 173 | `k8s.io/kubernetes/pkg/kubelet/watchdog` | 8 |
+| 174 | `k8s.io/kubernetes/pkg/scheduler/framework/parallelize` | 8 |
+| 175 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodename` | 8 |
+| 176 | `k8s.io/kubernetes/pkg/scheduler/metrics/resources` | 8 |
+| 177 | `k8s.io/kubernetes/pkg/kubelet/client` | 7 |
+| 178 | `k8s.io/kubernetes/pkg/kubelet/metrics` | 7 |
+| 179 | `k8s.io/kubernetes/pkg/kubelet/volumemanager/volumehealth` | 7 |
+| 180 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper` | 7 |
+| 181 | `k8s.io/kubernetes/pkg/controller/certificates/authority` | 6 |
+| 182 | `k8s.io/kubernetes/pkg/controller/namespace` | 6 |
+| 183 | `k8s.io/kubernetes/pkg/controller/serviceaccount/config/v1alpha1` | 6 |
+| 184 | `k8s.io/kubernetes/pkg/controller/validatingadmissionpolicystatus` | 6 |
+| 185 | `k8s.io/kubernetes/pkg/kubelet/cm/admission` | 6 |
+| 186 | `k8s.io/kubernetes/pkg/kubelet/events` | 6 |
+| 187 | `k8s.io/kubernetes/pkg/kubelet/prober/testing` | 6 |
+| 188 | `k8s.io/kubernetes/pkg/kubelet/server/metrics` | 6 |
+| 189 | `k8s.io/kubernetes/pkg/kubelet/sysctl` | 6 |
+| 190 | `k8s.io/kubernetes/pkg/kubelet/util/sliceutils` | 6 |
+| 191 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/podgrouppodscount` | 6 |
+| 192 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/topologyaware` | 6 |
+| 193 | `k8s.io/kubernetes/pkg/scheduler/profile` | 6 |
+| 194 | `k8s.io/kubernetes/pkg/controller/nodeipam` | 5 |
+| 195 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/populator` | 5 |
+| 196 | `k8s.io/kubernetes/pkg/controller/volume/persistentvolume/config/v1alpha1` | 5 |
+| 197 | `k8s.io/kubernetes/pkg/kubelet/apis/config/validation` | 5 |
+| 198 | `k8s.io/kubernetes/pkg/kubelet/checkpointmanager` | 5 |
+| 199 | `k8s.io/kubernetes/pkg/kubelet/checkpointmanager/testing` | 5 |
+| 200 | `k8s.io/kubernetes/pkg/kubelet/kuberuntime/util` | 5 |
+| 201 | `k8s.io/kubernetes/pkg/kubelet/pluginmanager/metrics` | 5 |
+| 202 | `k8s.io/kubernetes/pkg/kubelet/pluginmanager/reconciler` | 5 |
+| 203 | `k8s.io/kubernetes/pkg/kubelet/qos` | 5 |
+| 204 | `k8s.io/kubernetes/pkg/kubelet/volumemanager/metrics` | 5 |
+| 205 | `k8s.io/kubernetes/pkg/scheduler/backend/cache/fake` | 5 |
+| 206 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/schedulinggates` | 5 |
+| 207 | `k8s.io/kubernetes/pkg/controller/volume/selinuxwarning/translator` | 4 |
+| 208 | `k8s.io/kubernetes/pkg/kubelet/apis/config/v1beta1` | 4 |
+| 209 | `k8s.io/kubernetes/pkg/kubelet/kubeletconfig/configfiles` | 4 |
+| 210 | `k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/codec` | 4 |
+| 211 | `k8s.io/kubernetes/pkg/kubelet/oom` | 4 |
+| 212 | `k8s.io/kubernetes/pkg/kubelet/runtimeclass` | 4 |
+| 213 | `k8s.io/kubernetes/pkg/kubelet/util/cache` | 4 |
+| 214 | `k8s.io/kubernetes/pkg/scheduler/backend/api_cache` | 4 |
+| 215 | `k8s.io/kubernetes/pkg/controller/apis/config/v1alpha1` | 3 |
+| 216 | `k8s.io/kubernetes/pkg/controller/certificates/signer/config/v1alpha1` | 3 |
+| 217 | `k8s.io/kubernetes/pkg/controller/cronjob/config/v1alpha1` | 3 |
+| 218 | `k8s.io/kubernetes/pkg/controller/daemon/config/v1alpha1` | 3 |
+| 219 | `k8s.io/kubernetes/pkg/controller/deployment/config/v1alpha1` | 3 |
+| 220 | `k8s.io/kubernetes/pkg/controller/devicetainteviction/config/v1alpha1` | 3 |
+| 221 | `k8s.io/kubernetes/pkg/controller/disruption/config/v1alpha1` | 3 |
+| 222 | `k8s.io/kubernetes/pkg/controller/endpoint/config/v1alpha1` | 3 |
+| 223 | `k8s.io/kubernetes/pkg/controller/endpointslice/config/v1alpha1` | 3 |
+| 224 | `k8s.io/kubernetes/pkg/controller/endpointslicemirroring/config/v1alpha1` | 3 |
+| 225 | `k8s.io/kubernetes/pkg/controller/garbagecollector/config/v1alpha1` | 3 |
+| 226 | `k8s.io/kubernetes/pkg/controller/job/config/v1alpha1` | 3 |
+| 227 | `k8s.io/kubernetes/pkg/controller/job/util` | 3 |
+| 228 | `k8s.io/kubernetes/pkg/controller/namespace/config/v1alpha1` | 3 |
+| 229 | `k8s.io/kubernetes/pkg/controller/nodeipam/config/v1alpha1` | 3 |
+| 230 | `k8s.io/kubernetes/pkg/controller/nodeipam/ipam/test` | 3 |
+| 231 | `k8s.io/kubernetes/pkg/controller/nodelifecycle/config/v1alpha1` | 3 |
+| 232 | `k8s.io/kubernetes/pkg/controller/podautoscaler/config/v1alpha1` | 3 |
+| 233 | `k8s.io/kubernetes/pkg/controller/podgc/config/v1alpha1` | 3 |
+| 234 | `k8s.io/kubernetes/pkg/controller/replicaset/config/v1alpha1` | 3 |
+| 235 | `k8s.io/kubernetes/pkg/controller/replication/config/v1alpha1` | 3 |
+| 236 | `k8s.io/kubernetes/pkg/controller/resourceclaim/config/v1alpha1` | 3 |
+| 237 | `k8s.io/kubernetes/pkg/controller/resourcequota/config/v1alpha1` | 3 |
+| 238 | `k8s.io/kubernetes/pkg/controller/statefulset/config/v1alpha1` | 3 |
+| 239 | `k8s.io/kubernetes/pkg/controller/ttlafterfinished/config/v1alpha1` | 3 |
+| 240 | `k8s.io/kubernetes/pkg/controller/util/endpointslice` | 3 |
+| 241 | `k8s.io/kubernetes/pkg/controller/validatingadmissionpolicystatus/config/v1alpha1` | 3 |
+| 242 | `k8s.io/kubernetes/pkg/controller/volume/attachdetach/config/v1alpha1` | 3 |
+| 243 | `k8s.io/kubernetes/pkg/controller/volume/common` | 3 |
+| 244 | `k8s.io/kubernetes/pkg/controller/volume/ephemeral/config/v1alpha1` | 3 |
+| 245 | `k8s.io/kubernetes/pkg/kubelet/checkpointmanager/checksum` | 3 |
+| 246 | `k8s.io/kubernetes/pkg/kubelet/checkpointmanager/testing/example_checkpoint_formats/v1` | 3 |
+| 247 | `k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/state/testing` | 3 |
+| 248 | `k8s.io/kubernetes/pkg/kubelet/cm/util` | 3 |
+| 249 | `k8s.io/kubernetes/pkg/kubelet/envvars` | 3 |
+| 250 | `k8s.io/kubernetes/pkg/kubelet/pluginmanager` | 3 |
+| 251 | `k8s.io/kubernetes/pkg/kubelet/runtimeclass/testing` | 3 |
+| 252 | `k8s.io/kubernetes/pkg/kubelet/util/queue` | 3 |
+| 253 | `k8s.io/kubernetes/pkg/kubelet/util/swap` | 3 |
+| 254 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder` | 3 |
+| 255 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort` | 3 |
+| 256 | `k8s.io/kubernetes/pkg/controller/apis/config/scheme` | 2 |
+| 257 | `k8s.io/kubernetes/pkg/controller/devicetainteviction/metrics` | 2 |
+| 258 | `k8s.io/kubernetes/pkg/controller/resourceclaim/metrics` | 2 |
+| 259 | `k8s.io/kubernetes/pkg/controller/volume/persistentvolume/options` | 2 |
+| 260 | `k8s.io/kubernetes/pkg/kubelet/apis/config` | 2 |
+| 261 | `k8s.io/kubernetes/pkg/kubelet/apis/grpc` | 2 |
+| 262 | `k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors` | 2 |
+| 263 | `k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/test` | 2 |
+| 264 | `k8s.io/kubernetes/pkg/kubelet/stats/pidlimit` | 2 |
+| 265 | `k8s.io/kubernetes/pkg/kubelet/util/format` | 2 |
+| 266 | `k8s.io/kubernetes/pkg/kubelet/util/ioutils` | 2 |
+| 267 | `k8s.io/kubernetes/pkg/scheduler/apis/config` | 2 |
+| 268 | `k8s.io/kubernetes/pkg/scheduler/apis/config/scheme` | 2 |
+| 269 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/testing` | 2 |
+| 270 | `k8s.io/kubernetes/pkg/controller/apis/config` | 1 |
+| 271 | `k8s.io/kubernetes/pkg/controller/apis/config/fuzzer` | 1 |
+| 272 | `k8s.io/kubernetes/pkg/controller/cronjob/metrics` | 1 |
+| 273 | `k8s.io/kubernetes/pkg/controller/daemon/metrics` | 1 |
+| 274 | `k8s.io/kubernetes/pkg/controller/garbagecollector/metrics` | 1 |
+| 275 | `k8s.io/kubernetes/pkg/controller/job/metrics` | 1 |
+| 276 | `k8s.io/kubernetes/pkg/controller/podgc/metrics` | 1 |
+| 277 | `k8s.io/kubernetes/pkg/controller/replicaset/metrics` | 1 |
+| 278 | `k8s.io/kubernetes/pkg/controller/resourcepoolstatusrequest/metrics` | 1 |
+| 279 | `k8s.io/kubernetes/pkg/controller/statefulset/metrics` | 1 |
+| 280 | `k8s.io/kubernetes/pkg/controller/tainteviction/metrics` | 1 |
+| 281 | `k8s.io/kubernetes/pkg/controller/ttlafterfinished/metrics` | 1 |
+| 282 | `k8s.io/kubernetes/pkg/controller/volume/ephemeral/metrics` | 1 |
+| 283 | `k8s.io/kubernetes/pkg/controller/volume/selinuxwarning/internal/parse` | 1 |
+| 284 | `k8s.io/kubernetes/pkg/kubelet/apis/config/fuzzer` | 1 |
+| 285 | `k8s.io/kubernetes/pkg/kubelet/apis/config/scheme` | 1 |
+| 286 | `k8s.io/kubernetes/pkg/kubelet/apis/config/v1alpha1` | 1 |
+| 287 | `k8s.io/kubernetes/pkg/kubelet/cm/qos` | 1 |
+| 288 | `k8s.io/kubernetes/pkg/kubelet/eviction/api` | 1 |
+| 289 | `k8s.io/kubernetes/pkg/kubelet/util/env` | 1 |
+| 290 | `k8s.io/kubernetes/pkg/scheduler/apis/config/latest` | 1 |
+| 291 | `k8s.io/kubernetes/pkg/scheduler/apis/config/testing` | 1 |
+| 292 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins` | 1 |
+| 293 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature` | 1 |
+| 294 | `k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding/metrics` | 1 |
+
+Real run (writes), then a rerun:
+
+```
+$ go run ./cmd/indexer graph --package k8s.io/kubernetes/pkg/kubelet/envvars --stats
+2 files to graph
+graphed 2 files, stored 5 edges
+edges stored: 5
+  resolution exact: 5
+  resolution name_only: 0
+  resolution ambiguous: 0
+  resolution unresolved: 0
+  reason external: 0
+  reason no_match: 0
+  reason unknown_receiver: 0
+  reason func_value: 0
+  reason candidates_capped: 0
+call kind func: 5
+call kind concrete_method: 0
+call kind interface_method: 0
+call kind func_value: 0
+call kind unknown: 0
+percent ambiguous: 0.0%
+unresolved: 0
+skipped_builtin: 12
+skipped_conversion: 0
+deferred_selector: 15
+deferred_local: 0
+deferred_interface: 0
+interfaces_partial: 0
+invariant: call sites 32 = stored 5 + skipped 12 + deferred 15 [ok]
+```
+
+The rerun prints identical counts. `select count(*) from edges where
+(resolution='unresolved') <> (callee_id is null)` returns 0. All 15 deferred call sites in
+this package are selectors; none are local identifier calls, so the interim `deferred_local`
+counter is 0 here and locals cannot be told apart from unresolved identifiers in this slice
+only in that a locally declared identifier call is deferred rather than stored.

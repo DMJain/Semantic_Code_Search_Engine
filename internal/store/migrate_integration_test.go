@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,8 +315,12 @@ func TestSummariesCompletedAtMigrationKeepsRows(t *testing.T) {
 		t.Fatalf("completed_at default null = %v (err %v), want true", nullTS, err)
 	}
 
-	if _, err := store.MigrateDown(ctx, dbURL); err != nil {
-		t.Fatalf("down: %v", err)
+	// Roll back every migration newer than the completed_at one (00004); the
+	// loop keeps the test valid as later migrations are added.
+	for i := 0; i < 10 && summariesHasCompletedAt(ctx, t, conn); i++ {
+		if _, err := store.MigrateDown(ctx, dbURL); err != nil {
+			t.Fatalf("down: %v", err)
+		}
 	}
 	if summariesHasCompletedAt(ctx, t, conn) {
 		t.Error("summaries.completed_at still present after down")
@@ -349,5 +355,228 @@ func assertSummaryRowCount(ctx context.Context, t *testing.T, conn *pgx.Conn, wa
 	}
 	if n != want {
 		t.Errorf("summaries rows = %d, want %d", n, want)
+	}
+}
+
+// TestEdgesMigrationShape proves migration 00005 adds call_line, call_kind and
+// unresolved_reason, allows the unresolved resolution, enforces every shape and
+// vocabulary CHECK, dedupes identical edges and cascades on callee delete.
+func TestEdgesMigrationShape(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	var fileID, callerID, calleeID int64
+	if err := conn.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc)
+		VALUES ('pkg/a.go', 'pkg', 'sha', 3) RETURNING id`).Scan(&fileID); err != nil {
+		t.Fatalf("insert file: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line)
+		VALUES ($1, 'func', 'A', 'pkg.A', 1, 3) RETURNING id`, fileID).Scan(&callerID); err != nil {
+		t.Fatalf("insert caller: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line)
+		VALUES ($1, 'func', 'B', 'pkg.B', 5, 7) RETURNING id`, fileID).Scan(&calleeID); err != nil {
+		t.Fatalf("insert callee: %v", err)
+	}
+
+	// A valid exact and a valid unresolved row are accepted.
+	if _, err := conn.Exec(ctx, `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+		VALUES ($1, $2, 'B', 'exact', 'treesitter', 2, 'func')`, callerID, calleeID); err != nil {
+		t.Fatalf("insert exact edge: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind, unresolved_reason)
+		VALUES ($1, NULL, 'Missing', 'unresolved', 'treesitter', 3, 'unknown', 'no_match')`, callerID); err != nil {
+		t.Fatalf("insert unresolved edge: %v", err)
+	}
+
+	rejects := []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"unresolved with a callee", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind, unresolved_reason)
+			VALUES ($1, $2, 'B', 'unresolved', 'treesitter', 4, 'unknown', 'no_match')`, []any{callerID, calleeID}},
+		{"exact with no callee", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+			VALUES ($1, NULL, 'B', 'exact', 'treesitter', 4, 'func')`, []any{callerID}},
+		{"unresolved with no reason", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+			VALUES ($1, NULL, 'B', 'unresolved', 'treesitter', 4, 'unknown')`, []any{callerID}},
+		{"exact with a reason", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind, unresolved_reason)
+			VALUES ($1, $2, 'B', 'exact', 'treesitter', 4, 'func', 'no_match')`, []any{callerID, calleeID}},
+		{"name_only with no callee", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+			VALUES ($1, NULL, 'B', 'name_only', 'treesitter', 4, 'func')`, []any{callerID}},
+		{"unknown call kind", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+			VALUES ($1, $2, 'B', 'exact', 'treesitter', 4, 'bogus')`, []any{callerID, calleeID}},
+		{"unknown reason", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind, unresolved_reason)
+			VALUES ($1, NULL, 'B', 'unresolved', 'treesitter', 4, 'unknown', 'bogus')`, []any{callerID}},
+		{"unknown resolution", `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+			VALUES ($1, $2, 'B', 'bogus', 'treesitter', 4, 'func')`, []any{callerID, calleeID}},
+	}
+	for _, tc := range rejects {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := conn.Exec(ctx, tc.sql, tc.args...)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+				t.Errorf("error = %v, want check violation (23514)", err)
+			}
+		})
+	}
+
+	// A duplicate edge is rejected by the unique index.
+	_, err = conn.Exec(ctx, `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+		VALUES ($1, $2, 'B', 'exact', 'treesitter', 2, 'func')`, callerID, calleeID)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("duplicate edge error = %v, want unique violation (23505)", err)
+	}
+
+	// A duplicate unresolved edge (same caller/raw/line, NULL callee) is also
+	// rejected: coalesce(callee_id, 0) makes two NULL callees collide.
+	_, err = conn.Exec(ctx, `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind, unresolved_reason)
+		VALUES ($1, NULL, 'Missing', 'unresolved', 'treesitter', 3, 'unknown', 'no_match')`, callerID)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("duplicate unresolved edge error = %v, want unique violation (23505)", err)
+	}
+
+	// Deleting the callee removes the edge and raises no error.
+	if _, err := conn.Exec(ctx, `DELETE FROM symbols WHERE id = $1`, calleeID); err != nil {
+		t.Fatalf("delete callee: %v", err)
+	}
+	if n := scalarCount(ctx, t, conn, `SELECT count(*) FROM edges WHERE resolution = 'exact'`); n != 0 {
+		t.Errorf("exact edges after callee delete = %d, want 0", n)
+	}
+}
+
+// TestEdgesMigrationDownUpDescriptorUnchanged proves 00005's Down reverses
+// exactly: after Up, one Down and Up again the edges table description
+// (columns, constraints, indexes) is unchanged. `make migrate-down migrate-up`
+// on an empty database is the same cycle.
+func TestEdgesMigrationDownUpDescriptorUnchanged(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	before := edgesDescriptor(ctx, t, conn)
+	if _, err := store.MigrateDown(ctx, dbURL); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	after := edgesDescriptor(ctx, t, conn)
+	if before != after {
+		t.Errorf("edges description changed across down/up:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// edgesDescriptor is a canonical description of the edges table: its columns,
+// constraints and indexes.
+func edgesDescriptor(ctx context.Context, t *testing.T, conn *pgx.Conn) string {
+	t.Helper()
+	var b strings.Builder
+	sections := []struct{ header, sql string }{
+		{"columns", `SELECT column_name || ' ' || data_type || ' ' || is_nullable || ' ' || coalesce(column_default, '')
+			FROM information_schema.columns WHERE table_name = 'edges' ORDER BY ordinal_position`},
+		{"constraints", `SELECT conname || ' ' || pg_get_constraintdef(oid)
+			FROM pg_constraint WHERE conrelid = 'edges'::regclass ORDER BY conname`},
+		{"indexes", `SELECT indexname || ' ' || indexdef FROM pg_indexes WHERE tablename = 'edges' ORDER BY indexname`},
+	}
+	for _, section := range sections {
+		fmt.Fprintf(&b, "[%s]\n", section.header)
+		rows, err := conn.Query(ctx, section.sql)
+		if err != nil {
+			t.Fatalf("descriptor %s: %v", section.header, err)
+		}
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				rows.Close()
+				t.Fatalf("scan descriptor %s: %v", section.header, err)
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("descriptor %s rows: %v", section.header, err)
+		}
+	}
+	return b.String()
+}
+
+// scalarCount runs a query returning one integer count.
+func scalarCount(ctx context.Context, t *testing.T, conn *pgx.Conn, sql string, args ...any) int64 {
+	t.Helper()
+	var n int64
+	if err := conn.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
+		t.Fatalf("query %q: %v", sql, err)
+	}
+	return n
+}
+
+// TestEdgesMigrationConvertsNullCalleeRows proves the widened Up conversion:
+// a pre-00005 row with a NULL callee and any non-unresolved resolution (the old
+// schema allowed exact/name_only/ambiguous there) becomes unresolved/no_match,
+// so the new shape CHECKs hold even when data predates the migration.
+func TestEdgesMigrationConvertsNullCalleeRows(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, err := store.MigrateDown(ctx, dbURL); err != nil {
+		t.Fatalf("down to the pre-00005 shape: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	var fileID, callerID int64
+	if err := conn.QueryRow(ctx, `INSERT INTO files (path, package, sha, loc)
+		VALUES ('pkg/a.go', 'pkg', 'sha', 3) RETURNING id`).Scan(&fileID); err != nil {
+		t.Fatalf("insert file: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line)
+		VALUES ($1, 'func', 'A', 'pkg.A', 1, 3) RETURNING id`, fileID).Scan(&callerID); err != nil {
+		t.Fatalf("insert caller: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source)
+		VALUES ($1, NULL, 'Missing', 'exact', 'treesitter')`, callerID); err != nil {
+		t.Fatalf("insert pre-00005 NULL-callee row: %v", err)
+	}
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	var resolution, reason string
+	var calleeNull bool
+	if err := conn.QueryRow(ctx,
+		`SELECT resolution, unresolved_reason, callee_id IS NULL FROM edges`).Scan(&resolution, &reason, &calleeNull); err != nil {
+		t.Fatalf("read converted row: %v", err)
+	}
+	if resolution != "unresolved" || reason != "no_match" || !calleeNull {
+		t.Errorf("converted row = (%q, %q, callee NULL %v), want (unresolved, no_match, true)", resolution, reason, calleeNull)
 	}
 }

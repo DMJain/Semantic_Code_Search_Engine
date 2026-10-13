@@ -68,6 +68,12 @@ var builtins = map[string]bool{
 // parse error and stores it anyway.
 var ErrSyntax = errors.New("parse: syntax errors")
 
+// IsBuiltin reports whether name is one of the predeclared identifiers: the
+// builtin functions (len, append, ...) and the predeclared type names used as
+// conversions (string, int, ...). It exposes the single [builtins] list so the
+// graph stage uses the same set as raw-call extraction (D-073).
+func IsBuiltin(name string) bool { return builtins[name] }
+
 // Symbol is one function, method, struct or interface extracted from a Go
 // file. QualifiedName is the base name (<import path>.<Name>, or
 // <import path>.(*T).Name for methods); [AssignQualifiedNames] appends #n

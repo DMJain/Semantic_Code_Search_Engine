@@ -53,7 +53,8 @@ func TestNoRawStatusOrLevelLiterals(t *testing.T) {
 		slashed := filepath.ToSlash(path)
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
 			strings.HasSuffix(slashed, "internal/summarize/values.go") ||
-			strings.HasSuffix(slashed, "internal/parse/parse.go") { // tree-sitter field names
+			strings.HasSuffix(slashed, "internal/parse/parse.go") || // tree-sitter field names
+			strings.HasSuffix(slashed, "internal/graph/extract.go") { // tree-sitter field names
 			return nil
 		}
 		src, err := os.ReadFile(path)
