@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -17,8 +18,9 @@ import (
 func runGraph(ctx context.Context, args []string) error {
 	fs := newFlagSet("graph")
 	pkg := fs.String("package", "", "graph only files of this import path (empty = every indexed file)")
-	limit := fs.Int("limit", 0, "graph at most N files (0 = no limit)")
+	limit := fs.Int("limit", 0, "graph at most N stale files (0 = no limit)")
 	stats := fs.Bool("stats", false, "print the edge reconciliation report")
+	status := fs.Bool("status", false, "list the stale files and why, then exit")
 	dryRun := fs.Bool("dry-run", false, "compute edges but write nothing (no-op writer)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -33,7 +35,7 @@ func runGraph(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 	return graphStage(ctx, pool, cfg.KubeDir, graphOptions{
-		Package: *pkg, Limit: *limit, Stats: *stats, DryRun: *dryRun,
+		Package: *pkg, Limit: *limit, Stats: *stats, Status: *status, DryRun: *dryRun,
 	}, os.Stdout)
 }
 
@@ -41,26 +43,60 @@ func runGraph(ctx context.Context, args []string) error {
 type graphOptions struct {
 	// Package limits the run to files of one import path (empty = all).
 	Package string
-	// Limit caps the number of files processed (0 = no limit).
+	// Limit caps the number of stale files processed (0 = no limit).
 	Limit int
 	// Stats prints the reconciliation report.
 	Stats bool
+	// Status lists the stale files and why, then returns without graphing.
+	Status bool
 	// DryRun computes edges and stats but writes nothing (a no-op writer).
 	DryRun bool
 }
 
-// graphFile is one files row selected for graphing.
+// graphFile is one files row selected for graphing, with the freshness markers
+// it was last graphed at (nil = never graphed).
 type graphFile struct {
-	id   int64
-	path string
-	pkg  string
-	sha  string
+	id         int64
+	path       string
+	pkg        string
+	sha        string
+	graphedSHA *string
+	graphedFP  *string
 }
 
-// graphStage re-parses the selected files and writes their tree-sitter edges,
-// one transaction per file. Symbols are loaded once into memory. DB work uses a
-// context a signal does not cancel, so the in-flight file always commits; the
-// cancelled ctx is checked only at file boundaries (the parseCorpus pattern).
+// Stale reasons printed by --status and used to classify files.
+const (
+	reasonNeverGraphed  = "never graphed"
+	reasonContentChange = "content changed"
+	reasonSymbolsChange = "symbols changed"
+)
+
+// graphStatusCap caps the stale-file list --status prints.
+const graphStatusCap = 50
+
+// staleReasons returns why f is stale against the current fingerprint fp, or
+// nil when fresh (D-076). A never-graphed file is reported as such alone.
+func staleReasons(f graphFile, fp string) []string {
+	if f.graphedSHA == nil {
+		return []string{reasonNeverGraphed}
+	}
+	var reasons []string
+	if *f.graphedSHA != f.sha {
+		reasons = append(reasons, reasonContentChange)
+	}
+	if f.graphedFP == nil || *f.graphedFP != fp {
+		reasons = append(reasons, reasonSymbolsChange)
+	}
+	return reasons
+}
+
+// graphStage re-parses the stale files and writes their tree-sitter edges, one
+// transaction per file. Symbols are loaded once into memory. A stale file's
+// whole package is extracted, so the declared-name index covers every file of
+// the package even though only stale files are written (the freshness is per
+// file). DB work uses a context a signal does not cancel, so the in-flight file
+// always commits; the cancelled ctx is checked only at file boundaries (the
+// parseCorpus pattern).
 func graphStage(ctx context.Context, pool *pgxpool.Pool, root string, opts graphOptions, out io.Writer) error {
 	dbCtx := context.WithoutCancel(ctx)
 
@@ -68,27 +104,45 @@ func graphStage(ctx context.Context, pool *pgxpool.Pool, root string, opts graph
 	if err != nil {
 		return err
 	}
-	ix := graph.NewIndex(symbols)
 	fp := graph.Fingerprint(symbols, graph.ResolverVersion)
 
 	files, err := selectGraphFiles(dbCtx, pool, opts.Package)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "%d files to graph\n", len(files))
+
+	if opts.Status {
+		printGraphStatus(out, files, fp)
+		return nil
+	}
+
+	// The symbol index is only needed to analyze files, so it is built after the
+	// --status early return.
+	ix := graph.NewIndex(symbols)
+
+	stale := make(map[int64]bool)
+	toGraph := 0
+	for _, f := range files {
+		if len(staleReasons(f, fp)) > 0 {
+			stale[f.id] = true
+			toGraph++
+		}
+	}
+	fmt.Fprintf(out, "%d files to graph\n", toGraph)
 
 	total := graph.NewStats()
 	graphed := 0
 groups:
 	for _, group := range groupGraphFiles(files) {
-		// The limit is applied at package boundaries, so a package is graphed
-		// whole or not at all (the parseCorpus pattern): a partial package would
-		// silently lose the declared names of its other files.
 		if ctx.Err() != nil || (opts.Limit > 0 && graphed >= opts.Limit) {
 			break
 		}
+		if !groupHasStale(group, stale) {
+			continue
+		}
 		// Extract every file of the package first, so the declared-name index
-		// covers the whole package (a type in one file converts in another).
+		// covers the whole package (a type in one file converts in another),
+		// even though only the stale files are analyzed and written.
 		infos := make([]graph.FileInfo, len(group))
 		declared := map[string]string{}
 		for i, f := range group {
@@ -106,8 +160,11 @@ groups:
 			}
 		}
 		for i, f := range group {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || (opts.Limit > 0 && graphed >= opts.Limit) {
 				break groups
+			}
+			if !stale[f.id] {
+				continue
 			}
 			edges, st := graph.Analyze(f.path, f.pkg, infos[i], ix, declared)
 			total.Add(st)
@@ -132,6 +189,51 @@ groups:
 		printGraphStats(out, total)
 	}
 	return nil
+}
+
+// groupHasStale reports whether any file in an already package-ordered group is
+// stale, so fresh packages are never read.
+func groupHasStale(group []graphFile, stale map[int64]bool) bool {
+	for _, f := range group {
+		if stale[f.id] {
+			return true
+		}
+	}
+	return false
+}
+
+// printGraphStatus lists every stale file and why, with independent per-reason
+// counts (a file can be both content changed and symbols changed, so these can
+// sum above the total), the total, and the list capped (falling back to
+// "0 files stale").
+func printGraphStatus(out io.Writer, files []graphFile, fp string) {
+	var stale []graphFile
+	counts := map[string]int{}
+	for _, f := range files {
+		reasons := staleReasons(f, fp)
+		if len(reasons) == 0 {
+			continue
+		}
+		stale = append(stale, f)
+		for _, reason := range reasons {
+			counts[reason]++
+		}
+	}
+	fmt.Fprintf(out, "%d files stale\n", len(stale))
+	if len(stale) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "  reasons (a file may have more than one, so these sum above the total):\n")
+	for _, reason := range []string{reasonNeverGraphed, reasonContentChange, reasonSymbolsChange} {
+		fmt.Fprintf(out, "    %s: %d\n", reason, counts[reason])
+	}
+	for i, f := range stale {
+		if i >= graphStatusCap {
+			fmt.Fprintf(out, "  ... (%d more)\n", len(stale)-graphStatusCap)
+			break
+		}
+		fmt.Fprintf(out, "  %s: %s\n", f.path, strings.Join(staleReasons(f, fp), ", "))
+	}
 }
 
 // loadSymbols reads the whole symbol index, ordered by id, joined to its file
@@ -159,9 +261,10 @@ func loadSymbols(ctx context.Context, pool *pgxpool.Pool) ([]graph.Symbol, error
 	return out, rows.Err()
 }
 
-// selectGraphFiles returns the files to graph, ordered by package then path.
+// selectGraphFiles returns the files to consider, ordered by package then path,
+// with the freshness markers they were last graphed at.
 func selectGraphFiles(ctx context.Context, pool *pgxpool.Pool, pkg string) ([]graphFile, error) {
-	q := `SELECT id, path, package, sha FROM files`
+	q := `SELECT id, path, package, sha, graphed_sha, graphed_symbols_fp FROM files`
 	var args []any
 	if pkg != "" {
 		q += ` WHERE package = $1`
@@ -178,7 +281,7 @@ func selectGraphFiles(ctx context.Context, pool *pgxpool.Pool, pkg string) ([]gr
 	var out []graphFile
 	for rows.Next() {
 		var f graphFile
-		if err := rows.Scan(&f.id, &f.path, &f.pkg, &f.sha); err != nil {
+		if err := rows.Scan(&f.id, &f.path, &f.pkg, &f.sha, &f.graphedSHA, &f.graphedFP); err != nil {
 			return nil, fmt.Errorf("scan file: %w", err)
 		}
 		out = append(out, f)

@@ -532,3 +532,114 @@ The rerun prints identical counts. `select count(*) from edges where
 this package are selectors; none are local identifier calls, so the interim `deferred_local`
 counter is 0 here and locals cannot be told apart from unresolved identifiers in this slice
 only in that a locally declared identifier call is deferred rather than stored.
+
+### Freshness and whole-repo trial run (S2 ticket 03)
+
+Freshness (D-076). A file is stale iff its stored `graphed_sha` differs from its
+current `sha` or its stored `graphed_symbols_fp` differs from the current
+fingerprint, where the fingerprint is
+`graph.Fingerprint(allIndexedSymbols, graph.ResolverVersion)` computed once per
+run. `selectGraphFiles` reads the selected files (all indexed files, or one
+package with `--package`) from the database, and staleness is evaluated in Go over
+that result set (not a DB-side `WHERE`); this is equivalent to a
+`graphed_sha IS DISTINCT FROM sha OR graphed_symbols_fp IS DISTINCT FROM $fp`
+predicate. `graph` then processes only the stale files and prints
+`N files to graph`; a stale file's whole package is still extracted so the
+declared-name index covers every file of the package, but only the stale files are
+analyzed and written (per-file transaction, SIGINT boundary unchanged). `--limit N`
+counts stale files written. `parse` never writes `edges`, `files.graphed_sha` or
+`files.graphed_symbols_fp`.
+
+`graph --status` reasons. For every stale file it prints the path and the reason(s):
+`never graphed` (`graphed_sha IS NULL`, reported alone), `content changed`
+(`graphed_sha` differs from `sha`) and `symbols changed` (`graphed_symbols_fp`
+differs from the fingerprint). A file can carry more than one reason, so the
+per-reason counts are independent and can sum above the file total; the total and
+the list are capped at 50 (`... (N more)`), and `0 files stale` when none. Example
+before the trial (6633 indexed files, 2 already graphed in ticket 02):
+
+```
+6631 files stale
+  reasons (a file may have more than one, so these sum above the total):
+    never graphed: 6631
+    content changed: 0
+    symbols changed: 0
+  staging/src/k8s.io/api/doc.go: never graphed
+  ...
+```
+
+Staleness tests (fixture plus real Postgres, `TestGraphStaleness*`). (i) A callee
+removed and re-parsed: the cascade deletes its edge with no CHECK violation
+(shape-violating rows = 0); the caller's content-unchanged file is reported
+`symbols changed`, and the removed callee's file carries both `content changed`
+and `symbols changed` (so the independent per-reason counts, `content changed: 1`
+and `symbols changed: 2`, sum above the 2-file total). (ii) A symbol added that
+makes a previously `no_match` identifier resolvable: the fingerprint changes, so a
+file whose content did not change (`z.go`) is reported stale (`symbols changed`)
+and the call becomes `exact`. (iii) A body-only edit: only the edited file is
+stale, reason `content changed`, `symbols changed: 0`, and no other file is listed.
+
+Body-only-edit interpretation. A body-only edit changes the file's content hash,
+so the edited file itself is stale by `content changed`; the ticket's "makes
+nothing newly stale" is read as no OTHER file becoming stale, because the
+symbol-set fingerprint (id, kind, package, qualified name, receiver of all
+symbols, plus the resolver version) is unchanged.
+
+Other tests. `TestFingerprintVersionAndInputs` proves the fingerprint is
+deterministic, changes when `ResolverVersion` is bumped, ignores `StartLine`
+(line numbers), and changes when a symbol's kind changes or a symbol is added.
+`TestGraphStageRerunIdempotent` proves a second `graph` prints `0 files to graph`
+and rebuilds nothing. `TestGraphStageInterruptedThenRerunSameCount` proves an
+interrupted run (simulated with `--limit 1`, leaving the rest stale) followed by a
+full run yields the same `select count(*) from edges where source='treesitter'`
+as an uninterrupted run on the fixture tree. `TestGraphParseLeavesGraphState`
+proves a real re-parse leaves the stored edges and both markers unchanged (and
+asserts the run stored edges first, so it cannot pass vacuously); a vanished
+callee's edge is removed by the cascade FK (D-076/story 31), exercised by
+`TestGraphStalenessCalleeRemoved`.
+
+Whole-repo trial run (dev DB, for performance only). This run's edges are mostly
+deferred and will go stale as later tickets bump the resolver version; the final
+whole-repo run is ticket 09. Command and output:
+
+```
+$ time go run ./cmd/indexer graph --stats
+6631 files to graph
+graphed 6631 files, stored 25075 edges
+edges stored: 25075
+  resolution exact: 24580
+  resolution name_only: 0
+  resolution ambiguous: 0
+  resolution unresolved: 495
+  reason external: 0
+  reason no_match: 495
+  reason unknown_receiver: 0
+  reason func_value: 0
+  reason candidates_capped: 0
+call kind func: 24580
+call kind concrete_method: 0
+call kind interface_method: 0
+call kind func_value: 0
+call kind unknown: 495
+percent ambiguous: 0.0%
+unresolved: 495
+skipped_builtin: 33357
+skipped_conversion: 339
+deferred_selector: 183929
+deferred_local: 3782
+deferred_interface: 0
+interfaces_partial: 0
+invariant: call sites 246482 = stored 25075 + skipped 33696 + deferred 187711 [ok]
+
+real 49.82s  user 6.64s  sys 2.12s
+```
+
+`select count(*) from edges where source='treesitter'` is 25080 (the 25075
+written here plus the 5 rows ticket 02 left for `pkg/kubelet/envvars`, which were
+fresh and skipped); shape-violating rows = 0. Afterwards:
+
+```
+$ go run ./cmd/indexer graph --status   -> 0 files stale
+$ go run ./cmd/indexer graph            -> 0 files to graph
+```
+
