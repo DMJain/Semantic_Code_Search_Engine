@@ -1,0 +1,18 @@
+{
+  "resolver_version": 5,
+  "interface_sites": 9547,
+  "candidate_total": 55555,
+  "interfaces_partial": 762,
+  "p50": 2,
+  "p90": 10,
+  "p99": 78,
+  "max": 407,
+  "at_most_5": 7957,
+  "at_most_10": 8624,
+  "at_most_20": 9010,
+  "at_most_50": 9381,
+  "at_most_100": 9477,
+  "chosen_n": 50,
+  "escalate": false,
+  "rule": "smallest of {5,10,20,50,100} such that at least 95% of interface call sites have at most N candidates"
+}

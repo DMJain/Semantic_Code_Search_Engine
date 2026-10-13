@@ -1057,3 +1057,74 @@ package's fields). A constructor is a package-level function with exactly one
 declared result (results are counted by name); methods, multi-result functions
 and unclear written result types stay unknown. `func_value` locals remain
 `deferred_local` until ticket 09.
+
+### Rule 4 candidates and the cap histogram (S2 ticket 07)
+
+What changed. Rule 4's candidate set is now computed correctly and the cap N is
+chosen from evidence; production still stores no Rule 4 rows (an interface call
+site is counted `deferred_interface`, `interfaces_partial` stays 0), so this
+ticket only adds the machinery the cap ticket applies. `internal/graph` gains
+interface facts in the names-only pass (`FileFacts.Interfaces`: each named
+interface's direct method names and embedded elements) and the candidate
+computation. The resolver version is bumped 4 -> 5.
+
+Candidate algorithm. An interface's known method names are its directly declared
+`method_elem` names plus, recursively, the names of same-package embedded
+interfaces, with a cycle guard (`NameIndex.InterfaceMethodNames`). An embedded
+interface in another package, or an element the extractor cannot read (a type
+union), contributes no names and sets `partial`; the candidate set built from the
+smaller name set is then a superset. An interface with no known method name
+yields no candidates. Candidates (`Index.InterfaceCandidates`, which takes the
+cap N as a parameter) are the concrete indexed types (value or pointer receiver,
+interfaces excluded, signatures not compared) whose method-name set, built from
+the symbol index (`kind='method'`, receiver base, name), contains every required
+name; the set is the intersection of the types declaring each name. Candidates
+are counted over the whole indexed set, never slice-filtered.
+
+Fixture goldens (`cmd/indexer/testdata/graph/interfaces/`, plus `ifaceext/` for
+the cross-package embed, real Postgres). `Store{Get;Set}` with `A{Get(value),
+Set(pointer)}` and `B{Get}` gives only A; `Both{Base(Read);Write}` expands the
+same-package embedded `Base` so both C and D qualify; `UsesExt{ext.Extra;Write}`
+embeds a cross-package interface, so its known names are only `Write`, its
+candidates are C and D, and the call site increments `interfaces_partial`. The
+uncapped rows for the package (`TestGraphStageInterfaceRule4Uncapped`):
+`resolution ambiguous: 6`, `call kind interface_method: 6`,
+`interfaces_partial: 1`, `deferred_interface: 0`, invariant
+`call sites 6 = stored 6 + skipped 0 + deferred 0 [ok]`. The same package under
+the production path (`TestGraphStageInterfaceProductionDefers`) stores no rows
+and reports `deferred_interface: 4`. Unit tests pin the candidate cases directly:
+`interface{Get;Set}` with `A{Get,Set}` and `B{Get}` gives only A; a same-package
+embed expands; a cross-package embed sets partial and keeps only the known names;
+an embedding cycle terminates; an interface with zero known methods gives none.
+
+Dry-run vs uncapped run. `indexer graph --uncapped-histogram` is a flag on the
+`graph` command: it runs the same extraction/resolution code path over every
+indexed file with a writer that writes nothing (no `edges` row, no
+`graphed_*` marker) and records each interface call site's candidate count. A
+test-only `graphOptions.Rule4Uncapped` path stores the uncapped Rule 4 rows so
+the two can be compared; production never sets it.
+`TestGraphStageUncappedHistogramMatchesUncappedRun` proves the dry run leaves the
+fixture edge count unchanged and that its candidate total equals the
+`interface_method` row count of the uncapped stored run.
+
+Real-tree histogram (dev DB, all 6633 indexed files; command
+`go run ./cmd/indexer graph --stats --uncapped-histogram`):
+
+```
+cap histogram: 9547 interface call sites, 55555 candidates total
+  p50: 2, p90: 10, p99: 78, max: 407
+  at most 5: 7957, 10: 8624, 20: 9010, 50: 9381, 100: 9477
+  interfaces_partial: 762
+  chosen N: 50
+```
+
+The 95% requirement is 9070 of 9547 sites; 20 candidates cover 9010 (94.4%) and
+50 covers 9381 (98.3%), so the smallest qualifying threshold is **N = 50**
+(recorded in D-075, evidence `eval/results/callgraph/cap-histogram.json`). 50 is
+not above 50, so no escalation. `interfaces_partial` was 762 and 540 interface
+call sites produced no candidate (counted `deferred_interface`). The dry run
+wrote nothing: the dev DB edge count was 26917 before and after.
+
+Checks. `make test` green (throwaway database per test, no new skips);
+`make ci-local` green (`go vet`, tests, golangci-lint 0 issues, shellcheck,
+actionlint).

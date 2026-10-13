@@ -96,7 +96,6 @@ func Extract(src []byte) (FileInfo, error) {
 	return info, nil
 }
 
-// FileFacts is the names-only tree-sitter result for one file (spec story 101
 // TypeRef is a resolved type reference for a same-package fact (a struct field
 // type or a constructor result). Pkg is the imported package path of the named
 // type ("" means the declaring package); Name is the type name. A qualified type
@@ -111,9 +110,10 @@ type TypeRef struct {
 // FileFacts is the names-only tree-sitter result for one file (spec story 101
 // and the same-package facts Rule 3 needs): the package-level declared names, the
 // resolved type of every named field of each named struct (embedded fields are
-// skipped, so promotion is unseen), and the single declared result type of each
+// skipped, so promotion is unseen), the single declared result type of each
 // function (a function with zero or two-or-more results is not a constructor and
-// is absent).
+// is absent), and every named interface's method names and embedded elements
+// (Rule 4, D-075).
 type FileFacts struct {
 	// Declared maps a package-level name to its kind ("type", "func", "var" or
 	// "const").
@@ -122,6 +122,29 @@ type FileFacts struct {
 	Fields map[string]TypeRef
 	// Results maps a function name to its single declared result resolved type.
 	Results map[string]TypeRef
+	// Interfaces maps a named interface to its direct method names and embedded
+	// elements.
+	Interfaces map[string]InterfaceFact
+}
+
+// InterfaceFact is one named interface's directly declared method names and
+// embedded elements, collected for Rule 4 candidate expansion (D-075).
+type InterfaceFact struct {
+	// Methods is the set of method names declared directly on the interface.
+	Methods map[string]bool
+	// Embeds is the interface's embedded elements in source order.
+	Embeds []Embed
+}
+
+// Embed is one embedded element of an interface: a named type in the same
+// package (Pkg "", Name set), a qualified type from another package (Pkg set,
+// Name set), an inline anonymous interface (Inline set), or an element the
+// extractor cannot expand (Unknown, for example a type-union constraint).
+type Embed struct {
+	Pkg     string
+	Name    string
+	Inline  *InterfaceFact
+	Unknown bool
 }
 
 // SourceFacts re-parses src and returns the package-level facts the resolver
@@ -141,14 +164,88 @@ func SourceFacts(src []byte) (FileFacts, error) {
 	collectImports(root, src, aliases)
 
 	facts := FileFacts{
-		Declared: map[string]string{},
-		Fields:   map[string]TypeRef{},
-		Results:  map[string]TypeRef{},
+		Declared:   map[string]string{},
+		Fields:     map[string]TypeRef{},
+		Results:    map[string]TypeRef{},
+		Interfaces: map[string]InterfaceFact{},
 	}
 	collectDeclaredNames(root, src, facts.Declared)
 	collectStructFields(root, src, aliases, facts.Fields)
 	collectFuncResults(root, src, aliases, facts.Results)
+	collectInterfaceFacts(root, src, aliases, facts.Interfaces)
 	return facts, nil
+}
+
+// collectInterfaceFacts records every named interface's direct method names and
+// embedded elements (Rule 4, D-075).
+func collectInterfaceFacts(root *sitter.Node, src []byte, aliases map[string]string, into map[string]InterfaceFact) {
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		decl := root.NamedChild(i)
+		if decl.Type() != "type_declaration" {
+			continue
+		}
+		for j := 0; j < int(decl.NamedChildCount()); j++ {
+			spec := decl.NamedChild(j)
+			if spec.Type() != "type_spec" {
+				continue
+			}
+			name := fieldName(spec, src)
+			st := spec.ChildByFieldName("type")
+			if name == "" || st == nil || st.Type() != "interface_type" {
+				continue
+			}
+			into[name] = interfaceFact(st, src, aliases)
+		}
+	}
+}
+
+// interfaceFact builds one interface's fact from an interface_type node: a
+// method_elem contributes a method name, a type_elem an embedded element.
+func interfaceFact(n *sitter.Node, src []byte, aliases map[string]string) InterfaceFact {
+	f := InterfaceFact{Methods: map[string]bool{}}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		switch c.Type() {
+		case "method_elem":
+			if name := fieldName(c, src); name != "" {
+				f.Methods[name] = true
+			}
+		case "type_elem":
+			f.Embeds = append(f.Embeds, interfaceEmbed(c, src, aliases))
+		}
+	}
+	return f
+}
+
+// interfaceEmbed reduces one embedded element. A single named type (bare or
+// qualified) is an embed; an inline interface is expanded in place; any other
+// shape (a type union, a pointer, a parenthesised list) is unresolvable and is
+// marked Unknown, so its method names are never guessed.
+func interfaceEmbed(elem *sitter.Node, src []byte, aliases map[string]string) Embed {
+	if elem.NamedChildCount() != 1 {
+		return Embed{Unknown: true}
+	}
+	child := elem.NamedChild(0)
+	switch child.Type() {
+	case "type_identifier":
+		return Embed{Name: child.Content(src)}
+	case "qualified_type":
+		pkgNode := child.ChildByFieldName("package")
+		nameNode := child.ChildByFieldName("name")
+		if pkgNode == nil || nameNode == nil {
+			return Embed{Unknown: true}
+		}
+		path, ok := aliases[pkgNode.Content(src)]
+		if !ok {
+			return Embed{Unknown: true}
+		}
+		return Embed{Pkg: path, Name: nameNode.Content(src)}
+	case "interface_type":
+		inline := interfaceFact(child, src, aliases)
+		return Embed{Inline: &inline}
+	default:
+		return Embed{Unknown: true}
+	}
 }
 
 // collectDeclaredNames records the package-level declared names (functions,

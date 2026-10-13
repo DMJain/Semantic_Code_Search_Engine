@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,7 @@ func runGraph(ctx context.Context, args []string) error {
 	stats := fs.Bool("stats", false, "print the edge reconciliation report")
 	status := fs.Bool("status", false, "list the stale files and why, then exit")
 	dryRun := fs.Bool("dry-run", false, "compute edges but write nothing (no-op writer)")
+	uncapped := fs.Bool("uncapped-histogram", false, "dry-run the whole tree with Rule 4 uncapped, print the candidate histogram and write "+capHistogramPath)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -34,9 +36,38 @@ func runGraph(ctx context.Context, args []string) error {
 		return err
 	}
 	defer pool.Close()
-	return graphStage(ctx, pool, cfg.KubeDir, graphOptions{
+
+	opts := graphOptions{
 		Package: *pkg, Limit: *limit, Stats: *stats, Status: *status, DryRun: *dryRun,
-	}, os.Stdout)
+	}
+	if *uncapped {
+		opts.Histogram = graph.NewCapHistogram()
+	}
+	if err := graphStage(ctx, pool, cfg.KubeDir, opts, os.Stdout); err != nil {
+		return err
+	}
+	if opts.Histogram != nil {
+		if err := writeCapHistogram(capHistogramPath, opts.Histogram); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// capHistogramPath is where the uncapped-histogram dry run commits its evidence
+// (the D-075 path).
+const capHistogramPath = "eval/results/callgraph/cap-histogram.json"
+
+// writeCapHistogram marshals the histogram result to path.
+func writeCapHistogram(path string, h *graph.CapHistogram) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(h.Result(graph.ResolverVersion), "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
 // graphOptions configures one graph run.
@@ -51,6 +82,14 @@ type graphOptions struct {
 	Status bool
 	// DryRun computes edges and stats but writes nothing (a no-op writer).
 	DryRun bool
+	// Rule4Uncapped computes Rule 4 (interface) rows with no cap and writes
+	// them. It exists only for tests that compare the histogram dry run to an
+	// uncapped stored run; production never sets it in this ticket.
+	Rule4Uncapped bool
+	// Histogram, when non-nil, runs the uncapped-histogram dry run: Rule 4 is
+	// computed over every indexed file, nothing is written, and each interface
+	// call site's candidate count is recorded here.
+	Histogram *graph.CapHistogram
 }
 
 // graphFile is one files row selected for graphing, with the freshness markers
@@ -128,10 +167,19 @@ func graphStage(ctx context.Context, pool *pgxpool.Pool, root string, opts graph
 	// --status early return.
 	ix := graph.NewIndex(symbols)
 
+	// History mode runs the real extraction/resolution code path over every
+	// indexed file with a no-op writer, so the histogram is evidence about the
+	// whole tree rather than only the currently stale files.
+	forceAll := opts.Histogram != nil
+	rule4 := graph.Rule4{Compute: opts.Rule4Uncapped || opts.Histogram != nil}
+	if opts.Histogram != nil {
+		rule4.Observe = opts.Histogram.Observe
+	}
+
 	stale := make(map[int64]bool)
 	toGraph := 0
 	for _, f := range files {
-		if len(staleReasons(f, fp)) > 0 {
+		if forceAll || len(staleReasons(f, fp)) > 0 {
 			stale[f.id] = true
 			toGraph++
 		}
@@ -163,9 +211,9 @@ groups:
 			if err != nil {
 				return fmt.Errorf("extract %s: %w", f.path, err)
 			}
-			edges, st := graph.Analyze(f.path, f.pkg, info, ix, names)
+			edges, st := graph.Analyze(f.path, f.pkg, info, ix, names, rule4)
 			total.Add(st)
-			if !opts.DryRun {
+			if !opts.DryRun && !forceAll {
 				if err := writeGraphFile(dbCtx, pool, f, edges, fp); err != nil {
 					return err
 				}
@@ -177,15 +225,34 @@ groups:
 	if err := total.Check(); err != nil {
 		return fmt.Errorf("stats invariant: %w", err)
 	}
-	if opts.DryRun {
+	switch {
+	case forceAll:
+		fmt.Fprintf(out, "uncapped histogram dry run: %d files, %d stored-row total (Rule 4 candidates included), nothing written\n",
+			graphed, total.Stored())
+	case opts.DryRun:
 		fmt.Fprintf(out, "would graph %d files, %d edges\n", graphed, total.Stored())
-	} else {
+	default:
 		fmt.Fprintf(out, "graphed %d files, stored %d edges\n", graphed, total.Stored())
 	}
 	if opts.Stats {
 		printGraphStats(out, total)
 	}
+	if opts.Histogram != nil {
+		printCapHistogram(out, opts.Histogram)
+	}
 	return nil
+}
+
+// printCapHistogram writes the uncapped candidate histogram summary (D-075).
+func printCapHistogram(out io.Writer, h *graph.CapHistogram) {
+	r := h.Result(graph.ResolverVersion)
+	fmt.Fprintf(out, "cap histogram: %d interface call sites, %d candidates total\n",
+		r.InterfaceSites, r.CandidateTotal)
+	fmt.Fprintf(out, "  p50: %d, p90: %d, p99: %d, max: %d\n", r.P50, r.P90, r.P99, r.Max)
+	fmt.Fprintf(out, "  at most 5: %d, 10: %d, 20: %d, 50: %d, 100: %d\n",
+		r.AtMost5, r.AtMost10, r.AtMost20, r.AtMost50, r.AtMost100)
+	fmt.Fprintf(out, "  interfaces_partial: %d\n", r.InterfacesPartial)
+	fmt.Fprintf(out, "  chosen N: %d\n", r.ChosenN)
 }
 
 // groupHasStale reports whether any file in an already package-ordered group is
@@ -289,6 +356,7 @@ func buildNameIndex(ctx context.Context, pool *pgxpool.Pool, root string) (*grap
 		names.Add(pkg, facts.Declared)
 		names.AddFields(pkg, facts.Fields)
 		names.AddResults(pkg, facts.Results)
+		names.AddInterfaces(pkg, facts.Interfaces)
 	}
 	return names, rows.Err()
 }

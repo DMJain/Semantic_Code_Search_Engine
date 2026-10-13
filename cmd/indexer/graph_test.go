@@ -418,6 +418,113 @@ func TestGraphStageRule5Goldens(t *testing.T) {
 	}
 }
 
+// TestGraphStageInterfaceProductionDefers proves the production path in ticket
+// 07 still stores no Rule 4 rows: every interface call site is counted
+// deferred_interface and interfaces_partial stays 0.
+func TestGraphStageInterfaceProductionDefers(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{Package: "k8s.io/kubernetes/interfaces", Stats: true})
+
+	for _, caller := range []string{
+		"k8s.io/kubernetes/interfaces.callStore",
+		"k8s.io/kubernetes/interfaces.callBoth",
+		"k8s.io/kubernetes/interfaces.callUsesExt",
+	} {
+		if got := edgesFor(t, pool, caller); len(got) != 0 {
+			t.Errorf("production edges for %s = %+v, want none", caller, got)
+		}
+	}
+	for _, line := range []string{
+		"resolution ambiguous: 0",
+		"call kind interface_method: 0",
+		"deferred_interface: 4",
+		"interfaces_partial: 0",
+		"invariant: call sites 4 = stored 0 + skipped 0 + deferred 4 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphStageInterfaceRule4Uncapped exercises the uncapped Rule 4 rows: A
+// (value Get, pointer Set) is the only Store candidate, the same-package
+// embedded Both expands to A and C, and the cross-package UsesExt contributes
+// only Set (A and C) and increments interfaces_partial.
+func TestGraphStageInterfaceRule4Uncapped(t *testing.T) {
+	pool, root := graphFixture(t)
+	out := runGraphStage(t, pool, root, graphOptions{
+		Package: "k8s.io/kubernetes/interfaces", Rule4Uncapped: true, Stats: true,
+	})
+
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callStore"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "s.Get", 52, "k8s.io/kubernetes/interfaces.(A).Get"},
+			{"ambiguous", "", "interface_method", "s.Set", 53, "k8s.io/kubernetes/interfaces.(*A).Set"},
+		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callBoth"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "b.Write", 57, "k8s.io/kubernetes/interfaces.(C).Write"},
+			{"ambiguous", "", "interface_method", "b.Write", 57, "k8s.io/kubernetes/interfaces.(D).Write"},
+		})
+	assertEdges(t, edgesFor(t, pool, "k8s.io/kubernetes/interfaces.callUsesExt"),
+		[]edgeRow{
+			{"ambiguous", "", "interface_method", "u.Write", 61, "k8s.io/kubernetes/interfaces.(C).Write"},
+			{"ambiguous", "", "interface_method", "u.Write", 61, "k8s.io/kubernetes/interfaces.(D).Write"},
+		})
+
+	for _, line := range []string{
+		"resolution ambiguous: 6",
+		"call kind interface_method: 6",
+		"interfaces_partial: 1",
+		"deferred_interface: 0",
+		"invariant: call sites 6 = stored 6 + skipped 0 + deferred 0 [ok]",
+	} {
+		if !bytes.Contains([]byte(out), []byte(line)) {
+			t.Errorf("stats output missing %q\n%s", line, out)
+		}
+	}
+}
+
+// TestGraphStageUncappedHistogramMatchesUncappedRun proves the histogram dry run
+// uses the real code path, writes nothing and its candidate total equals the
+// interface_method rows an uncapped stored run produces.
+func TestGraphStageUncappedHistogramMatchesUncappedRun(t *testing.T) {
+	histPool, root := graphFixture(t)
+	runGraphStage(t, histPool, root, graphOptions{})
+	before := scalarInt(t, histPool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`)
+
+	h := graph.NewCapHistogram()
+	out := runGraphStage(t, histPool, root, graphOptions{Histogram: h, Stats: true})
+	after := scalarInt(t, histPool, `SELECT count(*) FROM edges WHERE source = 'treesitter'`)
+	if after != before {
+		t.Errorf("histogram dry run changed the edge count %d -> %d", before, after)
+	}
+	if h.CandidateTotal() == 0 {
+		t.Fatalf("histogram recorded no candidates:\n%s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("chosen N: 5")) {
+		t.Errorf("histogram output missing chosen N 5:\n%s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("uncapped histogram dry run:")) {
+		t.Errorf("histogram output should label the dry run honestly:\n%s", out)
+	}
+	if bytes.Contains([]byte(out), []byte("edges\n")) {
+		t.Errorf("histogram output should not call the uncapped total an edge count:\n%s", out)
+	}
+
+	uncapped := testdb.New(t)
+	seedFiles(t, uncapped, root)
+	runParseCorpus(t, uncapped, root, 0)
+	runGraphStage(t, uncapped, root, graphOptions{Rule4Uncapped: true})
+	stored := scalarInt(t, uncapped,
+		`SELECT count(*) FROM edges WHERE source = 'treesitter' AND call_kind = 'interface_method'`)
+	if stored != int64(h.CandidateTotal()) {
+		t.Errorf("uncapped stored interface rows = %d, histogram candidate total = %d",
+			stored, h.CandidateTotal())
+	}
+}
+
 // TestGraphResolverVersionBumpStalesFiles proves the resolver version is part of
 // the freshness fingerprint (D-076): bumping it changes the fingerprint, a file
 // graphed at the previous version's fingerprint is stale (symbols changed), and
@@ -736,8 +843,8 @@ func TestGraphStatusNeverGraphed(t *testing.T) {
 	pool, root := graphFixture(t)
 
 	before := runGraphStage(t, pool, root, graphOptions{Status: true})
-	if !strings.Contains(before, "13 files stale") || !strings.Contains(before, "never graphed: 13") {
-		t.Errorf("status before graphing should list 13 never-graphed files:\n%s", before)
+	if !strings.Contains(before, "15 files stale") || !strings.Contains(before, "never graphed: 15") {
+		t.Errorf("status before graphing should list 15 never-graphed files:\n%s", before)
 	}
 	if !strings.Contains(before, "plain.go: never graphed") {
 		t.Errorf("status should name the never-graphed file:\n%s", before)

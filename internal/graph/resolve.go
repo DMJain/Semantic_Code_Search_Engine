@@ -77,6 +77,21 @@ type Index struct {
 	// interfaces is the set of (package, name) named interface types, so a
 	// known interface receiver is interface_method rather than a concrete one.
 	interfaces map[string]bool
+	// methodsOnType maps (package, receiver base) to the set of method names
+	// declared on that type, for Rule 4 candidates. Interfaces cannot declare
+	// methods, so this holds only concrete types.
+	methodsOnType map[string]map[string]bool
+	// typesWithMethod maps a method name to the concrete types that declare it,
+	// in first-seen (symbol-id) order, so a candidate set is the intersection of
+	// the interface's method names.
+	typesWithMethod map[string][]TypeKey
+}
+
+// TypeKey identifies one concrete indexed type by its package (import path) and
+// receiver base name (a leading `*` stripped).
+type TypeKey struct {
+	Pkg  string
+	Type string
 }
 
 type fileLine struct {
@@ -94,6 +109,8 @@ func NewIndex(symbols []Symbol) *Index {
 		methodsByType:    make(map[string]int64, len(symbols)),
 		methodsByPkgName: make(map[string][]int64, len(symbols)),
 		interfaces:       make(map[string]bool, len(symbols)),
+		methodsOnType:    make(map[string]map[string]bool),
+		typesWithMethod:  make(map[string][]TypeKey),
 	}
 	for _, s := range symbols {
 		ix.byFileLine[fileLine{s.Path, s.StartLine}] = s.ID
@@ -105,9 +122,19 @@ func NewIndex(symbols []Symbol) *Index {
 				ix.funcsByPkgName[k] = s.ID
 			}
 		case parse.KindMethod:
-			k := methodKey(s.Package, strings.TrimPrefix(s.Receiver, "*"), s.Name)
+			base := strings.TrimPrefix(s.Receiver, "*")
+			k := methodKey(s.Package, base, s.Name)
 			if _, ok := ix.methodsByType[k]; !ok {
 				ix.methodsByType[k] = s.ID
+			}
+			tk := pkgName(s.Package, base)
+			if ix.methodsOnType[tk] == nil {
+				ix.methodsOnType[tk] = map[string]bool{}
+			}
+			if !ix.methodsOnType[tk][s.Name] {
+				ix.methodsOnType[tk][s.Name] = true
+				ix.typesWithMethod[s.Name] = append(ix.typesWithMethod[s.Name],
+					TypeKey{Pkg: s.Package, Type: base})
 			}
 			ix.methodsByPkgName[pkgName(s.Package, s.Name)] = append(
 				ix.methodsByPkgName[pkgName(s.Package, s.Name)], s.ID)
@@ -167,15 +194,19 @@ type NameIndex struct {
 	// results maps (package, function name) to the function's single declared
 	// result resolved type, so a same-package constructor call can be typed.
 	results map[string]TypeRef
+	// interfaces maps (package, name) to a named interface's direct method names
+	// and embedded elements, for Rule 4 method-name expansion (D-075).
+	interfaces map[string]InterfaceFact
 }
 
 // NewNameIndex returns an empty index.
 func NewNameIndex() *NameIndex {
 	return &NameIndex{
-		byPkgName: map[string]string{},
-		packages:  map[string]bool{},
-		fields:    map[string]TypeRef{},
-		results:   map[string]TypeRef{},
+		byPkgName:  map[string]string{},
+		packages:   map[string]bool{},
+		fields:     map[string]TypeRef{},
+		results:    map[string]TypeRef{},
+		interfaces: map[string]InterfaceFact{},
 	}
 }
 
@@ -204,6 +235,69 @@ func (ni *NameIndex) AddResults(pkg string, results map[string]TypeRef) {
 	}
 }
 
+// AddInterfaces records one file's named interfaces.
+func (ni *NameIndex) AddInterfaces(pkg string, ifaces map[string]InterfaceFact) {
+	ni.packages[pkg] = true
+	for name, f := range ifaces {
+		ni.interfaces[pkgName(pkg, name)] = f
+	}
+}
+
+// InterfaceMethodNames returns the known method names of the named interface
+// (pkg, name), expanding same-package embedded interfaces recursively with a
+// cycle guard. An embedded interface in another package, or one the index
+// cannot resolve, contributes no names and sets partial: the returned set is
+// then a subset, so the Rule 4 candidate set built from it is a superset. ok is
+// false when (pkg, name) is not a known interface.
+func (ni *NameIndex) InterfaceMethodNames(pkg, name string) (names map[string]bool, partial bool, ok bool) {
+	if _, known := ni.interfaces[pkgName(pkg, name)]; !known {
+		return nil, false, false
+	}
+	names = map[string]bool{}
+	partial = ni.expandInterface(pkg, name, names, map[string]bool{})
+	return names, partial, true
+}
+
+// expandInterface looks up one named interface in pkg and merges it. A missing
+// name is unresolvable (partial); a name already being visited is a cycle and
+// contributes nothing.
+func (ni *NameIndex) expandInterface(pkg, name string, names, visiting map[string]bool) bool {
+	key := pkgName(pkg, name)
+	if visiting[key] {
+		return false
+	}
+	fact, ok := ni.interfaces[key]
+	if !ok {
+		return true
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
+	return ni.mergeInterface(pkg, fact, names, visiting)
+}
+
+// mergeInterface adds a fact's direct method names and expands its embedded
+// elements. Inline interfaces are expanded in place; a cross-package or unknown
+// embed is partial.
+func (ni *NameIndex) mergeInterface(pkg string, fact InterfaceFact, names, visiting map[string]bool) bool {
+	partial := false
+	for m := range fact.Methods {
+		names[m] = true
+	}
+	for _, e := range fact.Embeds {
+		switch {
+		case e.Unknown:
+			partial = true
+		case e.Inline != nil:
+			partial = ni.mergeInterface(pkg, *e.Inline, names, visiting) || partial
+		case e.Pkg != "" && e.Pkg != pkg:
+			partial = true
+		default:
+			partial = ni.expandInterface(pkg, e.Name, names, visiting) || partial
+		}
+	}
+	return partial
+}
+
 // Declared returns the kind of a package-level name ("type", "func", "var" or
 // "const"), or "" when the package does not declare it.
 func (ni *NameIndex) Declared(pkg, name string) string {
@@ -229,8 +323,13 @@ func (ni *NameIndex) IsIndexed(pkg string) bool { return ni.packages[pkg] }
 
 // Analyze classifies one file's call sites and returns the edges to store plus
 // the stats for those call sites. names is the cross-package declared-name index
-// (spec story 101).
-func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex) ([]Edge, Stats) {
+// (spec story 101). An optional Rule4 configures interface-receiver handling;
+// the zero value is production (no Rule 4 rows, counted deferred_interface).
+func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex, rule4 ...Rule4) ([]Edge, Stats) {
+	var r4 Rule4
+	if len(rule4) > 0 {
+		r4 = rule4[0]
+	}
 	st := NewStats()
 	var edges []Edge
 	for _, d := range info.Decls {
@@ -261,7 +360,7 @@ func Analyze(path, pkg string, info FileInfo, ix *Index, names *NameIndex) ([]Ed
 			case c.Name != "":
 				edges, st = analyzeIdentifier(edges, st, callerID, c, d, pkg, ix, names)
 			case c.Qualifier != "":
-				edges, st = analyzeSelector(edges, st, callerID, c, d, ctors, pkg, info.Aliases, ix, names)
+				edges, st = analyzeSelector(edges, st, callerID, c, d, ctors, pkg, info.Aliases, ix, names, r4)
 			default:
 				// A selector on a call result (a method chain) or a call on a
 				// call result: the receiver is unknown, so Rule 5 (spec story 56).
@@ -314,12 +413,11 @@ func analyzeIdentifier(edges []Edge, st Stats, callerID int64, c Call, d Decl, p
 // It is Rule 2 when the qualifier is an import alias. Anything else (an unknown
 // type, a shadowed local, an embedded-only promotion, a type without that
 // method) has an unknown receiver: Rule 5 (spec story 56).
-func analyzeSelector(edges []Edge, st Stats, callerID int64, c Call, d Decl, ctors map[string]TypeRef, pkg string, aliases map[string]string, ix *Index, names *NameIndex) ([]Edge, Stats) {
+func analyzeSelector(edges []Edge, st Stats, callerID int64, c Call, d Decl, ctors map[string]TypeRef, pkg string, aliases map[string]string, ix *Index, names *NameIndex, r4 Rule4) ([]Edge, Stats) {
 	if base, ok := baseType(c.Qualifier, d, ctors, pkg, aliases, names); ok {
 		if targetPkg, typeName, ok := resolveChain(base, c.Fields, pkg, names); ok {
 			if ix.IsInterface(targetPkg, typeName) {
-				st.DeferredInterface++
-				return edges, st
+				return analyzeInterface(edges, st, callerID, c, targetPkg, typeName, ix, names, r4)
 			}
 			if id, ok := ix.ConcreteMethod(targetPkg, typeName, c.Field); ok {
 				st.Exact++
@@ -589,7 +687,43 @@ func (ni *NameIndex) digest() string {
 		}
 		writeDigest(&b, "result", byPkg)
 	}
+	{
+		byPkg := map[string][]string{}
+		for k, fact := range ni.interfaces {
+			i := strings.IndexByte(k, 0)
+			if i < 0 {
+				continue
+			}
+			pkg, name := k[:i], k[i+1:]
+			entries := fact.digestEntries()
+			sort.Strings(entries)
+			byPkg[pkg] = append(byPkg[pkg], name+"\x00"+strings.Join(entries, "|"))
+		}
+		writeDigest(&b, "iface", byPkg)
+	}
 	return b.String()
+}
+
+// digestEntries renders one interface fact deterministically: a direct method,
+// an embed, an inline interface (recursed) or an unresolvable element. The
+// order is normalised by the caller.
+func (f InterfaceFact) digestEntries() []string {
+	var out []string
+	for m := range f.Methods {
+		out = append(out, "m\x00"+m)
+	}
+	for _, e := range f.Embeds {
+		switch {
+		case e.Unknown:
+			out = append(out, "u")
+		case e.Inline != nil:
+			out = append(out, "i\x00"+strings.Join(e.Inline.digestEntries(), "|"))
+		default:
+			out = append(out, "e\x00"+e.Pkg+"\x00"+e.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // writeDigest renders one section (tag) of package keyed entries, packages and
