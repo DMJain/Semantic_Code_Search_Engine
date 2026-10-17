@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -271,6 +272,21 @@ func hasTable(ctx context.Context, t *testing.T, dbURL, table string) bool {
 	return tableExists(ctx, t, conn, table)
 }
 
+func hasColumn(ctx context.Context, t *testing.T, dbURL, table, column string) bool {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = $1 AND column_name = $2)`, table, column).Scan(&ok); err != nil {
+		t.Fatalf("check %s.%s: %v", table, column, err)
+	}
+	return ok
+}
+
 func gooseVersion(ctx context.Context, t *testing.T, dbURL string) int64 {
 	t.Helper()
 	conn, err := pgx.Connect(ctx, dbURL)
@@ -491,17 +507,24 @@ func TestEdgesMigrationDownUpDescriptorUnchanged(t *testing.T) {
 // constraints and indexes.
 func edgesDescriptor(ctx context.Context, t *testing.T, conn *pgx.Conn) string {
 	t.Helper()
+	return tableDescriptor(ctx, t, conn, "edges")
+}
+
+// tableDescriptor is a canonical description of one table: its columns,
+// constraints and indexes.
+func tableDescriptor(ctx context.Context, t *testing.T, conn *pgx.Conn, table string) string {
+	t.Helper()
 	var b strings.Builder
 	sections := []struct{ header, sql string }{
 		{"columns", `SELECT column_name || ' ' || data_type || ' ' || is_nullable || ' ' || coalesce(column_default, '')
-			FROM information_schema.columns WHERE table_name = 'edges' ORDER BY ordinal_position`},
+			FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position`},
 		{"constraints", `SELECT conname || ' ' || pg_get_constraintdef(oid)
-			FROM pg_constraint WHERE conrelid = 'edges'::regclass ORDER BY conname`},
-		{"indexes", `SELECT indexname || ' ' || indexdef FROM pg_indexes WHERE tablename = 'edges' ORDER BY indexname`},
+			FROM pg_constraint WHERE conrelid = $1::regclass ORDER BY conname`},
+		{"indexes", `SELECT indexname || ' ' || indexdef FROM pg_indexes WHERE tablename = $1 ORDER BY indexname`},
 	}
 	for _, section := range sections {
 		fmt.Fprintf(&b, "[%s]\n", section.header)
-		rows, err := conn.Query(ctx, section.sql)
+		rows, err := conn.Query(ctx, section.sql, table)
 		if err != nil {
 			t.Fatalf("descriptor %s: %v", section.header, err)
 		}
@@ -544,8 +567,15 @@ func TestEdgesMigrationConvertsNullCalleeRows(t *testing.T) {
 	if _, err := store.Migrate(ctx, dbURL); err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if _, err := store.MigrateDown(ctx, dbURL); err != nil {
-		t.Fatalf("down to the pre-00005 shape: %v", err)
+	// Roll back every migration newer than 00005 so the pre-00005 shape is
+	// restored; the loop keeps the test valid as later migrations are added.
+	for i := 0; i < 10 && hasColumn(ctx, t, dbURL, "edges", "call_kind"); i++ {
+		if _, err := store.MigrateDown(ctx, dbURL); err != nil {
+			t.Fatalf("down to the pre-00005 shape: %v", err)
+		}
+	}
+	if hasColumn(ctx, t, dbURL, "edges", "call_kind") {
+		t.Fatal("edges.call_kind still present after down")
 	}
 	conn, err := pgx.Connect(ctx, dbURL)
 	if err != nil {
@@ -579,4 +609,153 @@ func TestEdgesMigrationConvertsNullCalleeRows(t *testing.T) {
 	if resolution != "unresolved" || reason != "no_match" || !calleeNull {
 		t.Errorf("converted row = (%q, %q, callee NULL %v), want (unresolved, no_match, true)", resolution, reason, calleeNull)
 	}
+}
+
+// TestMigrationChunksEmbeddingsShape proves migration 00006 adds
+// embeddings.input_hash, the embeddings unique index, files.chunked_sha, the
+// chunk line/degraded columns and the embed_failures table, and that both
+// uniqueness constraints reject a duplicate key (23505) while a different model
+// for the same target is accepted.
+func TestMigrationChunksEmbeddingsShape(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	assertColumnType(ctx, t, conn, "embeddings", "input_hash", "text", "NO")
+	assertColumnDefault(ctx, t, conn, "embeddings", "input_hash", "''")
+	assertColumnType(ctx, t, conn, "files", "chunked_sha", "text", "YES")
+	assertColumnType(ctx, t, conn, "chunks", "start_line", "integer", "NO")
+	assertColumnType(ctx, t, conn, "chunks", "end_line", "integer", "NO")
+	assertColumnType(ctx, t, conn, "chunks", "header_degraded", "smallint", "NO")
+	assertColumnDefault(ctx, t, conn, "chunks", "start_line", "0")
+	assertColumnDefault(ctx, t, conn, "chunks", "end_line", "0")
+	assertColumnDefault(ctx, t, conn, "chunks", "header_degraded", "0")
+
+	if !tableExists(ctx, t, conn, "embed_failures") {
+		t.Fatal("embed_failures table missing")
+	}
+	for _, col := range []string{"target_kind", "target_id", "model", "reason", "input_hash", "created_at"} {
+		var exists bool
+		if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'embed_failures' AND column_name = $1)`, col).Scan(&exists); err != nil {
+			t.Fatalf("check embed_failures.%s: %v", col, err)
+		}
+		if !exists {
+			t.Errorf("embed_failures.%s missing", col)
+		}
+	}
+
+	// The embed_failures primary key is on the first three columns.
+	if _, err := conn.Exec(ctx, `INSERT INTO embed_failures (target_kind, target_id, model, reason, input_hash)
+		VALUES ('chunk_header', 1, 'm', 'too_large', 'h1')`); err != nil {
+		t.Fatalf("insert failure: %v", err)
+	}
+	_, err = conn.Exec(ctx, `INSERT INTO embed_failures (target_kind, target_id, model, reason, input_hash)
+		VALUES ('chunk_header', 1, 'm', 'other', 'h2')`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("duplicate embed_failures error = %v, want unique violation (23505)", err)
+	}
+
+	// embeddings dedupes on (target_kind, target_id, model); a second model is
+	// a distinct row.
+	if _, err := conn.Exec(ctx, `INSERT INTO embeddings (target_kind, target_id, model, vec, input_hash)
+		VALUES ('chunk_raw', 1, 'm', '[1]', 'h')`); err != nil {
+		t.Fatalf("insert embedding: %v", err)
+	}
+	_, err = conn.Exec(ctx, `INSERT INTO embeddings (target_kind, target_id, model, vec, input_hash)
+		VALUES ('chunk_raw', 1, 'm', '[2]', 'h')`)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("duplicate embedding error = %v, want unique violation (23505)", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO embeddings (target_kind, target_id, model, vec, input_hash)
+		VALUES ('chunk_raw', 1, 'other', '[1]', 'h')`); err != nil {
+		t.Fatalf("different model for same target: %v", err)
+	}
+}
+
+// TestMigrationChunksEmbeddingsDownUpDescriptorUnchanged proves 00006's Down
+// reverses exactly: after Up, one Down and Up again, the embeddings, chunks and
+// embed_failures descriptions (columns, constraints, indexes) are unchanged.
+func TestMigrationChunksEmbeddingsDownUpDescriptorUnchanged(t *testing.T) {
+	dbURL := testdb.Create(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	tables := []string{"embeddings", "chunks", "embed_failures"}
+	before := ""
+	for _, table := range tables {
+		before += tableDescriptor(ctx, t, conn, table)
+	}
+	if _, err := store.MigrateDown(ctx, dbURL); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if _, err := store.Migrate(ctx, dbURL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	after := ""
+	for _, table := range tables {
+		after += tableDescriptor(ctx, t, conn, table)
+	}
+	if before != after {
+		t.Errorf("schema description changed across down/up:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func assertColumnType(ctx context.Context, t *testing.T, conn *pgx.Conn, table, column, dataType, nullable string) {
+	t.Helper()
+	var gotType, gotNullable string
+	if err := conn.QueryRow(ctx, `SELECT data_type, is_nullable FROM information_schema.columns
+		WHERE table_name = $1 AND column_name = $2`, table, column).Scan(&gotType, &gotNullable); err != nil {
+		t.Fatalf("read %s.%s: %v", table, column, err)
+	}
+	if gotType != dataType || gotNullable != nullable {
+		t.Errorf("%s.%s = (%s, nullable %s), want (%s, nullable %s)",
+			table, column, gotType, gotNullable, dataType, nullable)
+	}
+}
+
+func assertColumnDefault(ctx context.Context, t *testing.T, conn *pgx.Conn, table, column, want string) {
+	t.Helper()
+	var got string
+	if err := conn.QueryRow(ctx, `SELECT coalesce(column_default, '') FROM information_schema.columns
+		WHERE table_name = $1 AND column_name = $2`, table, column).Scan(&got); err != nil {
+		t.Fatalf("read default %s.%s: %v", table, column, err)
+	}
+	if !defaultIs(got, want) {
+		t.Errorf("%s.%s default = %q, want %q", table, column, got, want)
+	}
+}
+
+// defaultIs reports whether a column default expression equals want. A numeric
+// want is compared as the parsed integer; a string want drops the type cast
+// Postgres records and compares the literal exactly.
+func defaultIs(got, want string) bool {
+	got = strings.TrimSpace(got)
+	if n, err := strconv.Atoi(want); err == nil {
+		gotN, err := strconv.Atoi(got)
+		return err == nil && gotN == n
+	}
+	if i := strings.Index(got, "::"); i >= 0 {
+		got = got[:i]
+	}
+	return got == want
 }

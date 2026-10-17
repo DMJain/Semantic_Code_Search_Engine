@@ -81,6 +81,19 @@ func KnownModels() []string {
 	return names
 }
 
+// MinNumCtx returns the smallest num_ctx across the model registry, the
+// context every model can serve. The chunker derives its request budget from
+// it (D-078).
+func MinNumCtx() int {
+	min := 0
+	for _, spec := range registry {
+		if min == 0 || spec.numCtx < min {
+			min = spec.numCtx
+		}
+	}
+	return min
+}
+
 func lookup(model string) (modelSpec, error) {
 	spec, ok := registry[model]
 	if !ok {

@@ -1,0 +1,8 @@
+[
+  {"input": "", "want": 0},
+  {"input": "a", "want": 1},
+  {"input": "abcd", "want": 1},
+  {"input": "abcde", "want": 2},
+  {"input": "héllo wörld", "want": 4},
+  {"repeat": "x", "count": 4000, "want": 1000}
+]
