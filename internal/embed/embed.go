@@ -89,6 +89,16 @@ func KnownModels() []string {
 	return names
 }
 
+// Dim returns the vector dimension of a known model, so callers that only
+// build indexes need not construct an Ollama client.
+func Dim(model string) (int, error) {
+	spec, err := lookup(model)
+	if err != nil {
+		return 0, err
+	}
+	return spec.dim, nil
+}
+
 // MinNumCtx returns the smallest num_ctx across the model registry, the
 // context every model can serve. The chunker derives its request budget from
 // it (D-078).
@@ -155,7 +165,7 @@ func (o *Ollama) InputHash(parts ...string) string {
 func lookup(model string) (modelSpec, error) {
 	spec, ok := registry[model]
 	if !ok {
-		return modelSpec{}, fmt.Errorf("embedding model %q has no prompt templates; use one of: %s",
+		return modelSpec{}, fmt.Errorf("unknown embedding model %q; known: %s",
 			model, strings.Join(KnownModels(), ", "))
 	}
 	return spec, nil
