@@ -16,11 +16,11 @@ Go only (no Python). Postgres `pgvector/pgvector:pg17` (extensions `vector`, `pg
 
 ## Interfaces
 
-Already in the repo (provisional structs, sprints may extend): `embed.Embedder` (`EmbedQueries`, `EmbedDocuments`, `Dim`, `Model`), `llm.LLM` (`Complete`), `retrieve.Retriever` (`Retrieve`), `retrieve.Router` (`Route`). Everything swappable or ablatable sits behind one of these.
+Already in the repo (provisional structs, sprints may extend): `embed.Embedder` (`EmbedQueries`, `EmbedDocuments`, `Dim`, `Model`), `llm.LLM` (`Complete`), `retrieve.Retriever` (`Retrieve`), `retrieve.Router` (`Route`). Every `retrieve.Retriever.Retrieve` returns a `retrieve.ResultSet{Results []Result, Short bool, EFSearch int}` (D-086), a deliberate extension of the bare `[]Result`; everything swappable or ablatable sits behind one of these.
 
 ## Result contract
 
-Every `Retriever` returns `[]Result{File, Score, Source, Evidence[]}` ranked by file (`Source` = the retriever kind). Chunk, symbol and summary hits collapse to files by max score; `Evidence` keeps the underlying hits (kind, id, score, line range from `chunks.start_line/end_line`) for traces and Q&A. One helper in `internal/retrieve` does the collapse: it filters to the slice FIRST, then de-duplicates files, then cuts to top-k (D-039); no retriever reimplements it. Metrics rules: `docs/plan/eval-protocol.md#retrieval-metrics`.
+Every `Retriever` returns a `ResultSet` whose `Results` is `[]Result{File, Score, Source, Evidence[]}` ranked by file (`Source` = the retriever kind), plus `Short` (fewer than k distinct files remain, D-084) and `EFSearch` (the effective `hnsw.ef_search`, 0 when the retriever does not use HNSW) (D-086). Chunk, symbol and summary hits collapse to files by max score; `Evidence` keeps the underlying hits (kind, id, score, line range from `chunks.start_line/end_line`) for traces and Q&A. One helper in `internal/retrieve` does the collapse: it filters to the slice FIRST, then de-duplicates files, then cuts to top-k (D-039); no retriever reimplements it. Metrics rules: `docs/plan/eval-protocol.md#retrieval-metrics`.
 
 ## Data model
 
