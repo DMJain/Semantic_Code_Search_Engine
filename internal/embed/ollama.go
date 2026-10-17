@@ -206,11 +206,85 @@ func (o *Ollama) embedRaw(ctx context.Context, inputs []string) ([][]float32, er
 	return o.embed(ctx, inputs, nil)
 }
 
-// embed calls /api/embed and validates the output shape and values. A nil
-// truncate omits the field (Ollama's default); a non-nil value sets it.
+// embed calls /api/embed with no keep_alive override.
 func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([][]float32, error) {
+	vecs, _, err := o.postEmbed(ctx, inputs, truncate, "")
+	return vecs, err
+}
+
+// EmbedInput embeds one already-rendered input (no template is applied) in its
+// own /api/embed request with truncate:false and the model's num_ctx, and
+// returns the response's aggregate prompt_eval_count. A zero count means the
+// server reported none. keepAlive is sent as the keep_alive field when
+// non-empty, so a one-off run can evict the model afterwards.
+func (o *Ollama) EmbedInput(ctx context.Context, input, keepAlive string) (int, error) {
+	truncate := false
+	_, count, err := o.postEmbed(ctx, []string{input}, &truncate, keepAlive)
+	return count, err
+}
+
+// Version returns the Ollama server version from GET /api/version.
+func (o *Ollama) Version(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, o.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/version", nil)
+	if err != nil {
+		return "", err
+	}
+	res, err := o.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama version: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama version: %s", res.Status)
+	}
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("ollama version: decode response: %w", err)
+	}
+	return body.Version, nil
+}
+
+// Unload asks Ollama to evict the model from memory (keep_alive:0) so a
+// one-off run does not leave it resident.
+func (o *Ollama) Unload(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, o.timeout)
+	defer cancel()
+	payload, err := json.Marshal(map[string]any{
+		"model":      o.model,
+		"keep_alive": 0,
+		"stream":     false,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/generate", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := o.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama unload (%s): %w", o.model, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama unload (%s): %s", o.model, res.Status)
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	return nil
+}
+
+// postEmbed calls /api/embed and validates the output shape and values. A nil
+// truncate omits the field (Ollama's default); a non-nil value sets it.
+// keepAlive, when non-empty, is sent as keep_alive. It returns the vectors and
+// the response's aggregate prompt_eval_count (zero when absent).
+func (o *Ollama) postEmbed(ctx context.Context, inputs []string, truncate *bool, keepAlive string) ([][]float32, int, error) {
 	if len(inputs) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -223,39 +297,43 @@ func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([]
 	if truncate != nil {
 		reqBody["truncate"] = *truncate
 	}
+	if keepAlive != "" {
+		reqBody["keep_alive"] = keepAlive
+	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/embed", bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := o.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ollama embed (%s): %w", o.model, err)
+		return nil, 0, fmt.Errorf("ollama embed (%s): %w", o.model, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
 		body := strings.TrimSpace(string(msg))
 		if isInputTooLong(res.StatusCode, body) {
-			return nil, fmt.Errorf("ollama embed (%s): %s: %s: %w", o.model, res.Status, body, ErrInputTooLong)
+			return nil, 0, fmt.Errorf("ollama embed (%s): %s: %s: %w", o.model, res.Status, body, ErrInputTooLong)
 		}
-		return nil, fmt.Errorf("ollama embed (%s): %s: %s", o.model, res.Status, body)
+		return nil, 0, fmt.Errorf("ollama embed (%s): %s: %s", o.model, res.Status, body)
 	}
 
 	// Decode as float64 so values beyond float32 range surface as Inf in the
 	// check below instead of as a decode error.
 	var body struct {
-		Embeddings [][]float64 `json:"embeddings"`
+		Embeddings      [][]float64 `json:"embeddings"`
+		PromptEvalCount int         `json:"prompt_eval_count"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("ollama embed (%s): decode response: %w", o.model, err)
+		return nil, 0, fmt.Errorf("ollama embed (%s): decode response: %w", o.model, err)
 	}
 	if len(body.Embeddings) != len(inputs) {
-		return nil, fmt.Errorf("ollama embed (%s): got %d vectors for %d inputs", o.model, len(body.Embeddings), len(inputs))
+		return nil, 0, fmt.Errorf("ollama embed (%s): got %d vectors for %d inputs", o.model, len(body.Embeddings), len(inputs))
 	}
 	out := make([][]float32, len(body.Embeddings))
 	for i, raw := range body.Embeddings {
@@ -264,11 +342,11 @@ func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([]
 			v[j] = float32(x)
 		}
 		if err := checkVector(v, o.spec.dim); err != nil {
-			return nil, fmt.Errorf("ollama embed (%s): input %d: %w", o.model, i, err)
+			return nil, 0, fmt.Errorf("ollama embed (%s): input %d: %w", o.model, i, err)
 		}
 		out[i] = v
 	}
-	return out, nil
+	return out, body.PromptEvalCount, nil
 }
 
 // isInputTooLong reports whether a non-200 embed reply is Ollama rejecting an

@@ -301,6 +301,95 @@ func TestProbeInputSendsTruncateFalse(t *testing.T) {
 	}
 }
 
+// TestEmbedInputSendsOneRenderedInput drives the one-off fit seam: one
+// already-rendered input per request, truncate:false, the model's num_ctx, an
+// optional keep_alive, and the response's prompt_eval_count.
+func TestEmbedInputSendsOneRenderedInput(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embeddings":        [][]float64{constVec(768, 1)},
+			"prompt_eval_count": 42,
+		})
+	}))
+	defer srv.Close()
+	e, err := NewOllama(srv.URL, "nomic-embed-text", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := e.EmbedInput(context.Background(), "search_document: x", "")
+	if err != nil {
+		t.Fatalf("EmbedInput: %v", err)
+	}
+	if count != 42 {
+		t.Errorf("prompt_eval_count = %d, want 42", count)
+	}
+	var req struct {
+		Input    []string       `json:"input"`
+		Options  map[string]int `json:"options"`
+		Truncate *bool          `json:"truncate"`
+		Keep     *int           `json:"keep_alive"`
+	}
+	if err := json.Unmarshal([]byte(bodies[0]), &req); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(req.Input) != 1 || req.Input[0] != "search_document: x" {
+		t.Errorf("input = %v, want the rendered input", req.Input)
+	}
+	if req.Truncate == nil || *req.Truncate {
+		t.Errorf("truncate = %v, want false", req.Truncate)
+	}
+	if req.Options["num_ctx"] != 2048 {
+		t.Errorf("num_ctx = %d, want 2048", req.Options["num_ctx"])
+	}
+	if req.Keep != nil {
+		t.Errorf("keep_alive = %v, want omitted when empty", req.Keep)
+	}
+
+	if _, err := e.EmbedInput(context.Background(), "search_document: x", "0"); err != nil {
+		t.Fatalf("EmbedInput with keep_alive: %v", err)
+	}
+	if !strings.Contains(bodies[1], `"keep_alive":"0"`) {
+		t.Errorf("second body = %s, want keep_alive 0", bodies[1])
+	}
+}
+
+// TestVersionAndUnload proves the version is read from /api/version and the
+// unload posts keep_alive 0 to /api/generate.
+func TestVersionAndUnload(t *testing.T) {
+	var generate string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/version":
+			_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.9.9"})
+		case "/api/generate":
+			b, _ := io.ReadAll(r.Body)
+			generate = string(b)
+			_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	e, err := NewOllama(srv.URL, "nomic-embed-text", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := e.Version(context.Background())
+	if err != nil || v != "0.9.9" {
+		t.Fatalf("Version() = %q, %v, want 0.9.9", v, err)
+	}
+	if err := e.Unload(context.Background()); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+	if !strings.Contains(generate, `"keep_alive":0`) {
+		t.Errorf("unload body = %s, want keep_alive 0", generate)
+	}
+}
+
 // TestInputTooLongIsTyped proves only a 400/413/422 whose body names a
 // context/length overflow is wrapped as ErrInputTooLong; a server error or an
 // unrelated 400 stays a plain error, so the embed stage never mistakes it for
