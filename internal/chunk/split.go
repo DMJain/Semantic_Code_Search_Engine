@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 )
 
 // ChunkerVersion changes whenever the splitting logic changes, so every file's
 // chunk marker changes and the whole corpus is re-split (D-078).
-const ChunkerVersion = 1
+const ChunkerVersion = 2
 
 // Symbol is the subset of a parsed symbol the chunker needs: its identity, its
 // declaration span and its leading doc comment (the D-083 parse rule).
@@ -26,8 +28,8 @@ type Symbol struct {
 	Doc       string
 }
 
-// Chunk is one embeddable unit. In this version every function and method is a
-// single chunk (PartIdx 0); struct/interface/group chunks and parts come later.
+// Chunk is one embeddable unit: a whole symbol, or one part of a symbol split
+// at top-level statement boundaries. Struct/interface/group chunks come later.
 type Chunk struct {
 	SymbolID    int64
 	FileID      int64
@@ -60,34 +62,164 @@ func ContentHash(header, content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SplitFile returns one chunk per function or method symbol, in the given
-// order. The doc comment lines are part of the content, so a chunk starts at
-// symbol.StartLine minus the doc line count (D-083). It panics on a bad span,
-// so a malformed symbol can never reach the chunks table.
-func SplitFile(symbols []Symbol, src []string) []Chunk {
+// SplitFile returns chunks for every function or method symbol, in the given
+// order. A symbol whose whole content fits ChunkMaxTokens produces exactly one
+// part identical to the source span (D-083). A larger symbol is split at the
+// top-level statement ranges in statements, keyed by the symbol's start line,
+// into greedy-filled parts with a signature header and a `// ... part i/n`
+// marker; a single oversized statement stays whole as its own part (D-078,
+// D-082). It panics on a bad span or a split symbol without statements, so a
+// malformed symbol can never reach the chunks table.
+func SplitFile(symbols []Symbol, src []string, statements map[int][]parse.LineRange) []Chunk {
 	out := make([]Chunk, 0, len(symbols))
 	for _, sym := range symbols {
-		n := 0
+		docLines := 0
 		if sym.Doc != "" {
-			n = strings.Count(sym.Doc, "\n") + 1
+			docLines = strings.Count(sym.Doc, "\n") + 1
 		}
-		start := sym.StartLine - n
+		start := sym.StartLine - docLines
 		end := sym.EndLine
 		if start < 1 || end < start || end > len(src) {
 			panic(fmt.Sprintf("chunk: bad span for symbol %d (%s): start %d end %d, source has %d lines",
 				sym.ID, sym.Name, start, end, len(src)))
 		}
 		content := strings.Join(src[start-1:end], "\n")
+		if EstimateTokens(content) <= ChunkMaxTokens {
+			out = append(out, Chunk{
+				SymbolID:    sym.ID,
+				FileID:      sym.FileID,
+				PartIdx:     0,
+				StartLine:   start,
+				EndLine:     end,
+				TokenCount:  EstimateTokens(content),
+				Content:     content,
+				ContentHash: ContentHash("", content),
+			})
+			continue
+		}
+		ranges := statements[sym.StartLine]
+		if len(ranges) == 0 {
+			panic(fmt.Sprintf("chunk: symbol %d (%s) is over the ceiling but has no statement ranges",
+				sym.ID, sym.Name))
+		}
+		out = append(out, splitParts(sym, src, start, docLines, ranges)...)
+	}
+	return out
+}
+
+// partHeader is the synthetic declaration header every part starts with: the
+// stored signature with a trailing body brace. It is built from the signature
+// text, not the source gap, because the first statement can share the
+// declaration line, which would leave that gap empty (D-078). An empty
+// signature falls back to the declaration's first source line.
+func partHeader(sym Symbol, src []string) string {
+	h := strings.TrimRight(sym.Signature, " \t\n")
+	if h == "" {
+		return src[sym.StartLine-1]
+	}
+	if !strings.HasSuffix(h, "{") {
+		h += " {"
+	}
+	return h
+}
+
+// splitParts builds the parts of one over-ceiling symbol. Every part starts
+// with the synthetic signature header; part 0 also carries the doc. Each part is
+// one or more whole consecutive statements, and the last part extends to the
+// symbol's closing line.
+func splitParts(sym Symbol, src []string, docStart, docLines int, ranges []parse.LineRange) []Chunk {
+	header := partHeader(sym, src)
+	doc := ""
+	if docLines > 0 {
+		doc = strings.Join(src[docStart-1:sym.StartLine-1], "\n")
+	}
+
+	build := func(partIdx, total int, group []int) string {
+		first := ranges[group[0]]
+		last := ranges[group[len(group)-1]]
+		end := last.EndLine
+		if group[len(group)-1] == len(ranges)-1 {
+			end = sym.EndLine
+		}
+		var b strings.Builder
+		if partIdx == 0 && doc != "" {
+			b.WriteString(doc)
+			b.WriteByte('\n')
+		}
+		b.WriteString(header)
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "// ... part %d/%d", partIdx+1, total)
+		b.WriteByte('\n')
+		b.WriteString(strings.Join(src[first.StartLine-1:end], "\n"))
+		return b.String()
+	}
+
+	partCount := len(ranges)
+	var groups [][]int
+	for {
+		groups = groupStatements(len(ranges), partCount, build)
+		if len(groups) == partCount {
+			break
+		}
+		partCount = len(groups)
+	}
+	stmtCount := len(ranges)
+
+	out := make([]Chunk, 0, len(groups))
+	for i, group := range groups {
+		content := build(i, len(groups), group)
+		first := ranges[group[0]]
+		last := ranges[group[len(group)-1]]
+		start := first.StartLine
+		if i == 0 {
+			start = sym.StartLine
+			if docLines > 0 {
+				start = docStart
+			}
+		}
+		end := last.EndLine
+		if group[len(group)-1] == stmtCount-1 {
+			end = sym.EndLine
+		}
 		out = append(out, Chunk{
 			SymbolID:    sym.ID,
 			FileID:      sym.FileID,
-			PartIdx:     0,
+			PartIdx:     i,
 			StartLine:   start,
 			EndLine:     end,
 			TokenCount:  EstimateTokens(content),
 			Content:     content,
 			ContentHash: ContentHash("", content),
 		})
+	}
+	return out
+}
+
+// groupStatements greedy-fills consecutive statement indices into parts of at
+// most ChunkMaxTokens, using partCount as the part count in the markers. A
+// statement that does not fit is still placed in its own part, so a single
+// oversized statement is never split.
+func groupStatements(stmtCount, partCount int, build func(int, int, []int) string) [][]int {
+	var groups [][]int
+	for i := 0; i < stmtCount; {
+		j := i
+		for j+1 < stmtCount {
+			if EstimateTokens(build(len(groups), partCount, seq(i, j+1))) > ChunkMaxTokens {
+				break
+			}
+			j++
+		}
+		groups = append(groups, seq(i, j))
+		i = j + 1
+	}
+	return groups
+}
+
+// seq returns the inclusive statement indices i..j.
+func seq(i, j int) []int {
+	out := make([]int, 0, j-i+1)
+	for k := i; k <= j; k++ {
+		out = append(out, k)
 	}
 	return out
 }

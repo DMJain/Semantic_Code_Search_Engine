@@ -1,0 +1,60 @@
+{
+  "Generic": [
+    {
+      "part_idx": 0,
+      "start_line": 168,
+      "end_line": 170,
+      "token_count": 10
+    }
+  ],
+  "GiantSwitch": [
+    {
+      "part_idx": 0,
+      "start_line": 71,
+      "end_line": 166,
+      "token_count": 1417
+    }
+  ],
+  "Long": [
+    {
+      "part_idx": 0,
+      "start_line": 7,
+      "end_line": 28,
+      "token_count": 969
+    },
+    {
+      "part_idx": 1,
+      "start_line": 29,
+      "end_line": 48,
+      "token_count": 963
+    },
+    {
+      "part_idx": 2,
+      "start_line": 49,
+      "end_line": 69,
+      "token_count": 963
+    }
+  ],
+  "SharedLine": [
+    {
+      "part_idx": 0,
+      "start_line": 172,
+      "end_line": 234,
+      "token_count": 1072
+    },
+    {
+      "part_idx": 1,
+      "start_line": 234,
+      "end_line": 234,
+      "token_count": 18
+    }
+  ],
+  "SmallStay": [
+    {
+      "part_idx": 0,
+      "start_line": 3,
+      "end_line": 5,
+      "token_count": 9
+    }
+  ]
+}

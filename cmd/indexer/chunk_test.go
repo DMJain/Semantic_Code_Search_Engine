@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +14,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/chunk"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
 )
+
+// updateChunkGoldens regenerates the part golden. It is manual only, so a
+// normal go test never rewrites the golden.
+var updateChunkGoldens = flag.Bool("update", false, "regenerate chunk golden files (manual only)")
 
 // chunkFixture walks, parses and graphs the committed chunk fixture into a
 // throwaway database, so the chunk stage runs over a real Postgres with real
@@ -49,22 +56,26 @@ func fileLines(t *testing.T, root, rel string) []string {
 }
 
 // TestChunkStageOneChunkPerFuncMethod proves every function and method of the
-// fixture becomes exactly one chunk, whose content is the source lines from
-// start_line through end_line (1-based, read from disk), and that no stored
-// chunk violates the span invariant.
+// fixture becomes at least one chunk, and every symbol that fits the ceiling
+// is exactly one chunk whose content is the source lines from start_line
+// through end_line (1-based, read from disk). Split symbols are covered by
+// TestChunkStageParts.
 func TestChunkStageOneChunkPerFuncMethod(t *testing.T) {
 	pool, root := chunkFixture(t)
 	out := runChunkStage(t, pool, root, chunkOptions{})
 
 	symbols := scalarInt(t, pool, `SELECT count(*) FROM symbols WHERE kind IN ('func', 'method')`)
-	if got := scalarInt(t, pool, `SELECT count(*) FROM chunks`); got != symbols {
-		t.Fatalf("chunk count = %d, want one per func/method = %d\n%s", got, symbols, out)
+	chunks := scalarInt(t, pool, `SELECT count(*) FROM chunks`)
+	if chunks < symbols {
+		t.Fatalf("chunk count = %d, want at least one per func/method = %d\n%s", chunks, symbols, out)
 	}
 
 	rows, err := pool.Query(context.Background(), `
 		SELECT f.path, c.start_line, c.end_line, c.content
 		FROM chunks c JOIN files f ON f.id = c.file_id
-		ORDER BY f.path, c.start_line`)
+		WHERE (SELECT count(*) FROM chunks c2 WHERE c2.symbol_id = c.symbol_id) = 1
+		  AND c.token_count <= $1
+		ORDER BY f.path, c.start_line`, chunk.ChunkMaxTokens)
 	if err != nil {
 		t.Fatalf("query chunks: %v", err)
 	}
@@ -90,15 +101,16 @@ func TestChunkStageOneChunkPerFuncMethod(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("chunks rows: %v", err)
 	}
-	if n != int(symbols) {
-		t.Errorf("verified %d chunks, want %d", n, symbols)
+	if n == 0 {
+		t.Errorf("verified 0 single-part chunks, want at least one")
 	}
 
 	if bad := scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE start_line <= 0 OR end_line < start_line`); bad != 0 {
 		t.Errorf("chunks with a bad span = %d, want 0", bad)
 	}
-	if !strings.Contains(out, "2 files re-split, 10 chunks changed") {
-		t.Errorf("output missing the re-split summary line:\n%s", out)
+	wantSummary := fmt.Sprintf("3 files re-split, %d chunks changed", chunks)
+	if !strings.Contains(out, wantSummary) {
+		t.Errorf("output missing %q:\n%s", wantSummary, out)
 	}
 }
 
@@ -368,5 +380,342 @@ func TestChunkWholeRepoCoverage(t *testing.T) {
 	chunked := scalarInt(t, pool, `SELECT count(DISTINCT file_id) FROM chunks`)
 	if chunked != total {
 		t.Errorf("files with chunks = %d, want every file = %d", chunked, total)
+	}
+}
+
+// storedPart is one chunks row as the part assertions read it.
+type storedPart struct {
+	partIdx int
+	start   int
+	end     int
+	tokens  int
+	content string
+}
+
+// symbolParts returns the stored parts of one symbol in part order.
+func symbolParts(t *testing.T, pool *pgxpool.Pool, name string) []storedPart {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT c.part_idx, c.start_line, c.end_line, c.token_count, c.content
+		FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.name = $1
+		ORDER BY c.part_idx`, name)
+	if err != nil {
+		t.Fatalf("query parts of %s: %v", name, err)
+	}
+	defer rows.Close()
+	var out []storedPart
+	for rows.Next() {
+		var p storedPart
+		if err := rows.Scan(&p.partIdx, &p.start, &p.end, &p.tokens, &p.content); err != nil {
+			t.Fatalf("scan part: %v", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("parts rows: %v", err)
+	}
+	return out
+}
+
+// TestChunkStageParts proves a small and a generic function stay single-part
+// with the exact source span, while the long function and the giant-switch
+// function split at top-level statement boundaries with the chosen part format.
+func TestChunkStageParts(t *testing.T) {
+	pool, root := chunkFixture(t)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+	lines := fileLines(t, root, "parts/parts.go")
+
+	for _, name := range []string{"SmallStay", "Generic"} {
+		parts := symbolParts(t, pool, name)
+		if len(parts) != 1 {
+			t.Fatalf("%s parts = %d, want 1", name, len(parts))
+		}
+		p := parts[0]
+		if want := strings.Join(lines[p.start-1:p.end], "\n"); p.content != want {
+			t.Errorf("%s content mismatch\ngot  %q\nwant %q", name, p.content, want)
+		}
+	}
+
+	var symID int64
+	var symStart, symEnd int
+	var doc string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT id, start_line, end_line, coalesce(doc, '')
+		FROM symbols WHERE name = 'Long'`).Scan(&symID, &symStart, &symEnd, &doc); err != nil {
+		t.Fatalf("read Long symbol: %v", err)
+	}
+	src := []byte(strings.Join(lines, "\n"))
+	ranges := parse.BodyStatements("parts/parts.go", src)[symStart]
+	if len(ranges) < 2 {
+		t.Fatalf("Long statement ranges = %d, want at least 2", len(ranges))
+	}
+	parts := symbolParts(t, pool, "Long")
+	if len(parts) < 2 {
+		t.Fatalf("Long parts = %d, want at least 2", len(parts))
+	}
+	header := strings.Join(lines[symStart-1:ranges[0].StartLine-1], "\n")
+	docLines := 0
+	if doc != "" {
+		docLines = strings.Count(doc, "\n") + 1
+	}
+	for i, p := range parts {
+		if p.partIdx != i {
+			t.Errorf("Long part_idx = %d, want %d", p.partIdx, i)
+		}
+		marker := fmt.Sprintf("// ... part %d/%d", i+1, len(parts))
+		bodyStart := p.start
+		if i == 0 {
+			bodyStart = ranges[0].StartLine
+		}
+		want := header + "\n" + marker + "\n" + strings.Join(lines[bodyStart-1:p.end], "\n")
+		if i == 0 && doc != "" {
+			want = doc + "\n" + want
+		}
+		if p.content != want {
+			t.Errorf("Long part %d content mismatch\ngot  %q\nwant %q", i, p.content, want)
+		}
+		if p.start < symStart-docLines || p.end > symEnd || p.end < p.start {
+			t.Errorf("Long part %d span %d..%d outside %d..%d", i, p.start, p.end, symStart-docLines, symEnd)
+		}
+		if p.tokens != chunk.EstimateTokens(p.content) {
+			t.Errorf("Long part %d token_count = %d, want %d", i, p.tokens, chunk.EstimateTokens(p.content))
+		}
+		if p.tokens > chunk.ChunkMaxTokens {
+			t.Errorf("Long part %d token_count = %d, want <= %d", i, p.tokens, chunk.ChunkMaxTokens)
+		}
+		// Every statement falls wholly inside exactly one part.
+		for _, r := range ranges {
+			covered := 0
+			for _, q := range parts {
+				if q.start <= r.StartLine && r.EndLine <= q.end {
+					covered++
+				}
+			}
+			if covered != 1 {
+				t.Errorf("statement %d..%d covered by %d parts, want 1", r.StartLine, r.EndLine, covered)
+			}
+		}
+	}
+
+	giant := symbolParts(t, pool, "GiantSwitch")
+	if len(giant) != 1 {
+		t.Fatalf("GiantSwitch parts = %d, want 1 (one switch statement)", len(giant))
+	}
+	var giantStart int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT start_line FROM symbols WHERE name = 'GiantSwitch'`).Scan(&giantStart); err != nil {
+		t.Fatalf("read GiantSwitch symbol: %v", err)
+	}
+	giantRanges := parse.BodyStatements("parts/parts.go", src)[giantStart]
+	g := giant[0]
+	if g.tokens <= chunk.ChunkMaxTokens {
+		t.Errorf("GiantSwitch token_count = %d, want > %d (oversized statement)", g.tokens, chunk.ChunkMaxTokens)
+	}
+	if !strings.Contains(g.content, "// ... part 1/1") {
+		t.Errorf("GiantSwitch part missing marker:\n%q", g.content)
+	}
+	if want := strings.Join(lines[giantRanges[0].StartLine-1:g.end], "\n"); !strings.HasSuffix(g.content, want) {
+		t.Errorf("GiantSwitch part does not end with its covered source lines")
+	}
+
+	// SharedLine's first statement shares the declaration line, so the source
+	// gap is empty: every part must still start with the synthetic header
+	// (after the doc for part 0).
+	shared := symbolParts(t, pool, "SharedLine")
+	if len(shared) < 2 {
+		t.Fatalf("SharedLine parts = %d, want at least 2", len(shared))
+	}
+	var sharedDoc string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT coalesce(doc, '') FROM symbols WHERE name = 'SharedLine'`).Scan(&sharedDoc); err != nil {
+		t.Fatalf("read SharedLine doc: %v", err)
+	}
+	for i, p := range shared {
+		wantPrefix := "func SharedLine() {\n" + fmt.Sprintf("// ... part %d/%d", i+1, len(shared)) + "\n"
+		if i == 0 && sharedDoc != "" {
+			wantPrefix = sharedDoc + "\n" + wantPrefix
+		}
+		if !strings.HasPrefix(p.content, wantPrefix) {
+			t.Errorf("SharedLine part %d lost the signature header:\n%q", i, p.content)
+		}
+	}
+
+	if printed := printedOversized(t, out); int64(printed) != dbOversized(t, pool) {
+		t.Errorf("printed oversized_statements = %d, DB count = %d", printed, dbOversized(t, pool))
+	}
+	if !strings.Contains(out, "oversized: parts/parts.go GiantSwitch part 1/1") {
+		t.Errorf("output missing the oversized part log line:\n%s", out)
+	}
+
+	printedExtra, dbExtra := -1, scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE part_idx > 0`)
+	for _, line := range strings.Split(out, "\n") {
+		fmt.Sscanf(line, "parts above one: %d", &printedExtra)
+	}
+	if int64(printedExtra) != dbExtra {
+		t.Errorf("printed parts above one = %d, DB count = %d", printedExtra, dbExtra)
+	}
+}
+
+// printedOversized reads the oversized_statements count from a run's output.
+func printedOversized(t *testing.T, out string) int {
+	t.Helper()
+	n := -1
+	for _, line := range strings.Split(out, "\n") {
+		fmt.Sscanf(line, "oversized_statements: %d", &n)
+	}
+	if n < 0 {
+		t.Fatalf("output missing oversized_statements:\n%s", out)
+	}
+	return n
+}
+
+// dbOversized is the DB-wide count the printed oversized_statements must equal.
+func dbOversized(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	return scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE token_count > $1`, chunk.ChunkMaxTokens)
+}
+
+// TestChunkStageOversizedCountIsDBWide proves the printed oversized_statements
+// matches the table after a --limit run and after the full run, not just the
+// rows written in one run.
+func TestChunkStageOversizedCountIsDBWide(t *testing.T) {
+	pool, root := chunkFixture(t)
+
+	limited := runChunkStage(t, pool, root, chunkOptions{Limit: 2})
+	if printed, want := printedOversized(t, limited), dbOversized(t, pool); int64(printed) != want {
+		t.Errorf("limit run: printed oversized_statements = %d, DB count = %d\n%s", printed, want, limited)
+	}
+
+	full := runChunkStage(t, pool, root, chunkOptions{})
+	if printed, want := printedOversized(t, full), dbOversized(t, pool); int64(printed) != want {
+		t.Errorf("full run: printed oversized_statements = %d, DB count = %d\n%s", printed, want, full)
+	}
+	if dbOversized(t, pool) == 0 {
+		t.Errorf("fixture has no oversized chunks; the test proves nothing")
+	}
+}
+
+// TestChunkStagePartShrinkDeletesVanishedOnly proves a re-split after stale
+// source keeps every surviving part id and deletes only a part above the new
+// count.
+func TestChunkStagePartShrinkDeletesVanishedOnly(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	var symID, fileID int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT s.id, f.id FROM symbols s JOIN files f ON f.id = s.file_id
+		WHERE s.name = 'Long'`).Scan(&symID, &fileID); err != nil {
+		t.Fatalf("find Long symbol: %v", err)
+	}
+	before := map[int]int64{}
+	rows, err := pool.Query(context.Background(),
+		`SELECT part_idx, id FROM chunks WHERE symbol_id = $1 ORDER BY part_idx`, symID)
+	if err != nil {
+		t.Fatalf("query Long parts: %v", err)
+	}
+	for rows.Next() {
+		var idx int
+		var id int64
+		if err := rows.Scan(&idx, &id); err != nil {
+			t.Fatalf("scan Long part: %v", err)
+		}
+		before[idx] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("Long part rows: %v", err)
+	}
+
+	// A part left over from a previously longer function.
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO chunks (symbol_id, file_id, part_idx, content, content_hash, token_count, start_line, end_line)
+		VALUES ($1, $2, 99, 'stale', 'deadbeef', 1, 1, 1)`, symID, fileID); err != nil {
+		t.Fatalf("insert vanished part: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE files SET chunked_sha = NULL WHERE id = $1`, fileID); err != nil {
+		t.Fatalf("force file stale: %v", err)
+	}
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	after := map[int]int64{}
+	rows, err = pool.Query(context.Background(),
+		`SELECT part_idx, id FROM chunks WHERE symbol_id = $1 ORDER BY part_idx`, symID)
+	if err != nil {
+		t.Fatalf("query Long parts after re-split: %v", err)
+	}
+	for rows.Next() {
+		var idx int
+		var id int64
+		if err := rows.Scan(&idx, &id); err != nil {
+			t.Fatalf("scan Long part after re-split: %v", err)
+		}
+		after[idx] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("Long part rows after re-split: %v", err)
+	}
+
+	if _, ok := after[99]; ok {
+		t.Errorf("vanished part 99 survived the re-split")
+	}
+	for idx, id := range before {
+		if got := after[idx]; got != id {
+			t.Errorf("surviving part %d id = %d, want %d", idx, got, id)
+		}
+	}
+	if len(after) != len(before) {
+		t.Errorf("part count after re-split = %d, want %d", len(after), len(before))
+	}
+}
+
+// partGolden is the read-only expectation for one stored part.
+type partGolden struct {
+	PartIdx    int `json:"part_idx"`
+	StartLine  int `json:"start_line"`
+	EndLine    int `json:"end_line"`
+	TokenCount int `json:"token_count"`
+}
+
+// TestChunkPartGolden pins the split shape of all five fixture functions
+// (small, generic, long, giant switch, shared declaration line). Regenerate
+// manually with -update only.
+func TestChunkPartGolden(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	got := map[string][]partGolden{}
+	for _, name := range []string{"GiantSwitch", "Generic", "Long", "SharedLine", "SmallStay"} {
+		for _, p := range symbolParts(t, pool, name) {
+			got[name] = append(got[name], partGolden{
+				PartIdx: p.partIdx, StartLine: p.start, EndLine: p.end, TokenCount: p.tokens,
+			})
+		}
+	}
+	data, err := json.MarshalIndent(got, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal golden: %v", err)
+	}
+	data = append(data, '\n')
+
+	golden := filepath.Join("testdata", "chunk", "golden", "parts.json")
+	if *updateChunkGoldens {
+		if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {
+			t.Fatalf("create golden dir: %v", err)
+		}
+		if err := os.WriteFile(golden, data, 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Errorf("part golden mismatch (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", data, want)
 	}
 }

@@ -76,20 +76,72 @@ func chunkStage(ctx context.Context, pool *pgxpool.Pool, root string, opts chunk
 	fmt.Fprintf(out, "%d files to chunk\n", len(stale))
 
 	reSplit, changed := 0, 0
+	extraParts := 0
 	for _, f := range stale {
 		if ctx.Err() != nil || (opts.Limit > 0 && reSplit >= opts.Limit) {
 			break
 		}
-		n, err := chunkFileTx(dbCtx, pool, root, f)
+		stats, err := chunkFileTx(dbCtx, pool, root, f)
 		if err != nil {
 			return err
 		}
 		reSplit++
-		changed += n
+		changed += stats.changed
+		extraParts += stats.extraParts
 	}
 
 	fmt.Fprintf(out, "%d files re-split, %d chunks changed\n", reSplit, changed)
+	fmt.Fprintf(out, "parts above one: %d\n", extraParts)
+
+	// Oversized statements are reported from the table, not the run, so a
+	// --limit or no-op run still matches select count(*) (D-078, D-082).
+	oversized, err := listOversized(dbCtx, pool)
+	if err != nil {
+		return err
+	}
+	for _, o := range oversized {
+		fmt.Fprintf(out, "oversized: %s %s part %d/%d %d tokens\n",
+			o.path, o.symbol, o.partIdx+1, o.parts, o.tokens)
+	}
+	fmt.Fprintf(out, "oversized_statements: %d\n", len(oversized))
 	return nil
+}
+
+// oversizedPart is one stored chunk over ChunkMaxTokens, with the number of
+// parts its symbol has, for the deterministic run log.
+type oversizedPart struct {
+	path    string
+	symbol  string
+	partIdx int
+	parts   int
+	tokens  int
+}
+
+// listOversized returns every stored chunk over the ceiling in a deterministic
+// order, so the printed oversized_statements always equals the DB-wide count.
+func listOversized(ctx context.Context, pool *pgxpool.Pool) ([]oversizedPart, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT f.path, s.name, c.part_idx, c.token_count,
+		       (SELECT count(*) FROM chunks c2 WHERE c2.symbol_id = c.symbol_id)
+		FROM chunks c
+		JOIN symbols s ON s.id = c.symbol_id
+		JOIN files f ON f.id = c.file_id
+		WHERE c.token_count > $1
+		ORDER BY f.path, s.name, c.part_idx`, chunk.ChunkMaxTokens)
+	if err != nil {
+		return nil, fmt.Errorf("list oversized parts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []oversizedPart
+	for rows.Next() {
+		var o oversizedPart
+		if err := rows.Scan(&o.path, &o.symbol, &o.partIdx, &o.parts, &o.tokens); err != nil {
+			return nil, fmt.Errorf("scan oversized part: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
 }
 
 // chunkStale reports whether a file needs (re)splitting: its graph must exist
@@ -123,34 +175,47 @@ func selectChunkFiles(ctx context.Context, pool *pgxpool.Pool) ([]chunkFile, err
 	return out, rows.Err()
 }
 
-// chunkFileTx reads one file, splits its functions and methods, and writes the
-// chunks in a single transaction. Unchanged chunks are left untouched (the
-// upsert updates only on a content-hash change), vanished symbols and parts are
-// deleted, and the file is stamped last, so a rerun never changes a chunk id
-// (D-081).
-func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFile) (int, error) {
+// chunkStats is one file's contribution to the run summary.
+type chunkStats struct {
+	changed    int
+	extraParts int
+}
+
+// chunkFileTx reads one file, splits its functions and methods into parts, and
+// writes the chunks in a single transaction. Unchanged chunks are left
+// untouched (the upsert updates only on a content-hash change), vanished parts
+// and symbols are deleted, and the file is stamped last, so a rerun never
+// changes a surviving chunk id (D-081).
+func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFile) (chunkStats, error) {
+	var stats chunkStats
 	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.path)))
 	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", f.path, err)
+		return stats, fmt.Errorf("read %s: %w", f.path, err)
 	}
 	lines := strings.Split(string(src), "\n")
 
+	statements := parse.BodyStatements(f.path, src)
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
+		return stats, fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	symbols, err := fileChunkSymbols(ctx, tx, f.id)
 	if err != nil {
-		return 0, err
+		return stats, err
 	}
-	chunks := chunk.SplitFile(symbols, lines)
+	chunks := chunk.SplitFile(symbols, lines, statements)
 
 	seen := make([]int64, 0, len(symbols))
-	changed := 0
+	partCount := make(map[int64]int)
 	for _, c := range chunks {
 		seen = append(seen, c.SymbolID)
+		partCount[c.SymbolID]++
+		if c.PartIdx > 0 {
+			stats.extraParts++
+		}
 		lexical := chunk.LexicalText("", c.Content)
 		var id int64
 		err := tx.QueryRow(ctx, `
@@ -174,35 +239,38 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 		).Scan(&id)
 		switch {
 		case err == nil:
-			changed++
+			stats.changed++
 		case errors.Is(err, pgx.ErrNoRows):
 			// A conflict with an identical content hash and span: left untouched.
 		default:
-			return 0, fmt.Errorf("upsert chunk for %s symbol %d: %w", f.path, c.SymbolID, err)
+			return stats, fmt.Errorf("upsert chunk for %s symbol %d: %w", f.path, c.SymbolID, err)
 		}
 	}
 
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM chunks WHERE file_id = $1 AND symbol_id <> ALL($2::bigint[])`,
 		f.id, seen); err != nil {
-		return 0, fmt.Errorf("delete chunks of removed symbols in %s: %w", f.path, err)
+		return stats, fmt.Errorf("delete chunks of removed symbols in %s: %w", f.path, err)
 	}
-	// Every function and method produces exactly one part (part 0) in this
-	// version, so a stored part at or above part 1 has vanished.
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM chunks WHERE file_id = $1 AND part_idx >= 1`, f.id); err != nil {
-		return 0, fmt.Errorf("delete vanished parts in %s: %w", f.path, err)
+	// A symbol that now has fewer parts keeps its surviving rows untouched and
+	// drops only the vanished tail, so a shrink never renumbers part ids.
+	for symbolID, n := range partCount {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM chunks WHERE symbol_id = $1 AND part_idx >= $2`,
+			symbolID, n); err != nil {
+			return stats, fmt.Errorf("delete vanished parts of symbol %d in %s: %w", symbolID, f.path, err)
+		}
 	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE files SET chunked_sha = $2 WHERE id = $1`,
 		f.id, chunk.ChunkedSHA(f.sha)); err != nil {
-		return 0, fmt.Errorf("mark file chunked: %w", err)
+		return stats, fmt.Errorf("mark file chunked: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+		return stats, fmt.Errorf("commit: %w", err)
 	}
-	return changed, nil
+	return stats, nil
 }
 
 // fileChunkSymbols loads the function and method symbols of one file in source
