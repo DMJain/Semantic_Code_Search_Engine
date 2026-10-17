@@ -1,0 +1,11 @@
+{
+  "names": [
+    "alpha",
+    "bravo",
+    "charlie",
+    "delta",
+    "echo"
+  ],
+  "header": "// package: k8s.io/kubernetes/pkg/extra\n// file: pkg/extra/extra.go\n// signature: func FanOut()\n// calls: alpha, bravo, charlie, delta, echo\n// called by: none",
+  "degraded": 0
+}

@@ -94,6 +94,13 @@ func chunkStage(ctx context.Context, pool *pgxpool.Pool, root string, opts chunk
 	fmt.Fprintf(out, "%d files re-split, %d chunks changed\n", reSplit, changed)
 	fmt.Fprintf(out, "parts above one: %d\n", extraParts)
 
+	// Recompute every chunk's context header from the current graph on every
+	// run, even when no file was re-split: a header reads other files' edges,
+	// which a file's own chunk marker cannot see (D-081).
+	if _, err := recomputeHeaders(dbCtx, pool); err != nil {
+		return err
+	}
+
 	// Oversized statements are reported from the table, not the run, so a
 	// --limit or no-op run still matches select count(*) (D-078, D-082).
 	oversized, err := listOversized(dbCtx, pool)
@@ -105,7 +112,190 @@ func chunkStage(ctx context.Context, pool *pgxpool.Pool, root string, opts chunk
 			o.path, o.symbol, o.partIdx+1, o.parts, o.tokens)
 	}
 	fmt.Fprintf(out, "oversized_statements: %d\n", len(oversized))
+
+	// oversized_failed and header_degraded are table-wide, so a --limit or
+	// no-op run still matches select count(*) (D-082).
+	failed, err := countChunks(dbCtx, pool, `SELECT count(*) FROM chunks WHERE token_count > $1`, chunk.EmbeddableContentMax)
+	if err != nil {
+		return err
+	}
+	degraded, err := countChunks(dbCtx, pool, `SELECT count(*) FROM chunks WHERE header_degraded > 0`)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "oversized_failed: %d\n", failed)
+	fmt.Fprintf(out, "header_degraded: %d\n", degraded)
 	return nil
+}
+
+// countChunks runs one counting query with optional args.
+func countChunks(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) (int, error) {
+	var n int
+	if err := pool.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count chunks: %w", err)
+	}
+	return n, nil
+}
+
+// recomputeHeaders rebuilds the context header of every stored chunk from the
+// current tree-sitter edges and updates a row only when its header, degradation
+// marker, content hash or lexical text would change (D-081). It covers every
+// chunk of the filtered repo, not just the files re-split this run, and runs in
+// one transaction. It returns the number of rows changed.
+func recomputeHeaders(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	callees, callers, err := rankedCalls(ctx, pool)
+	if err != nil {
+		return 0, err
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT c.id, c.symbol_id, c.content, c.token_count, c.header, c.header_degraded,
+		       c.content_hash, coalesce(s.signature, ''), f.path, f.package
+		FROM chunks c
+		JOIN symbols s ON s.id = c.symbol_id
+		JOIN files f ON f.id = c.file_id`)
+	if err != nil {
+		return 0, fmt.Errorf("list chunks for headers: %w", err)
+	}
+	defer rows.Close()
+
+	type chunkRow struct {
+		id        int64
+		symbolID  int64
+		content   string
+		tokens    int
+		header    string
+		degraded  int
+		hash      string
+		signature string
+		path      string
+		pkg       string
+	}
+	var chunks []chunkRow
+	for rows.Next() {
+		var c chunkRow
+		if err := rows.Scan(&c.id, &c.symbolID, &c.content, &c.tokens, &c.header,
+			&c.degraded, &c.hash, &c.signature, &c.path, &c.pkg); err != nil {
+			return 0, fmt.Errorf("scan chunk for header: %w", err)
+		}
+		chunks = append(chunks, c)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin header pass: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// ponytail: one UPDATE per chunk over the whole corpus. The spec's
+	// set-based query is the edge ranking above; upgrade this loop to a single
+	// batched/unnest UPDATE if the pass becomes a bottleneck.
+	changed := 0
+	for _, c := range chunks {
+		in := chunk.HeaderInput{
+			Package:   c.pkg,
+			File:      c.path,
+			Signature: c.signature,
+			Callees:   callees[c.symbolID],
+			Callers:   callers[c.symbolID],
+		}
+		header, degraded := chunk.BuildHeader(in, c.tokens)
+		hash := chunk.ContentHash(header, c.content)
+		lexical := chunk.LexicalText(header, c.content)
+		tag, err := tx.Exec(ctx, `
+			UPDATE chunks
+			SET header = $2, header_degraded = $3, content_hash = $4, search_tsv = to_tsvector('simple', $5)
+			WHERE id = $1
+			  AND (header IS DISTINCT FROM $2
+			       OR header_degraded IS DISTINCT FROM $3
+			       OR content_hash IS DISTINCT FROM $4
+			       OR search_tsv IS DISTINCT FROM to_tsvector('simple', $5))`,
+			c.id, header, degraded, hash, lexical)
+		if err != nil {
+			return 0, fmt.Errorf("update header of chunk %d: %w", c.id, err)
+		}
+		changed += int(tag.RowsAffected())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit header pass: %w", err)
+	}
+	return changed, nil
+}
+
+// rankedCalls returns the top-five callees and callers per symbol from the
+// tree-sitter edges, keyed by symbol id, rendered as short names. The window
+// query limits the work to five rows per symbol per side, so the full edge set
+// is never pulled into Go (D-081).
+//
+// The ordering columns use COLLATE "C" so the row_number() selection uses byte
+// order, exactly like the Go comparator in internal/chunk (lessCall/TopNames).
+// The database's default collation can order `_`, `.`, case and non-ASCII
+// differently from byte order, which would make the SQL pick a different top-5
+// than a pure-Go rank of the same edges.
+func rankedCalls(ctx context.Context, pool *pgxpool.Pool) (callees, callers map[int64][]string, err error) {
+	rows, err := pool.Query(ctx, `
+		WITH dedup AS (
+			SELECT caller_id, callee_id, max((resolution = 'exact')::int) AS exact
+			FROM edges
+			WHERE source = 'treesitter' AND resolution IN ('exact', 'name_only')
+			GROUP BY caller_id, callee_id
+		),
+		ranked AS (
+			SELECT d.caller_id AS symbol_id, false AS caller_side, s.id AS ref_id,
+			       s.name, s.qualified_name, (d.exact = 1) AS exact,
+			       row_number() OVER (PARTITION BY d.caller_id
+			           ORDER BY d.exact DESC, s.name COLLATE "C",
+			                    s.qualified_name COLLATE "C", s.id) AS rn
+			FROM dedup d JOIN symbols s ON s.id = d.callee_id
+			UNION ALL
+			SELECT d.callee_id, true, s.id,
+			       s.name, s.qualified_name, (d.exact = 1),
+			       row_number() OVER (PARTITION BY d.callee_id
+			           ORDER BY d.exact DESC, s.name COLLATE "C",
+			                    s.qualified_name COLLATE "C", s.id)
+			FROM dedup d JOIN symbols s ON s.id = d.caller_id
+		)
+		SELECT symbol_id, caller_side, name, qualified_name, ref_id, exact
+		FROM ranked WHERE rn <= $1`, chunk.HeaderListMax)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rank header edges: %w", err)
+	}
+	defer rows.Close()
+
+	refs := map[bool]map[int64][]chunk.CallRef{
+		false: {},
+		true:  {},
+	}
+	for rows.Next() {
+		var symbolID, refID int64
+		var callerSide, exact bool
+		var name, qualified string
+		if err := rows.Scan(&symbolID, &callerSide, &name, &qualified, &refID, &exact); err != nil {
+			return nil, nil, fmt.Errorf("scan ranked edge: %w", err)
+		}
+		resolution := chunk.ResolutionNameOnly
+		if exact {
+			resolution = chunk.ResolutionExact
+		}
+		refs[callerSide][symbolID] = append(refs[callerSide][symbolID], chunk.CallRef{
+			Name: name, QualifiedName: qualified, ID: refID, Resolution: resolution,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	toNames := func(m map[int64][]chunk.CallRef) map[int64][]string {
+		out := make(map[int64][]string, len(m))
+		for id, rs := range m {
+			out[id] = chunk.TopNames(rs)
+		}
+		return out
+	}
+	return toNames(refs[false]), toNames(refs[true]), nil
 }
 
 // oversizedPart is one stored chunk over ChunkMaxTokens, with the number of
@@ -185,9 +375,12 @@ type chunkStats struct {
 // chunkFileTx reads one file, splits its symbols into chunks (one whole chunk
 // per struct/interface, a type grouped with its same-file constructor as one
 // chunk, and single-or-parts chunks per function/method), and writes them in a
-// single transaction. Unchanged chunks are left untouched (the upsert updates
-// only on a content-hash change), vanished parts and symbols are deleted, and the
-// file is stamped last, so a rerun never changes a surviving chunk id (D-081).
+// single transaction. The upsert updates a row only when its content or line
+// span changed, so a no-op re-split rewrites nothing; header, header_degraded
+// and content_hash are owned by the header pass, which a new row's provisional
+// empty-header hash is immediately replaced by (D-081). Vanished parts and
+// symbols are deleted, and the file is stamped last, so a rerun never changes a
+// surviving chunk id.
 func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFile) (chunkStats, error) {
 	var stats chunkStats
 	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.path)))
@@ -226,13 +419,11 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 			ON CONFLICT (symbol_id, part_idx) DO UPDATE SET
 				file_id = EXCLUDED.file_id,
 				content = EXCLUDED.content,
-				header = EXCLUDED.header,
-				content_hash = EXCLUDED.content_hash,
 				token_count = EXCLUDED.token_count,
 				start_line = EXCLUDED.start_line,
 				end_line = EXCLUDED.end_line,
 				search_tsv = EXCLUDED.search_tsv
-			WHERE chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+			WHERE chunks.content IS DISTINCT FROM EXCLUDED.content
 			   OR chunks.start_line IS DISTINCT FROM EXCLUDED.start_line
 			   OR chunks.end_line IS DISTINCT FROM EXCLUDED.end_line
 			RETURNING id`,
@@ -243,7 +434,7 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 		case err == nil:
 			stats.changed++
 		case errors.Is(err, pgx.ErrNoRows):
-			// A conflict with an identical content hash and span: left untouched.
+			// A conflict with identical content and span: left untouched.
 		default:
 			return stats, fmt.Errorf("upsert chunk for %s symbol %d: %w", f.path, c.SymbolID, err)
 		}

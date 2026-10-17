@@ -94,6 +94,24 @@ func MinNumCtx() int {
 	return min
 }
 
+// MaxDocPrefix returns the longest static document prefix in the registry: each
+// model's document template rendered with an empty Document. The chunker
+// subtracts its estimated token count from the request budget so a degraded
+// header still fits every model (D-082).
+func MaxDocPrefix() string {
+	longest := ""
+	for _, spec := range registry {
+		s, err := render(spec.doc, Document{})
+		if err != nil {
+			continue
+		}
+		if len(s) > len(longest) {
+			longest = s
+		}
+	}
+	return longest
+}
+
 func lookup(model string) (modelSpec, error) {
 	spec, ok := registry[model]
 	if !ok {

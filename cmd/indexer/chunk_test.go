@@ -919,3 +919,273 @@ func TestChunkGroupGolden(t *testing.T) {
 		t.Errorf("group golden mismatch (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", data, want)
 	}
 }
+
+// storedHeader reads one symbol's chunk header, content, hash, degradation and
+// token count, the facts the header pass owns.
+func storedHeader(t *testing.T, pool *pgxpool.Pool, name string) (header, content, hash string, degraded, tokens int) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(), `
+		SELECT c.header, c.content, c.content_hash, c.header_degraded, c.token_count
+		FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.name = $1`, name).Scan(&header, &content, &hash, &degraded, &tokens); err != nil {
+		t.Fatalf("read header of %s: %v", name, err)
+	}
+	return header, content, hash, degraded, tokens
+}
+
+// chunkIDOf returns the part-0 chunk id of one symbol.
+func chunkIDOf(t *testing.T, pool *pgxpool.Pool, name string) int64 {
+	t.Helper()
+	return scalarInt(t, pool, `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.name = $1 AND c.part_idx = 0`, name)
+}
+
+// chunkHashes returns every chunk id mapped to its stored content hash.
+func chunkHashes(t *testing.T, pool *pgxpool.Pool) map[int64]string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `SELECT id, content_hash FROM chunks`)
+	if err != nil {
+		t.Fatalf("query chunk hashes: %v", err)
+	}
+	defer rows.Close()
+	out := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			t.Fatalf("scan chunk hash: %v", err)
+		}
+		out[id] = hash
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("chunk hash rows: %v", err)
+	}
+	return out
+}
+
+// printedCount reads one "<label>: %d" line from a run's output.
+func printedCount(t *testing.T, out, label string) int {
+	t.Helper()
+	n := -1
+	for _, line := range strings.Split(out, "\n") {
+		fmt.Sscanf(line, label+": %d", &n)
+	}
+	if n < 0 {
+		t.Fatalf("output missing %s:\n%s", label, out)
+	}
+	return n
+}
+
+// TestChunkHeaderContentAndHash proves the stored header is the five-line
+// format, that it carries the ranked callees and the caller, that content_hash
+// is ContentHash(header, content), and that every chunk of the filtered repo
+// (all fixture files are out of slice) has a header.
+func TestChunkHeaderContentAndHash(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	header, content, hash, degraded, _ := storedHeader(t, pool, "FanOut")
+	want := strings.Join([]string{
+		"// package: k8s.io/kubernetes/extra",
+		"// file: extra/extra.go",
+		"// signature: func FanOut()",
+		"// calls: alpha, bravo, charlie, delta, echo",
+		"// called by: Entry",
+	}, "\n")
+	if header != want {
+		t.Errorf("FanOut header\n got %q\nwant %q", header, want)
+	}
+	if degraded != 0 {
+		t.Errorf("FanOut header_degraded = %d, want 0", degraded)
+	}
+	if want := chunk.ContentHash(header, content); hash != want {
+		t.Errorf("FanOut content_hash = %s, want ContentHash(header, content) = %s", hash, want)
+	}
+
+	if n := scalarInt(t, pool, `SELECT count(*) FROM files WHERE in_slice`); n != 0 {
+		t.Fatalf("fixture has %d in-slice files, want 0", n)
+	}
+	if n := scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE header = ''`); n != 0 {
+		t.Errorf("chunks with an empty header = %d, want 0 (headers must cover the whole repo)", n)
+	}
+}
+
+// TestChunkHeaderEdgeChangeRecomputes proves the header pass runs on every run:
+// deleting one tree-sitter edge changes content_hash for exactly the caller's
+// and the callee's chunks, with no file re-split, and a further rerun is a no-op.
+func TestChunkHeaderEdgeChangeRecomputes(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+	entryID, fanOutID := chunkIDOf(t, pool, "Entry"), chunkIDOf(t, pool, "FanOut")
+	before := chunkHashes(t, pool)
+
+	if _, err := pool.Exec(context.Background(), `
+		DELETE FROM edges e USING symbols caller, symbols callee
+		WHERE e.caller_id = caller.id AND e.callee_id = callee.id
+		  AND e.source = 'treesitter' AND caller.name = 'Entry' AND callee.name = 'FanOut'`); err != nil {
+		t.Fatalf("delete edge: %v", err)
+	}
+	out := runChunkStage(t, pool, root, chunkOptions{})
+	if !strings.Contains(out, "0 files re-split, 0 chunks changed") {
+		t.Errorf("edge-only change should not re-split files:\n%s", out)
+	}
+
+	after := chunkHashes(t, pool)
+	var changed []int64
+	for id, hash := range after {
+		if before[id] != hash {
+			changed = append(changed, id)
+		}
+	}
+	if len(changed) != 2 {
+		t.Fatalf("chunks with a changed content_hash = %d (%v), want exactly 2", len(changed), changed)
+	}
+	got := map[int64]bool{changed[0]: true, changed[1]: true}
+	if !got[entryID] || !got[fanOutID] {
+		t.Errorf("changed chunks = %v, want the caller %d and the callee %d", changed, entryID, fanOutID)
+	}
+
+	// A further rerun changes nothing.
+	settled := runChunkStage(t, pool, root, chunkOptions{})
+	if !strings.Contains(settled, "0 files re-split, 0 chunks changed") {
+		t.Errorf("rerun summary not settled:\n%s", settled)
+	}
+	for id, hash := range chunkHashes(t, pool) {
+		if after[id] != hash {
+			t.Errorf("chunk %d changed on a no-op rerun", id)
+		}
+	}
+}
+
+// TestChunkHeaderCountsAndCeilings proves the printed header_degraded and
+// oversized_failed counts equal the table counts, and that the fixture covers a
+// chunk that degrades near the ceiling and one that fails above it.
+func TestChunkHeaderCountsAndCeilings(t *testing.T) {
+	pool, root := chunkFixture(t)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	dbDegraded := scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE header_degraded > 0`)
+	if printed := printedCount(t, out, "header_degraded"); int64(printed) != dbDegraded {
+		t.Errorf("printed header_degraded = %d, DB count = %d", printed, dbDegraded)
+	}
+	dbFailed := scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE token_count > $1`, chunk.EmbeddableContentMax)
+	if printed := printedCount(t, out, "oversized_failed"); int64(printed) != dbFailed {
+		t.Errorf("printed oversized_failed = %d, DB count = %d", printed, dbFailed)
+	}
+	if dbDegraded == 0 {
+		t.Errorf("fixture has no degraded header; the test proves nothing")
+	}
+	if dbFailed == 0 {
+		t.Errorf("fixture has no oversized_failed chunk; the test proves nothing")
+	}
+
+	header, _, _, degraded, tokens := storedHeader(t, pool, "nearCeiling")
+	if degraded == 0 {
+		t.Errorf("nearCeiling header_degraded = 0, want > 0")
+	}
+	if tokens <= chunk.ChunkMaxTokens || tokens > chunk.EmbeddableContentMax {
+		t.Errorf("nearCeiling tokens = %d, want in (%d, %d]", tokens, chunk.ChunkMaxTokens, chunk.EmbeddableContentMax)
+	}
+	// nearCeiling has no callees or callers, so its only dropped item is the
+	// signature line: this proves the signature-drop stage end-to-end (D-082).
+	if degraded != 1 {
+		t.Errorf("nearCeiling header_degraded = %d, want 1 (the signature line only)", degraded)
+	}
+	if strings.Contains(header, "// signature:") {
+		t.Errorf("nearCeiling header still has a signature line:\n%s", header)
+	}
+
+	_, _, _, _, overTokens := storedHeader(t, pool, "overBudget")
+	if overTokens <= chunk.EmbeddableContentMax {
+		t.Errorf("overBudget tokens = %d, want > %d", overTokens, chunk.EmbeddableContentMax)
+	}
+}
+
+// TestRecomputeHeadersChangedCount proves the header pass reports the rows it
+// changes: an edge deletion changes exactly the caller's and the callee's
+// chunk, and a second pass changes nothing.
+func TestRecomputeHeadersChangedCount(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	if _, err := pool.Exec(context.Background(), `
+		DELETE FROM edges e USING symbols caller, symbols callee
+		WHERE e.caller_id = caller.id AND e.callee_id = callee.id
+		  AND e.source = 'treesitter' AND caller.name = 'Entry' AND callee.name = 'FanOut'`); err != nil {
+		t.Fatalf("delete edge: %v", err)
+	}
+	changed, err := recomputeHeaders(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("recomputeHeaders: %v", err)
+	}
+	if changed != 2 {
+		t.Errorf("recomputeHeaders changed = %d, want exactly 2", changed)
+	}
+	again, err := recomputeHeaders(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("recomputeHeaders (again): %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second recomputeHeaders changed = %d, want 0", again)
+	}
+}
+
+// TestRankedCallsByteOrder proves the SQL window ranks names in byte order,
+// exactly like the Go comparator, so the top-five it selects is the same five
+// TopNames would. Names differing only by case sort differently under a
+// locale-aware database collation, so this guards the COLLATE "C" ordering.
+func TestRankedCallsByteOrder(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+
+	var fileID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO files (path, package, sha, loc) VALUES ('pkg/tricky.go', 'pkg', 'sha', 1)
+		RETURNING id`).Scan(&fileID); err != nil {
+		t.Fatalf("insert file: %v", err)
+	}
+	insertSymbol := func(name string) int64 {
+		var id int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO symbols (file_id, kind, name, qualified_name, start_line, end_line)
+			VALUES ($1, 'func', $2, $3, 1, 1)
+			RETURNING id`, fileID, name, "pkg."+name).Scan(&id); err != nil {
+			t.Fatalf("insert symbol %s: %v", name, err)
+		}
+		return id
+	}
+	caller := insertSymbol("Caller")
+	names := []string{"Zed", "apple", "Banana", "cherry", "date", "elder", "fig"}
+	refs := make([]chunk.CallRef, 0, len(names))
+	for i, name := range names {
+		callee := insertSymbol(name)
+		refs = append(refs, chunk.CallRef{
+			Name: name, QualifiedName: "pkg." + name, ID: callee, Resolution: chunk.ResolutionExact,
+		})
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO edges (caller_id, callee_id, callee_raw, resolution, source, call_line, call_kind)
+			VALUES ($1, $2, $3, 'exact', 'treesitter', $4, 'func')`,
+			caller, callee, name, i+1); err != nil {
+			t.Fatalf("insert edge to %s: %v", name, err)
+		}
+	}
+
+	callees, _, err := rankedCalls(ctx, pool)
+	if err != nil {
+		t.Fatalf("rankedCalls: %v", err)
+	}
+	var collate string
+	if err := pool.QueryRow(ctx, `SELECT datcollate FROM pg_database WHERE datname = current_database()`).Scan(&collate); err == nil {
+		t.Logf("database collation: %s", collate)
+	}
+	got := callees[caller]
+	want := chunk.TopNames(refs)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("rankedCalls top-5 = %v, want Go TopNames = %v", got, want)
+	}
+	// Byte order (uppercase before lowercase) must decide the five.
+	if byteOrder := []string{"Banana", "Zed", "apple", "cherry", "date"}; strings.Join(got, ",") != strings.Join(byteOrder, ",") {
+		t.Errorf("rankedCalls byte order = %v, want %v", got, byteOrder)
+	}
+}

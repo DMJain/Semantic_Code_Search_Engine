@@ -92,3 +92,18 @@ func TestRequestBudgetDerivedFromRegistry(t *testing.T) {
 		t.Errorf("RequestBudget = %d, want 1638", RequestBudget)
 	}
 }
+
+// TestHeaderBudgetConstants pins the document-prefix allowance and the
+// embeddable content ceiling from D-082: MaxDocPrefixTokens is 5 and
+// EmbeddableContentMax is RequestBudget - 5 = 1633.
+func TestHeaderBudgetConstants(t *testing.T) {
+	if embed.MaxDocPrefix() != "search_document: " {
+		t.Fatalf("embed.MaxDocPrefix() = %q, want nomic's prefix", embed.MaxDocPrefix())
+	}
+	if MaxDocPrefixTokens != 5 {
+		t.Errorf("MaxDocPrefixTokens = %d, want 5", MaxDocPrefixTokens)
+	}
+	if EmbeddableContentMax != 1633 {
+		t.Errorf("EmbeddableContentMax = %d, want 1633", EmbeddableContentMax)
+	}
+}
