@@ -85,13 +85,13 @@ func KnownModels() []string {
 // context every model can serve. The chunker derives its request budget from
 // it (D-078).
 func MinNumCtx() int {
-	min := 0
+	smallest := 0
 	for _, spec := range registry {
-		if min == 0 || spec.numCtx < min {
-			min = spec.numCtx
+		if smallest == 0 || spec.numCtx < smallest {
+			smallest = spec.numCtx
 		}
 	}
-	return min
+	return smallest
 }
 
 // MaxDocPrefix returns the longest static document prefix in the registry: each

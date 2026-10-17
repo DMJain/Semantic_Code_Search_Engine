@@ -37,7 +37,7 @@ func (t T) Method() {
 	return
 }
 `)
-	got := parse.FileFacts("pkg/p/statements.go", src).Statements
+	got := parse.FileFacts(src).Statements
 	want := map[int][]parse.LineRange{
 		4:  {{StartLine: 5, EndLine: 5}, {StartLine: 6, EndLine: 6}},
 		9:  {{StartLine: 10, EndLine: 12}, {StartLine: 13, EndLine: 16}},
@@ -78,7 +78,7 @@ type Pod struct{}
 
 func (p Pod) Method() int { return 0 }
 `)
-	got := parse.FileFacts("pkg/p/results.go", src).Results
+	got := parse.FileFacts(src).Results
 	want := map[int]string{
 		3:  "",
 		5:  "int",
@@ -97,12 +97,12 @@ func (p Pod) Method() int { return 0 }
 // TestFileFactsNoBody proves a body-less declaration still reports its result
 // and a syntax-broken file does not panic, while returning non-nil maps.
 func TestFileFactsNoBody(t *testing.T) {
-	got := parse.FileFacts("pkg/p/ext.go", []byte("package p\n\nfunc Ext() error\n"))
+	got := parse.FileFacts([]byte("package p\n\nfunc Ext() error\n"))
 	if got.Results[3] != "error" {
 		t.Errorf("body-less result = %q, want %q", got.Results[3], "error")
 	}
 	if got.Statements == nil || got.Results == nil {
 		t.Errorf("FileFacts returned a nil map: %+v", got)
 	}
-	_ = parse.FileFacts("pkg/p/bad.go", []byte("package p\n\nfunc Bad( {\n"))
+	_ = parse.FileFacts([]byte("package p\n\nfunc Bad( {\n"))
 }

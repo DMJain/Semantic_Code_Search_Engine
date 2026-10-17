@@ -447,7 +447,7 @@ func TestChunkStageParts(t *testing.T) {
 		t.Fatalf("read Long symbol: %v", err)
 	}
 	src := []byte(strings.Join(lines, "\n"))
-	ranges := parse.FileFacts("parts/parts.go", src).Statements[symStart]
+	ranges := parse.FileFacts(src).Statements[symStart]
 	if len(ranges) < 2 {
 		t.Fatalf("Long statement ranges = %d, want at least 2", len(ranges))
 	}
@@ -508,7 +508,7 @@ func TestChunkStageParts(t *testing.T) {
 		`SELECT start_line FROM symbols WHERE name = 'GiantSwitch'`).Scan(&giantStart); err != nil {
 		t.Fatalf("read GiantSwitch symbol: %v", err)
 	}
-	giantRanges := parse.FileFacts("parts/parts.go", src).Statements[giantStart]
+	giantRanges := parse.FileFacts(src).Statements[giantStart]
 	g := giant[0]
 	if g.tokens <= chunk.ChunkMaxTokens {
 		t.Errorf("GiantSwitch token_count = %d, want > %d (oversized statement)", g.tokens, chunk.ChunkMaxTokens)
@@ -551,7 +551,7 @@ func TestChunkStageParts(t *testing.T) {
 
 	printedExtra, dbExtra := -1, scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE part_idx > 0`)
 	for _, line := range strings.Split(out, "\n") {
-		fmt.Sscanf(line, "parts above one: %d", &printedExtra)
+		_, _ = fmt.Sscanf(line, "parts above one: %d", &printedExtra)
 	}
 	if int64(printedExtra) != dbExtra {
 		t.Errorf("printed parts above one = %d, DB count = %d", printedExtra, dbExtra)
@@ -563,7 +563,7 @@ func printedOversized(t *testing.T, out string) int {
 	t.Helper()
 	n := -1
 	for _, line := range strings.Split(out, "\n") {
-		fmt.Sscanf(line, "oversized_statements: %d", &n)
+		_, _ = fmt.Sscanf(line, "oversized_statements: %d", &n)
 	}
 	if n < 0 {
 		t.Fatalf("output missing oversized_statements:\n%s", out)
@@ -969,7 +969,7 @@ func printedCount(t *testing.T, out, label string) int {
 	t.Helper()
 	n := -1
 	for _, line := range strings.Split(out, "\n") {
-		fmt.Sscanf(line, label+": %d", &n)
+		_, _ = fmt.Sscanf(line, label+": %d", &n)
 	}
 	if n < 0 {
 		t.Fatalf("output missing %s:\n%s", label, out)

@@ -46,7 +46,7 @@ func TestSplitIdentifiers(t *testing.T) {
 
 // TestSplitIdentifiersNoPanic feeds odd inputs and only requires no panic: the
 // tokenizer must be total on unicode, punctuation and separators.
-func TestSplitIdentifiersNoPanic(t *testing.T) {
+func TestSplitIdentifiersNoPanic(_ *testing.T) {
 	for _, word := range []string{
 		"日本語", "hélloWörld", "!!!", "___", "  ", "-", "/", ":", ".",
 		"a1B2c3D4", "  mixed_Case/Path:name-x.go  ", "𝕏", "\x00",
@@ -300,7 +300,7 @@ func FuzzSplit(f *testing.F) {
 	for _, s := range []string{"schedulePod", "HTTPServer", "pod_backoff", "utf8", "", "a", "日本語", "A_B/c:d-e"} {
 		f.Add(s)
 	}
-	f.Fuzz(func(t *testing.T, s string) {
+	f.Fuzz(func(_ *testing.T, s string) {
 		_ = SplitIdentifiers(s)
 	})
 }

@@ -382,8 +382,7 @@ func splitIdentifiers(word string) []string {
 		}
 	}
 	for _, r := range word {
-		switch runClass(r) {
-		case classOther:
+		if runClass(r) == classOther {
 			flush()
 			continue
 		}

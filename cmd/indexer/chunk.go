@@ -389,7 +389,7 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 	}
 	lines := strings.Split(string(src), "\n")
 
-	facts := parse.FileFacts(f.path, src)
+	facts := parse.FileFacts(src)
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {

@@ -25,13 +25,13 @@ type Facts struct {
 	Results    map[int]string
 }
 
-// FileFacts parses src as the Go file at repo-root-relative relPath and returns
-// the chunker [Facts] in a single tree-sitter pass. It never returns nil maps. A
-// top-level function contributes both its statement ranges and its single
-// declared result type; a method contributes only its statement ranges. Nested
-// blocks are not descended into, so an if/for/switch is one range and comments
-// between statements are not statements.
-func FileFacts(relPath string, src []byte) Facts {
+// FileFacts parses src as a Go file and returns the chunker [Facts] in a single
+// tree-sitter pass. It never returns nil maps. A top-level function contributes
+// both its statement ranges and its single declared result type; a method
+// contributes only its statement ranges. Nested blocks are not descended into,
+// so an if/for/switch is one range and comments between statements are not
+// statements.
+func FileFacts(src []byte) Facts {
 	facts := Facts{
 		Statements: map[int][]LineRange{},
 		Results:    map[int]string{},
