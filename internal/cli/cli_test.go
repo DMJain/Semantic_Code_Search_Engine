@@ -59,6 +59,24 @@ func TestRunBareMessage(t *testing.T) {
 	}
 }
 
+func TestRunExitErrorCode(t *testing.T) {
+	cases := []struct {
+		code int
+		msg  string
+	}{
+		{2, "have 4, want 5"},
+		{3, "tune ef_search"},
+	}
+	for _, tc := range cases {
+		a, errOut := app(func(context.Context, []string) error {
+			return cli.Exit(tc.code, errors.New(tc.msg))
+		})
+		if code := a.Run([]string{"go"}); code != tc.code || errOut.String() != tc.msg+"\n" {
+			t.Errorf("Exit(%d): code=%d out=%q", tc.code, code, errOut.String())
+		}
+	}
+}
+
 func TestNewFlagSetNamesTheCommand(t *testing.T) {
 	if got := cli.NewFlagSet("tool", "go").Name(); got != "tool go" {
 		t.Errorf("name = %q", got)

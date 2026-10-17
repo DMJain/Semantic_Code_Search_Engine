@@ -21,6 +21,25 @@ type Command struct {
 	Run   func(ctx context.Context, args []string) error
 }
 
+// ExitError carries an explicit process exit code for a command that must
+// distinguish its failures from a plain command error (for example a data
+// shortfall is exit 2 and a failed quality gate is exit 3). Its message is
+// printed bare, with no command-name prefix.
+type ExitError struct {
+	// Code is the process exit code to return.
+	Code int
+	// Err is the message printed to stderr. It must be non-nil.
+	Err error
+}
+
+func (e *ExitError) Error() string { return e.Err.Error() }
+func (e *ExitError) Unwrap() error { return e.Err }
+
+// Exit wraps err so the command exits with the given code and prints err's
+// message bare. A command returns Exit(2, err) or similar instead of a plain
+// error when the caller must tell its failure apart.
+func Exit(code int, err error) error { return &ExitError{Code: code, Err: err} }
+
 // App is a binary's command table.
 type App struct {
 	// Name is the binary name used in usage and error text.
@@ -53,9 +72,13 @@ func (a App) Run(args []string) int {
 			continue
 		}
 		err := c.Run(ctx, args[1:])
+		var exit *ExitError
 		switch {
 		case err == nil:
 			return 0
+		case errors.As(err, &exit):
+			fmt.Fprintln(errOut, exit.Err.Error())
+			return exit.Code
 		case errors.Is(err, flag.ErrHelp):
 			return 2
 		case a.isBare(err):
