@@ -25,6 +25,7 @@ var commands = []cli.Command{
 	{Name: "summarize", Short: "summarize in-slice functions with a local LLM", Run: runSummarize},
 	{Name: "embed", Short: "embed in-slice chunks as chunk_raw and chunk_header", Run: runEmbed},
 	{Name: "vindex", Short: "build a per-model, per-kind partial HNSW vector index", Run: runVindex},
+	{Name: "search", Short: "rank slice files for a natural-language query", Run: runSearch},
 	{Name: "ann-overlap", Short: "gate HNSW search against exact brute force", Run: runAnnOverlap},
 }
 
