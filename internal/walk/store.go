@@ -12,6 +12,14 @@ import (
 // batchSize is the number of rows per upsert statement.
 const batchSize = 500
 
+// KindDecl is the synthetic symbol kind that owns one file's residual
+// declarations chunk (D-080), created by the chunk stage. It lives here, in the
+// lower package, so walk can exclude it from re-homing without importing
+// internal/parse (which imports walk); internal/parse re-exports it as
+// parse.KindDecl. walk and parse own a file's lifecycle, the chunk stage owns
+// the decl lifecycle, so a decl owner is never re-homed.
+const KindDecl = "decl"
+
 // Sync couples files to symbols: deleting a file cascades its symbols, so
 // symbols of vanished files are re-homed first (see rehomeVanishedSymbols).
 //
@@ -61,7 +69,9 @@ func Sync(ctx context.Context, pool *pgxpool.Pool, files []File) (changed, delet
 // cleared so the parse stage re-parses the package and deletes, by its
 // whole-package seen set, the symbols that really are gone. Symbols
 // of a package with no surviving file cascade away; the parse stage then
-// deletes the function summaries left without a symbol.
+// deletes the function summaries left without a symbol. A synthetic [KindDecl]
+// owner is never re-homed: the chunk stage owns its lifecycle, so it cascades
+// away with its vanished file instead.
 func rehomeVanishedSymbols(ctx context.Context, tx pgx.Tx, paths []string) error {
 	if _, err := tx.Exec(ctx, `
 		WITH moved AS (
@@ -73,10 +83,10 @@ func rehomeVanishedSymbols(ctx context.Context, tx pgx.Tx, paths []string) error
 				         ORDER BY f.path LIMIT 1) AS tid
 				FROM files g WHERE g.path <> ALL($1::text[])
 			) t
-			WHERE s.file_id = t.gid AND t.tid IS NOT NULL
+			WHERE s.file_id = t.gid AND t.tid IS NOT NULL AND s.kind <> $2
 			RETURNING t.tid
 		)
-		UPDATE files SET parsed_sha = NULL WHERE id IN (SELECT tid FROM moved)`, paths); err != nil {
+		UPDATE files SET parsed_sha = NULL WHERE id IN (SELECT tid FROM moved)`, paths, KindDecl); err != nil {
 		return fmt.Errorf("rehome symbols of vanished files: %w", err)
 	}
 	return nil

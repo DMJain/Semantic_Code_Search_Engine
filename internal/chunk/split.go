@@ -12,7 +12,7 @@ import (
 
 // ChunkerVersion changes whenever the splitting logic changes, so every file's
 // chunk marker changes and the whole corpus is re-split (D-078).
-const ChunkerVersion = 3
+const ChunkerVersion = 4
 
 // Symbol is the subset of a parsed symbol the chunker needs: its identity, its
 // declaration span and its leading doc comment (the D-083 parse rule).
@@ -187,6 +187,74 @@ func typeChunk(sym Symbol, src []string) Chunk {
 		Content:     content,
 		ContentHash: ContentHash("", content),
 	}
+}
+
+// SplitResidual builds the one-or-more chunks of a file's uncovered top-level
+// const, var and type declarations (D-080): the file produced no chunk from a
+// function, method, struct or interface, so its declarations would otherwise be
+// unretrievable. A declaration span that fits ChunkMaxTokens is one chunk
+// identical to the source lines first..last. A larger span is split at
+// declaration boundaries with the same greedy part format as a function, each
+// part marked with `// ... part i/n` and starting at a whole declaration, and a
+// single declaration over the ceiling stays whole. The owner is the synthetic
+// symbol the caller stored.
+func SplitResidual(owner Symbol, src []string, decls []parse.LineRange) []Chunk {
+	if len(decls) == 0 {
+		return nil
+	}
+	start := decls[0].StartLine
+	end := decls[len(decls)-1].EndLine
+	if start < 1 || end < start || end > len(src) {
+		panic(fmt.Sprintf("chunk: bad residual span for symbol %d: start %d end %d, source has %d lines",
+			owner.ID, start, end, len(src)))
+	}
+	content := strings.Join(src[start-1:end], "\n")
+	if EstimateTokens(content) <= ChunkMaxTokens {
+		return []Chunk{{
+			SymbolID:    owner.ID,
+			FileID:      owner.FileID,
+			PartIdx:     0,
+			StartLine:   start,
+			EndLine:     end,
+			TokenCount:  EstimateTokens(content),
+			Content:     content,
+			ContentHash: ContentHash("", content),
+		}}
+	}
+
+	build := func(partIdx, total int, group []int) string {
+		first := decls[group[0]]
+		last := decls[group[len(group)-1]]
+		return fmt.Sprintf("// ... part %d/%d\n%s", partIdx+1, total,
+			strings.Join(src[first.StartLine-1:last.EndLine], "\n"))
+	}
+	partCount := len(decls)
+	var groups [][]int
+	for {
+		groups = groupStatements(len(decls), partCount, build)
+		if len(groups) == partCount {
+			break
+		}
+		partCount = len(groups)
+	}
+
+	out := make([]Chunk, 0, len(groups))
+	for i, group := range groups {
+		part := build(i, len(groups), group)
+		first := decls[group[0]]
+		last := decls[group[len(group)-1]]
+		out = append(out, Chunk{
+			SymbolID:    owner.ID,
+			FileID:      owner.FileID,
+			PartIdx:     i,
+			StartLine:   first.StartLine,
+			EndLine:     last.EndLine,
+			TokenCount:  EstimateTokens(part),
+			Content:     part,
+			ContentHash: ContentHash("", part),
+		})
+	}
+	return out
 }
 
 // functionChunks builds the single-or-parts chunks of one function or method. A

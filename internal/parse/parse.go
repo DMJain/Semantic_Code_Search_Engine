@@ -25,6 +25,13 @@ const (
 	KindStruct = "struct"
 	// KindInterface is a named interface type declaration.
 	KindInterface = "interface"
+	// KindDecl is the synthetic owner kind of a file's residual declarations
+	// chunk (D-080), created by the chunk stage, not produced by [File]. It is
+	// defined in walk, the lower package, and re-exported here so callers use
+	// one constant; walk cannot import parse because parse imports walk. The
+	// parse sweep and graph freshness exclude it, so the chunk stage owns its
+	// lifecycle.
+	KindDecl = walk.KindDecl
 )
 
 // maxSignature is the header length cap. A type's signature is the declaration

@@ -335,3 +335,129 @@ func TestSplitFileSharedDeclarationLine(t *testing.T) {
 		}
 	}
 }
+
+// residualSource builds a file of n top-level const declarations, each one line
+// and wide enough that the whole span is over the ceiling.
+func residualSource(n int) ([]string, []parse.LineRange) {
+	lines := []string{"package p", ""}
+	ranges := make([]parse.LineRange, 0, n)
+	for i := 0; i < n; i++ {
+		lines = append(lines, fmt.Sprintf("const C%d = \"%s\"", i, strings.Repeat("x", 300)))
+		ranges = append(ranges, parse.LineRange{StartLine: len(lines), EndLine: len(lines)})
+	}
+	return lines, ranges
+}
+
+// TestSplitResidual proves the residual chunker's contract over const, var and
+// type declaration ranges: a span that fits the ceiling is one chunk identical
+// to the source lines, a larger span splits at declaration boundaries with the
+// part marker and stays within the ceiling, and a single over-ceiling
+// declaration stays whole.
+func TestSplitResidual(t *testing.T) {
+	if got := SplitResidual(Symbol{ID: 1}, []string{"package p"}, nil); got != nil {
+		t.Errorf("SplitResidual with no declarations = %v, want nil", got)
+	}
+
+	// A declaration span that fits: one chunk, exact source lines.
+	lines := []string{"package p", "", "const A = 1", "", "var B = 2", "", "type C = int"}
+	decls := []parse.LineRange{{StartLine: 3, EndLine: 3}, {StartLine: 5, EndLine: 5}, {StartLine: 7, EndLine: 7}}
+	owner := Symbol{ID: 7, FileID: 8, StartLine: decls[0].StartLine, EndLine: decls[2].EndLine}
+	got := SplitResidual(owner, lines, decls)
+	if len(got) != 1 {
+		t.Fatalf("fit parts = %d, want 1", len(got))
+	}
+	if got[0].StartLine != 3 || got[0].EndLine != 7 {
+		t.Errorf("fit span = %d..%d, want 3..7", got[0].StartLine, got[0].EndLine)
+	}
+	if want := strings.Join(lines[2:7], "\n"); got[0].Content != want {
+		t.Errorf("fit content mismatch\ngot  %q\nwant %q", got[0].Content, want)
+	}
+	if got[0].TokenCount != EstimateTokens(got[0].Content) {
+		t.Errorf("fit token_count = %d, want %d", got[0].TokenCount, EstimateTokens(got[0].Content))
+	}
+
+	// An over-ceiling span splits at declaration boundaries.
+	long, ranges := residualSource(20)
+	last := ranges[len(ranges)-1].EndLine
+	owner = Symbol{ID: 9, FileID: 10, StartLine: ranges[0].StartLine, EndLine: last}
+	parts := SplitResidual(owner, long, ranges)
+	if len(parts) < 2 {
+		t.Fatalf("split parts = %d, want at least 2", len(parts))
+	}
+	seen := map[int]bool{}
+	for i, p := range parts {
+		if p.PartIdx != i {
+			t.Errorf("part_idx = %d, want %d", p.PartIdx, i)
+		}
+		wantPrefix := fmt.Sprintf("// ... part %d/%d\n", i+1, len(parts))
+		if !strings.HasPrefix(p.Content, wantPrefix) {
+			t.Errorf("part %d lost its marker:\ngot  %q\nwant prefix %q", i, p.Content, wantPrefix)
+		}
+		if p.TokenCount > ChunkMaxTokens {
+			t.Errorf("part %d token_count = %d, want <= %d", i, p.TokenCount, ChunkMaxTokens)
+		}
+		if p.TokenCount != EstimateTokens(p.Content) {
+			t.Errorf("part %d token_count = %d, want %d", i, p.TokenCount, EstimateTokens(p.Content))
+		}
+		for _, r := range ranges {
+			body := strings.Join(long[r.StartLine-1:r.EndLine], "\n")
+			if strings.Contains(p.Content, body) {
+				if seen[r.StartLine] {
+					t.Errorf("declaration at line %d appears in more than one part", r.StartLine)
+				}
+				seen[r.StartLine] = true
+			}
+		}
+	}
+	if len(seen) != len(ranges) {
+		t.Errorf("declarations covered = %d, want %d", len(seen), len(ranges))
+	}
+	starts := map[int]bool{}
+	for _, r := range ranges {
+		starts[r.StartLine] = true
+	}
+	for _, p := range parts[1:] {
+		if !starts[p.StartLine] {
+			t.Errorf("part starts at line %d, not a declaration boundary", p.StartLine)
+		}
+	}
+	if parts[len(parts)-1].EndLine != last {
+		t.Errorf("last part end_line = %d, want %d", parts[len(parts)-1].EndLine, last)
+	}
+
+	// One declaration over the ceiling stays whole as its own part.
+	big := []string{"package p", `const Giant = "` + strings.Repeat("x", 5000) + `"`}
+	bigDecl := []parse.LineRange{{StartLine: 2, EndLine: 2}}
+	one := SplitResidual(Symbol{ID: 3, FileID: 4, StartLine: 2, EndLine: 2}, big, bigDecl)
+	if len(one) != 1 {
+		t.Fatalf("oversized declaration parts = %d, want 1", len(one))
+	}
+	if !strings.Contains(one[0].Content, "// ... part 1/1") {
+		t.Errorf("oversized declaration part is missing its marker:\n%q", one[0].Content)
+	}
+	if !strings.Contains(one[0].Content, strings.Join(big[1:], "\n")) {
+		t.Errorf("oversized declaration part does not contain the whole declaration")
+	}
+	if one[0].TokenCount <= ChunkMaxTokens {
+		t.Errorf("oversized declaration token_count = %d, want > %d", one[0].TokenCount, ChunkMaxTokens)
+	}
+
+	// A bad span is rejected rather than stored.
+	for _, bad := range []struct {
+		name  string
+		owner Symbol
+		decls []parse.LineRange
+	}{
+		{"start below one", Symbol{ID: 1}, []parse.LineRange{{StartLine: 0, EndLine: 1}}},
+		{"beyond source", Symbol{ID: 2}, []parse.LineRange{{StartLine: 3, EndLine: 99}}},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: SplitResidual did not reject the bad span", bad.name)
+				}
+			}()
+			SplitResidual(bad.owner, big, bad.decls)
+		}()
+	}
+}

@@ -1,0 +1,40 @@
+{
+  "residual/constonly.go": [
+    {
+      "part_idx": 0,
+      "start_line": 6,
+      "end_line": 6,
+      "token_count": 5
+    }
+  ],
+  "residual/manyconst.go": [
+    {
+      "part_idx": 0,
+      "start_line": 6,
+      "end_line": 8,
+      "token_count": 994
+    },
+    {
+      "part_idx": 1,
+      "start_line": 9,
+      "end_line": 10,
+      "token_count": 664
+    }
+  ],
+  "residual/typealias.go": [
+    {
+      "part_idx": 0,
+      "start_line": 5,
+      "end_line": 5,
+      "token_count": 5
+    }
+  ],
+  "residual/varonly.go": [
+    {
+      "part_idx": 0,
+      "start_line": 5,
+      "end_line": 5,
+      "token_count": 7
+    }
+  ]
+}

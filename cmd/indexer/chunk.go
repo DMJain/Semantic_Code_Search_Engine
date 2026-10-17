@@ -629,6 +629,25 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 		return stats, err
 	}
 	chunks := chunk.SplitFile(symbols, lines, facts)
+	// A file that produced no chunk at all but has top-level const, var or type
+	// declarations gets one residual chunk owned by a synthetic symbol, so the
+	// declarations are retrievable; a file with any real chunk never does
+	// (D-080).
+	if len(chunks) == 0 {
+		if decls := parse.TopLevelDecls(src); len(decls) > 0 {
+			ownerID, err := upsertDeclSymbol(ctx, tx, f, lines, decls)
+			if err != nil {
+				return stats, err
+			}
+			owner := chunk.Symbol{
+				ID:        ownerID,
+				FileID:    f.id,
+				StartLine: decls[0].StartLine,
+				EndLine:   decls[len(decls)-1].EndLine,
+			}
+			chunks = chunk.SplitResidual(owner, lines, decls)
+		}
+	}
 
 	seen := make([]int64, 0, len(symbols))
 	partCount := make(map[int64]int)
@@ -681,6 +700,14 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 			return stats, fmt.Errorf("delete vanished parts of symbol %d in %s: %w", symbolID, f.path, err)
 		}
 	}
+	// A file that no longer needs a residual chunk (it gained a real symbol, or
+	// lost its declarations) drops its synthetic owner symbol, and the cascade
+	// removes any chunks left on it, so the "zero-chunk file only" rule holds.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM symbols WHERE file_id = $1 AND kind = $2 AND id <> ALL($3::bigint[])`,
+		f.id, parse.KindDecl, seen); err != nil {
+		return stats, fmt.Errorf("delete stale residual symbols in %s: %w", f.path, err)
+	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE files SET chunked_sha = $2 WHERE id = $1`,
@@ -692,6 +719,38 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 	}
 	return stats, nil
 }
+
+// upsertDeclSymbol stores the synthetic owner symbol (parse.KindDecl) of a
+// file's residual declarations chunk and returns its stable id: the qualified
+// name is derived from the globally unique file path, so a rerun upserts the
+// same row and every residual chunk id survives (D-081). The signature is the
+// first declaration line, so the context header names what the chunk holds.
+func upsertDeclSymbol(ctx context.Context, tx pgx.Tx, f chunkFile, lines []string, decls []parse.LineRange) (int64, error) {
+	first := decls[0]
+	last := decls[len(decls)-1]
+	var id int64
+	err := tx.QueryRow(ctx, `
+		INSERT INTO symbols (file_id, kind, name, qualified_name, signature, start_line, end_line)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (qualified_name) DO UPDATE SET
+			file_id = EXCLUDED.file_id,
+			kind = EXCLUDED.kind,
+			name = EXCLUDED.name,
+			signature = EXCLUDED.signature,
+			start_line = EXCLUDED.start_line,
+			end_line = EXCLUDED.end_line
+		RETURNING id`,
+		f.id, parse.KindDecl, filepath.Base(f.path), declQualifiedName(f.path),
+		lines[first.StartLine-1], first.StartLine, last.EndLine).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("upsert residual owner for %s: %w", f.path, err)
+	}
+	return id, nil
+}
+
+// declQualifiedName is the deterministic, globally unique qualified name of a
+// residual owner symbol, built from the unique file path.
+func declQualifiedName(path string) string { return "@decls:" + path }
 
 // fileChunkSymbols loads the function, method, struct and interface symbols of
 // one file in source order, with the span and doc the chunker needs.

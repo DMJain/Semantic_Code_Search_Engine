@@ -179,6 +179,29 @@ A second run prints `0 files to chunk` / `0 files re-split, 0 chunks changed` wi
 
 **D-080 outcome: TRIGGERED.** `zero_chunk_files_with_decls = 46` is at least the threshold of 18, so the residual-chunk ticket (S3-07) is activated and must be done before the embedding run; it must drive `zero_chunk_files_with_decls` to 0. Recorded in `decisions.md` D-080.
 
-**B0 note.** B0 indexes whole-file text (`architecture.md#keyword-baseline-b0`), so it can return the 150 zero-chunk slice files (46 with only const/var/type declarations, 104 with no declarations) that A0 and A1 cannot; a result-count difference between B0 and A0/A1 on those files is a coverage effect, not a retrieval-quality effect.
+**B0 note.** B0 indexes whole-file text (`architecture.md#keyword-baseline-b0`), so it can return zero-chunk slice files that A0 and A1 cannot; a result-count difference between B0 and A0/A1 on those files is a coverage effect, not a retrieval-quality effect.
 
-(empty)
+### Residual chunk run (S3-07, 2026-10-18)
+
+The D-080 trigger fired, so the chunker now gives every file that produced no chunk but has top-level const/var/type declarations one residual chunk (D-085). `ChunkerVersion` was bumped to 4, so the run re-splits every file. Command `./bin/indexer chunk`:
+
+```
+6633 files to chunk
+6633 files re-split, 295 chunks changed
+parts above one: 940
+oversized_statements: 410
+oversized_failed: 152
+header_degraded: 170
+chunks: 55233 (10026 in slice, 45207 outside)
+tokens p50/p99/max: 92/986/78057
+chunks_with_marker_lines: 2485 (4.50% of 55233 chunks)
+chunks_with_block_comment_above: 11 (0.02% of 55233 chunks)
+zero_chunk_files_total: 104 (11.87% of 876 slice files)
+zero_chunk_files_with_decls: 0 (0.00% of 876 slice files)
+zero_chunk_files_no_decls: 104 (11.87% of 876 slice files)
+wall time: 40.041107334s
+```
+
+`zero_chunk_files_with_decls` dropped from 46 to **0**: the 46 slice files (and their 249 out-of-slice peers) now have a residual chunk. The only zero-chunk files left are the 104 doc-only files that hold no declaration and so can never be chunked. Cross-checks matched: 410 chunks over 1000 tokens, 152 over 1633, 170 degraded, 270 synthetic `decl` owner symbols holding 295 residual chunks. This run supersedes the S3-06 chunk figures above (the corpus grew by 295 residual chunks and the counts moved); the S3-06 numbers are kept as the pre-residual snapshot.
+
+The idempotency, stable-id, re-parse-survival and graph-freshness properties of residual chunks are covered by the chunk, parse, walk and graph tests.

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 )
 
 // Staleness reasons printed by graph --status and used to classify files (D-076).
@@ -38,12 +40,16 @@ func StaleReasons(sha string, graphedSHA, graphedFP *string, fp string) []string
 // LoadSymbols reads the whole symbol index, ordered by id, joined to its file so
 // each symbol carries its package and path. It is the input to Fingerprint, so
 // both `indexer graph` and the eval callgraph report build the same fingerprint.
+// The synthetic [parse.KindDecl] owner the chunk stage creates is excluded: it
+// has no edges and is not a resolver input, so its existence must never change
+// the fingerprint and mark every file stale (D-076, D-080).
 func LoadSymbols(ctx context.Context, pool *pgxpool.Pool) ([]Symbol, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT s.id, s.file_id, f.path, f.package, s.name, s.qualified_name,
 		       coalesce(s.receiver, ''), s.kind, s.start_line
 		FROM symbols s JOIN files f ON f.id = s.file_id
-		ORDER BY s.id`)
+		WHERE s.kind <> $1
+		ORDER BY s.id`, parse.KindDecl)
 	if err != nil {
 		return nil, fmt.Errorf("load symbols: %w", err)
 	}

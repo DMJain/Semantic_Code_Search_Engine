@@ -274,11 +274,14 @@ func writePackage(ctx context.Context, pool *pgxpool.Pool, files []parsedFile) e
 }
 
 // deleteVanished removes symbols of the given files that were not seen in the
-// whole package parse and returns their ids.
+// whole package parse and returns their ids. The synthetic [parse.KindDecl]
+// owner the chunk stage creates is never swept: it is not produced by the
+// parse, so a re-parse of the package (triggered by any sibling edit) must
+// leave it, and its residual chunk, in place (D-080).
 func deleteVanished(ctx context.Context, tx pgx.Tx, fileIDs, seen []int64) ([]int64, error) {
 	rows, err := tx.Query(ctx,
-		`DELETE FROM symbols WHERE file_id = ANY($1::bigint[]) AND id <> ALL($2::bigint[]) RETURNING id`,
-		fileIDs, seen)
+		`DELETE FROM symbols WHERE file_id = ANY($1::bigint[]) AND id <> ALL($2::bigint[]) AND kind <> $3 RETURNING id`,
+		fileIDs, seen, parse.KindDecl)
 	if err != nil {
 		return nil, fmt.Errorf("delete vanished symbols: %w", err)
 	}

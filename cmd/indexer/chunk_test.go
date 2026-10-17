@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/chunk"
+	"github.com/DMJain/Semantic_Code_Search_Engine/internal/graph"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/parse"
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/testdb"
 )
@@ -370,9 +371,10 @@ func TestChunkCeilingChangeResplitsAll(t *testing.T) {
 }
 
 // TestChunkWholeRepoCoverage proves the fixture files are out of slice yet
-// still receive chunks: chunking is whole-repo, not slice-only. The zerofiles
-// fixtures have no chunkable symbol, so the comparison is against every file
-// that has one.
+// still receive chunks: chunking is whole-repo, not slice-only. Every file with
+// a function, method, struct or interface symbol has a chunk, and every file
+// with none of those but with top-level const, var or type declarations gets
+// exactly one residual chunk; a doc-only file gets none.
 func TestChunkWholeRepoCoverage(t *testing.T) {
 	pool, root := chunkFixture(t)
 	runChunkStage(t, pool, root, chunkOptions{})
@@ -384,8 +386,38 @@ func TestChunkWholeRepoCoverage(t *testing.T) {
 		SELECT count(DISTINCT file_id) FROM symbols
 		WHERE kind IN ('func', 'method', 'struct', 'interface')`)
 	chunked := scalarInt(t, pool, `SELECT count(DISTINCT file_id) FROM chunks`)
-	if chunked != total {
-		t.Errorf("files with chunks = %d, want every file with a chunkable symbol = %d", chunked, total)
+
+	// Files with no chunkable symbol add a residual chunk only when they have
+	// top-level declarations; the rest stay chunkless.
+	rows, err := pool.Query(context.Background(), `
+		SELECT f.path FROM files f
+		WHERE NOT EXISTS (
+			SELECT 1 FROM symbols s WHERE s.file_id = f.id
+			  AND s.kind IN ('func', 'method', 'struct', 'interface'))`)
+	if err != nil {
+		t.Fatalf("query files without a chunkable symbol: %v", err)
+	}
+	defer rows.Close()
+	var residualFiles int64
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			t.Fatalf("scan file: %v", err)
+		}
+		if len(parse.TopLevelDecls([]byte(strings.Join(fileLines(t, root, path), "\n")))) > 0 {
+			residualFiles++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("files rows: %v", err)
+	}
+
+	if chunked != total+residualFiles {
+		t.Errorf("files with chunks = %d, want chunkable files %d plus residual files %d",
+			chunked, total, residualFiles)
+	}
+	if residualFiles == 0 {
+		t.Errorf("fixture has no residual file; the test proves nothing")
 	}
 }
 
@@ -1390,8 +1422,8 @@ func TestChunkStageZeroChunkFigures(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("zero-chunk rows: %v", err)
 	}
-	if wantWith != 1 || wantNo != 1 {
-		t.Fatalf("fixture zero-chunk split = %d with decls, %d without, want 1 and 1", wantWith, wantNo)
+	if wantWith != 0 || wantNo != 1 {
+		t.Fatalf("fixture zero-chunk split = %d with decls, %d without, want 0 and 1", wantWith, wantNo)
 	}
 
 	for label, want := range map[string]int{
@@ -1640,5 +1672,442 @@ func TestChunkStageMetricsAreTableWide(t *testing.T) {
 	}
 	if want.total == 0 || want.marker == 0 || want.block == 0 || want.zeroTotal == 0 {
 		t.Fatalf("fixture metrics %+v are degenerate; the test proves nothing", want)
+	}
+}
+
+// residualPartsOf returns the stored residual chunks of one file in part order,
+// read through the synthetic owner symbol keyed by the file path.
+func residualPartsOf(t *testing.T, pool *pgxpool.Pool, path string) []storedPart {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT c.part_idx, c.start_line, c.end_line, c.token_count, c.content
+		FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.qualified_name = $1
+		ORDER BY c.part_idx`, declQualifiedName(path))
+	if err != nil {
+		t.Fatalf("query residual parts of %s: %v", path, err)
+	}
+	defer rows.Close()
+	var out []storedPart
+	for rows.Next() {
+		var p storedPart
+		if err := rows.Scan(&p.partIdx, &p.start, &p.end, &p.tokens, &p.content); err != nil {
+			t.Fatalf("scan residual part: %v", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("residual part rows: %v", err)
+	}
+	return out
+}
+
+// restampFilesForCeiling rewrites every file's chunk marker as if the chunk
+// ceiling were chunkMax, so the next run re-splits the whole tree (D-078).
+func restampFilesForCeiling(t *testing.T, pool *pgxpool.Pool, chunkMax int) int {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `SELECT id, sha FROM files`)
+	if err != nil {
+		t.Fatalf("query files: %v", err)
+	}
+	type fileSHA struct {
+		id  int64
+		sha string
+	}
+	var files []fileSHA
+	for rows.Next() {
+		var f fileSHA
+		if err := rows.Scan(&f.id, &f.sha); err != nil {
+			t.Fatalf("scan file: %v", err)
+		}
+		files = append(files, f)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("files rows: %v", err)
+	}
+	for _, f := range files {
+		marker := chunk.ParamsSHA(f.sha, chunkMax, chunk.GroupMaxTokens, chunk.ChunkerVersion)
+		if _, err := pool.Exec(ctx,
+			`UPDATE files SET chunked_sha = $2 WHERE id = $1`, f.id, marker); err != nil {
+			t.Fatalf("restamp file: %v", err)
+		}
+	}
+	return len(files)
+}
+
+// TestChunkResidualDeclarations proves a const-only, var-only and type-alias
+// file each get exactly one residual chunk whose content equals the source span
+// from start_line to end_line, whose search_tsv finds the declared name, and
+// whose header is built; and that a file with a function plus a const gets no
+// residual chunk (its declarations stay uncovered).
+func TestChunkResidualDeclarations(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+	ctx := context.Background()
+
+	for _, tc := range []struct{ path, query string }{
+		{"residual/constonly.go", "maxretries"},
+		{"residual/varonly.go", "backoff"},
+		{"residual/typealias.go", "alias"},
+	} {
+		parts := residualPartsOf(t, pool, tc.path)
+		if len(parts) != 1 || parts[0].partIdx != 0 {
+			t.Fatalf("%s residual parts = %+v, want exactly one part 0", tc.path, parts)
+		}
+		lines := fileLines(t, root, tc.path)
+		p := parts[0]
+		if want := strings.Join(lines[p.start-1:p.end], "\n"); p.content != want {
+			t.Errorf("%s content mismatch\ngot  %q\nwant %q", tc.path, p.content, want)
+		}
+
+		var header string
+		var matches bool
+		if err := pool.QueryRow(ctx, `
+			SELECT c.header, c.search_tsv @@ to_tsquery('simple', $2)
+			FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+			WHERE s.qualified_name = $1`,
+			declQualifiedName(tc.path), tc.query).Scan(&header, &matches); err != nil {
+			t.Fatalf("read residual header of %s: %v", tc.path, err)
+		}
+		if header == "" {
+			t.Errorf("%s residual chunk has an empty header", tc.path)
+		}
+		if !matches {
+			t.Errorf("%s residual search_tsv does not match %q", tc.path, tc.query)
+		}
+
+		var kind string
+		if err := pool.QueryRow(ctx, `
+			SELECT s.kind FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+			WHERE s.qualified_name = $1`, declQualifiedName(tc.path)).Scan(&kind); err != nil {
+			t.Fatalf("read residual owner kind of %s: %v", tc.path, err)
+		}
+		if kind != parse.KindDecl {
+			t.Errorf("%s residual owner kind = %q, want %q", tc.path, kind, parse.KindDecl)
+		}
+	}
+
+	// A file with a real chunk never gets a residual chunk.
+	if parts := residualPartsOf(t, pool, "residual/mixed.go"); len(parts) != 0 {
+		t.Errorf("mixed.go has %d residual parts, want 0", len(parts))
+	}
+	if n := scalarInt(t, pool, `
+		SELECT count(*) FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		JOIN files f ON f.id = c.file_id
+		WHERE f.path = 'residual/mixed.go' AND s.name = 'Mixed'`); n != 1 {
+		t.Errorf("mixed.go Mixed chunks = %d, want 1", n)
+	}
+}
+
+// TestChunkResidualZeroChunkWithDeclsDrops proves every decl-only slice file
+// has a chunk after the run, so the printed zero_chunk_files_with_decls drops to
+// 0 while the doc-only figure is untouched (D-080).
+func TestChunkResidualZeroChunkWithDeclsDrops(t *testing.T) {
+	pool, root := chunkFixture(t)
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE files SET in_slice = true WHERE path IN (
+			'zerofiles/decls.go', 'residual/constonly.go', 'residual/varonly.go',
+			'residual/typealias.go', 'residual/manyconst.go', 'residual/mixed.go')`); err != nil {
+		t.Fatalf("mark slice files: %v", err)
+	}
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	if got := printedCount(t, out, "zero_chunk_files_with_decls"); got != 0 {
+		t.Errorf("zero_chunk_files_with_decls = %d, want 0 after the residual run\n%s", got, out)
+	}
+	if got := printedCount(t, out, "zero_chunk_files_total"); got != 0 {
+		t.Errorf("zero_chunk_files_total = %d, want 0 (every marked file now has a chunk)\n%s", got, out)
+	}
+}
+
+// TestChunkResidualIdempotent proves a rerun over an unchanged tree reports the
+// settled summary and leaves every chunk id, the residual chunk included,
+// unchanged.
+func TestChunkResidualIdempotent(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+	before := chunkSnapshot(t, pool)
+
+	var residualBefore int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.qualified_name = $1`, declQualifiedName("residual/constonly.go")).Scan(&residualBefore); err != nil {
+		t.Fatalf("read residual chunk id: %v", err)
+	}
+
+	second := runChunkStage(t, pool, root, chunkOptions{})
+	if !strings.Contains(second, "0 files to chunk") {
+		t.Errorf("second run should find nothing to chunk:\n%s", second)
+	}
+	if !strings.Contains(second, "0 files re-split, 0 chunks changed") {
+		t.Errorf("second run should report the settled summary:\n%s", second)
+	}
+	if after := chunkSnapshot(t, pool); after != before {
+		t.Errorf("chunk ids changed on rerun:\nbefore %s\nafter  %s", before, after)
+	}
+	var residualAfter int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.qualified_name = $1`, declQualifiedName("residual/constonly.go")).Scan(&residualAfter); err != nil {
+		t.Fatalf("read residual chunk id after rerun: %v", err)
+	}
+	if residualAfter != residualBefore {
+		t.Errorf("residual chunk id changed on rerun: before %d, after %d", residualBefore, residualAfter)
+	}
+}
+
+// TestChunkResidualCeilingChangeResplitsIdempotently proves a ceiling change
+// re-splits every file, re-derives the residual chunks and leaves every id
+// unchanged, on the re-split run and on a further one.
+func TestChunkResidualCeilingChangeResplitsIdempotently(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+	before := chunkSnapshot(t, pool)
+
+	// First restamp: every file is re-split, but the derived chunks are
+	// identical, so nothing changes.
+	n := restampFilesForCeiling(t, pool, 2000)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+	if want := fmt.Sprintf("%d files re-split, 0 chunks changed", n); !strings.Contains(out, want) {
+		t.Errorf("output missing %q:\n%s", want, out)
+	}
+	if after := chunkSnapshot(t, pool); after != before {
+		t.Errorf("chunk ids changed when only the ceiling changed:\nbefore %s\nafter  %s", before, after)
+	}
+
+	// A second restamp and run is the same no-op.
+	restampFilesForCeiling(t, pool, 2000)
+	runChunkStage(t, pool, root, chunkOptions{})
+	if after := chunkSnapshot(t, pool); after != before {
+		t.Errorf("chunk ids changed on the second ceiling change:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// TestChunkResidualSplitParts proves a residual file over the ceiling is split
+// at declaration boundaries: more than one part, every part marked and within
+// the ceiling, every part starting at a whole declaration, and no declaration
+// split.
+func TestChunkResidualSplitParts(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	const path = "residual/manyconst.go"
+	parts := residualPartsOf(t, pool, path)
+	if len(parts) < 2 {
+		t.Fatalf("%s residual parts = %d, want at least 2", path, len(parts))
+	}
+	lines := fileLines(t, root, path)
+	decls := parse.TopLevelDecls([]byte(strings.Join(lines, "\n")))
+	if len(decls) < 2 {
+		t.Fatalf("%s top-level declarations = %d, want at least 2", path, len(decls))
+	}
+	starts := map[int]bool{}
+	for _, d := range decls {
+		starts[d.StartLine] = true
+	}
+	for i, p := range parts {
+		if p.partIdx != i {
+			t.Errorf("part_idx = %d, want %d", p.partIdx, i)
+		}
+		marker := fmt.Sprintf("// ... part %d/%d", i+1, len(parts))
+		if !strings.HasPrefix(p.content, marker+"\n") {
+			t.Errorf("part %d lost its marker:\n%q", i, p.content)
+		}
+		if p.tokens > chunk.ChunkMaxTokens {
+			t.Errorf("part %d token_count = %d, want <= %d", i, p.tokens, chunk.ChunkMaxTokens)
+		}
+		if p.start < 1 || p.end > len(lines) || p.end < p.start {
+			t.Errorf("part %d span %d..%d outside %d lines", i, p.start, p.end, len(lines))
+			continue
+		}
+		if !strings.HasSuffix(p.content, strings.Join(lines[p.start-1:p.end], "\n")) {
+			t.Errorf("part %d does not end with its covered source lines", i)
+		}
+		if !starts[p.start] {
+			t.Errorf("part %d starts at line %d, not a declaration boundary", i, p.start)
+		}
+	}
+}
+
+// TestChunkResidualGainedFuncLosesResidual proves the "zero-chunk file only"
+// rule holds across a change: a file that gains a function loses its residual
+// chunk and its synthetic owner symbol, and the function chunks normally.
+func TestChunkResidualGainedFuncLosesResidual(t *testing.T) {
+	pool := testdb.New(t)
+	root := t.TempDir()
+	writeSrc(t, root, "pkg/a/a.go", "package a\n\nconst A = 1\n")
+
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	runGraphStage(t, pool, root, graphOptions{})
+	runChunkStage(t, pool, root, chunkOptions{})
+	if parts := residualPartsOf(t, pool, "pkg/a/a.go"); len(parts) != 1 {
+		t.Fatalf("before: residual parts = %d, want 1", len(parts))
+	}
+
+	// The file gains a function, forcing it stale through the pipeline.
+	writeSrc(t, root, "pkg/a/a.go", "package a\n\nconst A = 1\n\nfunc F() int { return A }\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	runGraphStage(t, pool, root, graphOptions{})
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	if parts := residualPartsOf(t, pool, "pkg/a/a.go"); len(parts) != 0 {
+		t.Errorf("after gaining a function: residual parts = %d, want 0", len(parts))
+	}
+	if n := scalarInt(t, pool, `
+		SELECT count(*) FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.name = 'F'`); n != 1 {
+		t.Errorf("function F chunks = %d, want 1", n)
+	}
+	if n := scalarInt(t, pool, `
+		SELECT count(*) FROM symbols s JOIN files f ON f.id = s.file_id
+		WHERE f.path = 'pkg/a/a.go' AND s.kind = $1`, parse.KindDecl); n != 0 {
+		t.Errorf("synthetic owner symbols left on the file = %d, want 0", n)
+	}
+}
+
+// TestChunkResidualGolden pins the residual split shape of the const-only,
+// var-only, type-alias and many-const fixtures. Regenerate manually with
+// -update only.
+func TestChunkResidualGolden(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	got := map[string][]partGolden{}
+	for _, path := range []string{
+		"residual/constonly.go", "residual/manyconst.go", "residual/typealias.go", "residual/varonly.go",
+	} {
+		for _, p := range residualPartsOf(t, pool, path) {
+			got[path] = append(got[path], partGolden{
+				PartIdx: p.partIdx, StartLine: p.start, EndLine: p.end, TokenCount: p.tokens,
+			})
+		}
+	}
+	data, err := json.MarshalIndent(got, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal golden: %v", err)
+	}
+	data = append(data, '\n')
+
+	golden := filepath.Join("testdata", "chunk", "golden", "residual.json")
+	if *updateChunkGoldens {
+		if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {
+			t.Fatalf("create golden dir: %v", err)
+		}
+		if err := os.WriteFile(golden, data, 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Errorf("residual golden mismatch (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", data, want)
+	}
+}
+
+// TestChunkResidualSurvivesReparse proves the parse stage's vanished-symbol
+// sweep never deletes the synthetic parse.KindDecl owner the chunk stage
+// created (D-080): a package re-parse (triggered by any sibling edit, which
+// re-parses the whole package) leaves the decl symbol and its residual chunk in
+// place, with an unchanged chunk id. Without the kind filter in deleteVanished
+// the owner is swept, its chunk cascades away, and the chunk stage never
+// restores it because the file's own sha and chunked_sha are unchanged.
+func TestChunkResidualSurvivesReparse(t *testing.T) {
+	pool := testdb.New(t)
+	root := t.TempDir()
+	ctx := context.Background()
+	writeSrc(t, root, "pkg/a/a.go", "package a\n\nconst A = 1\n")
+	writeSrc(t, root, "pkg/a/b.go", "package a\n\nfunc B() int { return 1 }\n")
+
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+	runGraphStage(t, pool, root, graphOptions{})
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	var declID, chunkID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id
+		WHERE f.path = 'pkg/a/a.go' AND s.kind = $1`, parse.KindDecl).Scan(&declID); err != nil {
+		t.Fatalf("before: no residual owner: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.qualified_name = $1`, declQualifiedName("pkg/a/a.go")).Scan(&chunkID); err != nil {
+		t.Fatalf("before: no residual chunk: %v", err)
+	}
+
+	// Force a re-parse of the package, as an edit to any sibling file would.
+	if _, err := pool.Exec(ctx,
+		`UPDATE files SET parsed_sha = NULL WHERE path = 'pkg/a/a.go'`); err != nil {
+		t.Fatalf("force re-parse: %v", err)
+	}
+	runParseCorpus(t, pool, root, 0)
+
+	var declAfter, chunkAfter int64
+	if err := pool.QueryRow(ctx, `
+		SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id
+		WHERE f.path = 'pkg/a/a.go' AND s.kind = $1`, parse.KindDecl).Scan(&declAfter); err != nil {
+		t.Fatalf("after re-parse: residual owner was deleted: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		WHERE s.qualified_name = $1`, declQualifiedName("pkg/a/a.go")).Scan(&chunkAfter); err != nil {
+		t.Fatalf("after re-parse: residual chunk was deleted: %v", err)
+	}
+	if declAfter != declID || chunkAfter != chunkID {
+		t.Errorf("ids changed across re-parse: decl %d->%d, chunk %d->%d",
+			declID, declAfter, chunkID, chunkAfter)
+	}
+}
+
+// TestGraphFreshnessIgnoresDeclSymbols proves the synthetic parse.KindDecl owner
+// never enters the graph freshness fingerprint (D-076, D-080): inserting one
+// does not change what graph.LoadSymbols returns or graph.Fingerprint computes,
+// so a residual chunk cannot mark every file stale and re-graph the whole repo.
+func TestGraphFreshnessIgnoresDeclSymbols(t *testing.T) {
+	pool := testdb.New(t)
+	root := t.TempDir()
+	ctx := context.Background()
+	writeSrc(t, root, "pkg/a/a.go", "package a\n\nconst A = 1\n")
+	seedFiles(t, pool, root)
+	runParseCorpus(t, pool, root, 0)
+
+	names, err := graph.BuildNameIndex(ctx, pool, root)
+	if err != nil {
+		t.Fatalf("BuildNameIndex: %v", err)
+	}
+	before, err := graph.LoadSymbols(ctx, pool)
+	if err != nil {
+		t.Fatalf("LoadSymbols: %v", err)
+	}
+	beforeFP := graph.Fingerprint(before, names, graph.ResolverVersion)
+
+	var fileID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM files WHERE path = 'pkg/a/a.go'`).Scan(&fileID); err != nil {
+		t.Fatalf("read file id: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO symbols (file_id, kind, name, qualified_name, signature, start_line, end_line)
+		VALUES ($1, $2, 'a.go', '@decls:pkg/a/a.go', 'const A = 1', 3, 3)`,
+		fileID, parse.KindDecl); err != nil {
+		t.Fatalf("insert decl symbol: %v", err)
+	}
+
+	after, err := graph.LoadSymbols(ctx, pool)
+	if err != nil {
+		t.Fatalf("LoadSymbols after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("LoadSymbols count %d -> %d, want unchanged (decl excluded)", len(before), len(after))
+	}
+	if afterFP := graph.Fingerprint(after, names, graph.ResolverVersion); afterFP != beforeFP {
+		t.Errorf("fingerprint changed by a decl symbol:\nbefore %s\nafter  %s", beforeFP, afterFP)
 	}
 }

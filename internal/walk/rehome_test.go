@@ -73,3 +73,49 @@ func TestSyncRehomesSymbolsOfVanishedFiles(t *testing.T) {
 		t.Errorf("symbol of a package with no survivor: count %d, err %v, want 0", n, err)
 	}
 }
+
+// TestSyncDoesNotRehomeDeclSymbols proves a synthetic walk.KindDecl owner is
+// never re-homed to a surviving sibling: walk and parse own a file's lifecycle,
+// the chunk stage owns the decl lifecycle (D-080), so the decl owner cascades
+// away with its vanished file instead of following a real symbol to a sibling.
+func TestSyncDoesNotRehomeDeclSymbols(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	f := func(path, pkg string) walk.File {
+		return walk.File{Path: path, Package: pkg, SHA: "s-" + path, LOC: 5}
+	}
+	all := []walk.File{f("p/a.go", "p"), f("p/b.go", "p")}
+	if _, _, err := walk.Sync(ctx, pool, all); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO symbols (file_id, kind, name, qualified_name, signature, start_line, end_line)
+	      SELECT id, 'func', 'F', 'p.F', 'func F()', 1, 9 FROM files WHERE path = 'p/a.go'`)
+	exec(`INSERT INTO symbols (file_id, kind, name, qualified_name, signature, start_line, end_line)
+	      SELECT id, $1, 'a.go', '@decls:p/a.go', 'const A = 1', 1, 3 FROM files WHERE path = 'p/a.go'`,
+		walk.KindDecl)
+
+	// a.go vanishes; b.go survives.
+	if _, deleted, err := walk.Sync(ctx, pool, all[1:]); err != nil || deleted != 1 {
+		t.Fatalf("Sync deleted %d, err %v, want 1", deleted, err)
+	}
+
+	var home string
+	if err := pool.QueryRow(ctx, `
+		SELECT f.path FROM symbols s JOIN files f ON f.id = s.file_id
+		WHERE s.qualified_name = 'p.F'`).Scan(&home); err != nil {
+		t.Fatalf("p.F not kept: %v", err)
+	}
+	if home != "p/b.go" {
+		t.Errorf("p.F re-homed to %s, want p/b.go", home)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM symbols WHERE kind = $1`, walk.KindDecl).Scan(&n); err != nil || n != 0 {
+		t.Errorf("decl symbols surviving = %d, err %v, want 0 (must not be re-homed)", n, err)
+	}
+}
