@@ -44,7 +44,7 @@ Paired bootstrap over queries, 10,000 resamples, fixed seed, 95% percentile CI o
 |---|---|
 | B0 | keyword baseline, defined in [architecture.md#keyword-baseline-b0](architecture.md#keyword-baseline-b0) (D-030) |
 | A0 | flat baseline: `chunk_raw` embeddings, no header, semantic only |
-| A1 | A0 + context header (`chunk_header`) |
+| A1 | A0 + context header (`chunk_header`); A1 minus A0 isolates the context header, file path included (D-079) |
 | A2 | A1 + hierarchical summaries (coarse-to-fine), 7B summaries |
 | A3 | A2 + lexical + structural behind the router (rules, then Groq when not confident) |
 | A3n | A3 with flat header semantic retrieval, rules-only router (no LLM), no summaries; fan-out + RRF below the threshold (D-031). Reference for Phase 2 parity |

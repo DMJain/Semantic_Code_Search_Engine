@@ -29,7 +29,7 @@ Initial schema is `internal/store/migrations/00001_init.sql` (never edited). Lat
 - 00003 (S1): `symbols.raw_calls text[]`, `files.parsed_sha text`, `summaries.reason text`, unique index `summaries_uniq (level, target_id, prompt_version)`.
 - 00004 (S1): `summaries.completed_at timestamptz` (nullable).
 - 00005 (S2): `edges.call_line int`, `edges.call_kind text`, `edges.unresolved_reason text` (external, no_match, unknown_receiver, func_value, candidates_capped), `resolution` gains `unresolved` (D-073), `edges_callee_id_fkey` becomes ON DELETE CASCADE (D-076), `files.graphed_sha text`, `files.graphed_symbols_fp text`, unique edge index.
-- 00006 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`, `chunks.start_line int NOT NULL`, `chunks.end_line int NOT NULL`, table `embed_failures(target_kind, target_id, model, reason, created_at, primary key (target_kind, target_id, model))` (per part; a grouped chunk lives in one file and stores the span of both declarations).
+- 00006 (S3): `embeddings.input_hash text`, unique `(target_kind, target_id, model)`, `files.chunked_sha text`, `chunks.start_line int NOT NULL`, `chunks.end_line int NOT NULL`, `chunks.header text`, `chunks.content_hash text`, `chunks.header_degraded smallint NOT NULL DEFAULT 0` (D-081, D-082), table `embed_failures(target_kind, target_id, model, reason, input_hash, created_at, primary key (target_kind, target_id, model))` (per part; a grouped chunk lives in one file and stores the span of both declarations).
 - 00007 (S5): `packages` table.
 - 00008 (S9): summaries unique index also includes `model`, so 7B and 3B summary sets coexist.
 `embeddings.target_kind` values: `chunk_raw`, `chunk_header`, `summary_function`, `summary_file`, `summary_package`. `embeddings.target_id` is `chunks.id` for the chunk kinds and `summaries.id` for the summary kinds.
@@ -42,7 +42,7 @@ Every stage reads/writes Postgres, is idempotent, and resumes after a crash thro
 
 Every Ollama request (summarize and embed) passes an explicit `num_ctx` from per-model config. Two layers guard against silent truncation.
 
-1. Pre-send, deterministic: if the estimated tokens of the whole request ([#token-estimate](#token-estimate)) exceed 0.8 x `num_ctx`, the request is not sent. A summary row is marked `status='failed'` with reason `too_large`; an embed item is not stored and is recorded in `embed_failures` with the same reason (skipped on later runs unless `--retry-failed`). Embedding `num_ctx` is set per model so that the largest chunk (1500 estimated tokens plus header, title and prefix, at most 2000) is under 0.8 x `num_ctx`: 4096 unless the model card maximum is lower (then lower the chunk limit and record it in D-003).
+1. Pre-send, deterministic: if the estimated tokens of the whole request ([#token-estimate](#token-estimate)) exceed 0.8 x `num_ctx`, the request is not sent. A summary row is marked `status='failed'` with reason `too_large`; an embed item is not stored and is recorded in `embed_failures` with the same reason (skipped on later runs unless `--retry-failed`). Embedding `num_ctx` is set per model (4096 for qwen3, 2048 for nomic, D-062); the model-independent chunk ceiling and header budget are sized against `RequestBudget = 0.8 x min(num_ctx)` (D-078, D-082).
 2. Post-send: embed requests set `truncate:false` and an input-too-long error is recorded in `embed_failures` as `truncated`; a generation response with `prompt_eval_count >= num_ctx - num_predict` marks the row `status='failed'`, reason `truncated`. `prompt_eval_count` is NOT compared with the estimate: Ollama's prompt cache can lower it for a repeated prefix, so that comparison gives false failures. S0-T07 sends one request twice and records both counts to confirm. `/api/embed` returns one aggregate `prompt_eval_count` per request, so embed items are sent one per request whenever the pre-send check flags any item in a batch.
 
 ## Token estimate
@@ -67,7 +67,7 @@ Separate command `cmd/callgraph-gt`. Type-checked VTA call graph (D-011) of the 
 
 ## Stage: chunk
 
-One chunk per function/method; chunks over 1500 estimated tokens split at top-level statement boundaries and every part keeps the signature; small related decls grouped (struct + its `NewX` constructor, only when both are in the same file); top-level const/var blocks are not chunked in v1 (limitation). Each chunk stores `start_line` and `end_line`. Each chunk gets a context header: package, file, signature, top 5 callees, top 5 callers (treesitter edges; exact before name_only, ambiguous excluded, ties by name). `search_tsv` is built in Go from header+content with identifiers split (camelCase and snake_case into parts, original kept), lowercased; the same splitter is applied to lexical queries.
+One chunk per function/method; chunks over `ChunkMaxTokens` (1000, D-078) estimated tokens split at top-level statement boundaries and every part keeps the signature; small related decls grouped (struct + its `NewX` constructor, only when both are in the same file and the pair fits `GroupMaxTokens`, 550, D-078); function, method and struct chunks include the leading doc comment (`start_line` is its first line; part 1 carries it, later parts the signature only); top-level const/var blocks are not chunked in v1 (limitation). Each chunk stores `start_line` and `end_line`. Each chunk gets a context header: package, file, signature, top 5 callees, top 5 callers (treesitter edges; exact before name_only, ambiguous excluded, ties by name), recomputed every run by one set-based query (D-081) and degraded once against `RequestBudget` when it does not fit (D-082). `search_tsv` is built in Go from header+content with identifiers split (camelCase and snake_case into parts, original kept), lowercased; the same splitter is applied to lexical queries.
 
 ## Stage: summarize
 
@@ -75,7 +75,7 @@ Slice only, bottom-up: function (1-2 sentences; prompt = code + signature + doc 
 
 ## Stage: embed
 
-Raw chunks and summaries via `Embedder.EmbedDocuments`, title = file path + qualified symbol name (package path for package summaries). The prefix template registry, L2 normalization and probe already exist (verified in S0); this stage wires them, it does not rebuild them. Unknown model is a startup error. The probe (no NaN/Inf, length == `Dim()`, L2 norm ~1) runs in doctor and before every indexing run. Only in-slice chunks and summaries are embedded (D-029).
+Raw chunks and summaries via `Embedder.EmbedDocuments`, title (summaries only, D-079) = file path + qualified symbol name (package path for package summaries); chunk kinds are embedded with no title. The prefix template registry, L2 normalization and probe already exist (verified in S0); this stage wires them, it does not rebuild them. Unknown model is a startup error. The probe (no NaN/Inf, length == `Dim()`, L2 norm ~1) runs in doctor and before every indexing run. Only in-slice chunks and summaries are embedded (D-029).
 
 ## Embedding variants
 
@@ -103,7 +103,7 @@ Resolve the symbol, recursive CTE over `edges` (`source='treesitter'`) for calle
 
 ## Semantic retriever
 
-Coarse-to-fine: query embedding, then top-k package summaries, file summaries, function summaries plus raw chunks. File score = weighted sum of direct similarity, package similarity and best function scores (three tunable weights, tuned on DEV only). Returns ranked files. The flat variant (A0/A1) ranks files by best chunk only.
+Coarse-to-fine: query embedding, then top-k package summaries, file summaries, function summaries plus raw chunks. File score = weighted sum of direct similarity, package similarity and best function scores (three tunable weights, tuned on DEV only). Returns ranked files. The flat variant (A0/A1) ranks files by best chunk only: it fetches `ChunkFetch = 100` chunks, then collapses, and reports `short_result` when fewer than k files remain (D-084).
 
 ## Keyword baseline (B0)
 
