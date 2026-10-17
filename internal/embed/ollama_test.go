@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -109,9 +110,10 @@ var wantNumCtx = map[string]int{"qwen3-embedding:0.6b": 4096, "nomic-embed-text"
 // wantBody builds the exact request body Embedder should send for one input.
 func wantBody(model, input string) string {
 	b, err := json.Marshal(map[string]any{
-		"model":   model,
-		"input":   []string{input},
-		"options": map[string]any{"num_ctx": wantNumCtx[model]},
+		"model":    model,
+		"input":    []string{input},
+		"options":  map[string]any{"num_ctx": wantNumCtx[model]},
+		"truncate": false,
 	})
 	if err != nil {
 		panic(err)
@@ -296,6 +298,45 @@ func TestProbeInputSendsTruncateFalse(t *testing.T) {
 	}
 	if !strings.Contains(got, `"truncate":false`) {
 		t.Errorf("request body = %s, want truncate:false", got)
+	}
+}
+
+// TestInputTooLongIsTyped proves only a 400/413/422 whose body names a
+// context/length overflow is wrapped as ErrInputTooLong; a server error or an
+// unrelated 400 stays a plain error, so the embed stage never mistakes it for
+// truncation.
+func TestInputTooLongIsTyped(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		body        string
+		wantTooLong bool
+	}{
+		{"400 context length", http.StatusBadRequest, `{"error":"input length exceeds the context length"}`, true},
+		{"413 too long", http.StatusRequestEntityTooLarge, `input too long`, true},
+		{"422 exceeds", http.StatusUnprocessableEntity, `prompt exceeds context window`, true},
+		{"500 generic", http.StatusInternalServerError, `input length exceeds context window`, false},
+		{"400 unrelated", http.StatusBadRequest, `{"error":"model not found"}`, false},
+		{"400 batch size exceeds", http.StatusBadRequest, `{"error":"batch size exceeds the maximum"}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, tt.body, tt.status)
+			}))
+			t.Cleanup(srv.Close)
+			e, err := NewOllama(srv.URL, "qwen3-embedding:0.6b", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = e.EmbedDocuments(context.Background(), []Document{{Text: "x"}})
+			if err == nil {
+				t.Fatal("err = nil, want an error")
+			}
+			if got := errors.Is(err, ErrInputTooLong); got != tt.wantTooLong {
+				t.Fatalf("errors.Is(err, ErrInputTooLong) = %v, want %v (err = %v)", got, tt.wantTooLong, err)
+			}
+		})
 	}
 }
 

@@ -16,6 +16,18 @@ import (
 // DefaultOllamaTimeout bounds a single /api/embed call.
 const DefaultOllamaTimeout = 60 * time.Second
 
+// ErrWrongDimension reports a vector whose length is not the model's Dim(). It
+// is a distinct, typed error so the embed stage treats a malformed reply as a
+// hard error and never stores the vector (architecture "Ollama requests").
+var ErrWrongDimension = errors.New("embedding vector has the wrong dimension")
+
+// ErrInputTooLong reports that Ollama rejected an input as over the model's
+// context. It is a distinct, typed error so the embed stage records the item as
+// a truncation failure instead of mistaking every per-item error for one
+// (architecture "Ollama requests"). Only a 400/413/422 whose body names a
+// context/length overflow is wrapped.
+var ErrInputTooLong = errors.New("embedding input exceeds the model context")
+
 // Probe accepts a raw vector as normalized when its L2 norm is in this range
 // (plus or minus 1%; both supported models measure 1.0000, D-060).
 const (
@@ -170,7 +182,10 @@ func (o *Ollama) ProbeInput(ctx context.Context, input string) error {
 }
 
 func (o *Ollama) embedNormalized(ctx context.Context, inputs []string) ([][]float32, error) {
-	vecs, err := o.embedRaw(ctx, inputs)
+	// Indexing must never silently truncate: an over-length input is rejected
+	// by the server and surfaces as an error (architecture "Ollama requests").
+	truncate := false
+	vecs, err := o.embed(ctx, inputs, &truncate)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +239,11 @@ func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([]
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
-		return nil, fmt.Errorf("ollama embed (%s): %s: %s", o.model, res.Status, strings.TrimSpace(string(msg)))
+		body := strings.TrimSpace(string(msg))
+		if isInputTooLong(res.StatusCode, body) {
+			return nil, fmt.Errorf("ollama embed (%s): %s: %s: %w", o.model, res.Status, body, ErrInputTooLong)
+		}
+		return nil, fmt.Errorf("ollama embed (%s): %s: %s", o.model, res.Status, body)
 	}
 
 	// Decode as float64 so values beyond float32 range surface as Inf in the
@@ -252,9 +271,28 @@ func (o *Ollama) embed(ctx context.Context, inputs []string, truncate *bool) ([]
 	return out, nil
 }
 
+// isInputTooLong reports whether a non-200 embed reply is Ollama rejecting an
+// input for exceeding the model context. It requires both a status that can
+// carry that rejection (400, 413, 422) and a body naming a context/length
+// overflow, so a transport or server error is never mistaken for truncation.
+func isInputTooLong(status int, body string) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+	default:
+		return false
+	}
+	b := strings.ToLower(body)
+	for _, phrase := range []string{"context", "length", "too long", "context window"} {
+		if strings.Contains(b, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 func checkVector(v []float32, dim int) error {
 	if len(v) != dim {
-		return fmt.Errorf("vector has %d dimensions, want %d", len(v), dim)
+		return fmt.Errorf("%w: vector has %d dimensions, want %d", ErrWrongDimension, len(v), dim)
 	}
 	for i, x := range v {
 		if f := float64(x); math.IsNaN(f) || math.IsInf(f, 0) {

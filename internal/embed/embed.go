@@ -6,6 +6,9 @@ package embed
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -40,6 +43,11 @@ type modelSpec struct {
 	numCtx int
 	query  *template.Template
 	doc    *template.Template
+	// docSrc is the raw document template source. InputHash folds this
+	// source rather than the rendered empty-title prefix, so any template
+	// change — even one that leaves the empty render unchanged — changes the
+	// hash and re-embeds (D-081, spec line 124: H(model, template, content)).
+	docSrc string
 }
 
 // The document rule is the same for every model: a non-empty title (file
@@ -68,7 +76,7 @@ func newSpec(dim, numCtx int, query, doc string) modelSpec {
 	parse := func(src string) *template.Template {
 		return template.Must(template.New("").Option("missingkey=error").Parse(src))
 	}
-	return modelSpec{dim: dim, numCtx: numCtx, query: parse(query), doc: parse(doc)}
+	return modelSpec{dim: dim, numCtx: numCtx, query: parse(query), doc: parse(doc), docSrc: doc}
 }
 
 // KnownModels lists the models with a template registry entry.
@@ -110,6 +118,38 @@ func MaxDocPrefix() string {
 		}
 	}
 	return longest
+}
+
+// DocPrefix returns the model's static document prefix: its document template
+// rendered with no title and no text. It is what wraps every document for the
+// model, and is folded into the input hash so a template change re-embeds.
+func (o *Ollama) DocPrefix() string {
+	s, _ := render(o.spec.doc, Document{})
+	return s
+}
+
+// InputHash is the resumable identity of one embedded document (D-081): the
+// sha256 of the model, the model's raw document template source and the given
+// parts. A change to the model, the template or any part changes the hash, so a
+// graph change re-embeds exactly the affected header rows. The template source
+// is folded, not the rendered empty-title prefix, so a template edit that does
+// not change the empty render still re-embeds (spec line 124:
+// H(model, template, content)). Fields are length-prefixed so different part
+// splits cannot collide.
+func (o *Ollama) InputHash(parts ...string) string {
+	h := sha256.New()
+	writeField := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	writeField(o.model)
+	writeField(o.spec.docSrc)
+	for _, p := range parts {
+		writeField(p)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func lookup(model string) (modelSpec, error) {

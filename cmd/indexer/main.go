@@ -6,8 +6,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -25,7 +23,7 @@ var commands = []cli.Command{
 	{Name: "audit", Short: "check a seeded sample of stored symbols against the source", Run: runAudit},
 	{Name: "chunk", Short: "split function and method symbols into chunks", Run: runChunk},
 	{Name: "summarize", Short: "summarize in-slice functions with a local LLM", Run: runSummarize},
-	{Name: "embed", Short: "embed chunks and summaries (not implemented)", Run: stub("embed")},
+	{Name: "embed", Short: "embed in-slice chunks as chunk_raw and chunk_header", Run: runEmbed},
 }
 
 func main() {
@@ -48,13 +46,4 @@ func parseFlags(name string, args []string) error {
 // error handling stay the same everywhere.
 func newFlagSet(name string) *flag.FlagSet {
 	return cli.NewFlagSet("indexer", name)
-}
-
-func stub(name string) func(context.Context, []string) error {
-	return func(_ context.Context, args []string) error {
-		if err := parseFlags(name, args); err != nil {
-			return err
-		}
-		return errors.New("not implemented yet")
-	}
 }
