@@ -23,7 +23,7 @@ var commands = []cli.Command{
 	{Name: "parse", Short: "parse Go files into function and method symbols", Run: runParse},
 	{Name: "graph", Short: "resolve call expressions into tree-sitter edges", Run: runGraph},
 	{Name: "audit", Short: "check a seeded sample of stored symbols against the source", Run: runAudit},
-	{Name: "chunk", Short: "split symbols into chunks (not implemented)", Run: stub("chunk")},
+	{Name: "chunk", Short: "split function and method symbols into chunks", Run: runChunk},
 	{Name: "summarize", Short: "summarize in-slice functions with a local LLM", Run: runSummarize},
 	{Name: "embed", Short: "embed chunks and summaries (not implemented)", Run: stub("embed")},
 }
