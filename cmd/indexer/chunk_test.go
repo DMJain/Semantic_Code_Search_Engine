@@ -108,7 +108,8 @@ func TestChunkStageOneChunkPerFuncMethod(t *testing.T) {
 	if bad := scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE start_line <= 0 OR end_line < start_line`); bad != 0 {
 		t.Errorf("chunks with a bad span = %d, want 0", bad)
 	}
-	wantSummary := fmt.Sprintf("5 files re-split, %d chunks changed", chunks)
+	wantSummary := fmt.Sprintf("%d files re-split, %d chunks changed",
+		scalarInt(t, pool, `SELECT count(*) FROM files`), chunks)
 	if !strings.Contains(out, wantSummary) {
 		t.Errorf("output missing %q:\n%s", wantSummary, out)
 	}
@@ -369,7 +370,9 @@ func TestChunkCeilingChangeResplitsAll(t *testing.T) {
 }
 
 // TestChunkWholeRepoCoverage proves the fixture files are out of slice yet
-// still receive chunks: chunking is whole-repo, not slice-only.
+// still receive chunks: chunking is whole-repo, not slice-only. The zerofiles
+// fixtures have no chunkable symbol, so the comparison is against every file
+// that has one.
 func TestChunkWholeRepoCoverage(t *testing.T) {
 	pool, root := chunkFixture(t)
 	runChunkStage(t, pool, root, chunkOptions{})
@@ -377,10 +380,12 @@ func TestChunkWholeRepoCoverage(t *testing.T) {
 	if n := scalarInt(t, pool, `SELECT count(*) FROM files WHERE in_slice`); n != 0 {
 		t.Fatalf("fixture has %d in-slice files, want 0 (the test would not prove whole-repo)", n)
 	}
-	total := scalarInt(t, pool, `SELECT count(*) FROM files`)
+	total := scalarInt(t, pool, `
+		SELECT count(DISTINCT file_id) FROM symbols
+		WHERE kind IN ('func', 'method', 'struct', 'interface')`)
 	chunked := scalarInt(t, pool, `SELECT count(DISTINCT file_id) FROM chunks`)
 	if chunked != total {
-		t.Errorf("files with chunks = %d, want every file = %d", chunked, total)
+		t.Errorf("files with chunks = %d, want every file with a chunkable symbol = %d", chunked, total)
 	}
 }
 
@@ -545,8 +550,27 @@ func TestChunkStageParts(t *testing.T) {
 	if printed := printedOversized(t, out); int64(printed) != dbOversized(t, pool) {
 		t.Errorf("printed oversized_statements = %d, DB count = %d", printed, dbOversized(t, pool))
 	}
-	if !strings.Contains(out, "oversized: parts/parts.go GiantSwitch part 1/1") {
+	var giantLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "oversized: parts/parts.go GiantSwitch ") {
+			giantLine = line
+		}
+	}
+	if giantLine == "" {
 		t.Errorf("output missing the oversized part log line:\n%s", out)
+	} else {
+		var path, symbol string
+		var idx, parts, tokens int
+		if _, err := fmt.Sscanf(giantLine, "oversized: %s %s part %d/%d %d tokens", &path, &symbol, &idx, &parts, &tokens); err != nil {
+			t.Errorf("unparseable oversized line %q: %v", giantLine, err)
+		}
+		if idx != 1 || parts != 1 {
+			t.Errorf("GiantSwitch oversized line = %q, want part 1/1", giantLine)
+		}
+		if tokens <= chunk.ChunkMaxTokens {
+			t.Errorf("GiantSwitch oversized line tokens = %d, want > %d (the line must print the token count)",
+				tokens, chunk.ChunkMaxTokens)
+		}
 	}
 
 	printedExtra, dbExtra := -1, scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE part_idx > 0`)
@@ -1187,5 +1211,434 @@ func TestRankedCallsByteOrder(t *testing.T) {
 	// Byte order (uppercase before lowercase) must decide the five.
 	if byteOrder := []string{"Banana", "Zed", "apple", "cherry", "date"}; strings.Join(got, ",") != strings.Join(byteOrder, ",") {
 		t.Errorf("rankedCalls byte order = %v, want %v", got, byteOrder)
+	}
+}
+
+// TestChunkStageChunkTotalsSplitBySlice proves the printed chunk totals (all,
+// in slice and outside) equal independent SQL counts over the chunks table.
+func TestChunkStageChunkTotalsSplitBySlice(t *testing.T) {
+	pool, root := chunkFixture(t)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	var wantTotal, wantInSlice int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*), count(*) FILTER (WHERE f.in_slice)
+		FROM chunks c JOIN files f ON f.id = c.file_id`).Scan(&wantTotal, &wantInSlice); err != nil {
+		t.Fatalf("count chunk totals: %v", err)
+	}
+	total, inSlice, outside := printedChunkTotals(t, out)
+	if total != wantTotal || inSlice != wantInSlice || outside != wantTotal-wantInSlice {
+		t.Errorf("printed chunks: %d (%d in slice, %d outside), want %d (%d, %d)",
+			total, inSlice, outside, wantTotal, wantInSlice, wantTotal-wantInSlice)
+	}
+	if total == 0 {
+		t.Fatalf("fixture has no chunks; the test proves nothing")
+	}
+}
+
+// TestChunkStageTokenPercentiles proves the printed token p50/p99/max equal the
+// nearest-rank percentiles computed independently from the chunks table.
+func TestChunkStageTokenPercentiles(t *testing.T) {
+	pool, root := chunkFixture(t)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	wantP50, wantP99, wantMax := dbTokenPercentiles(t, pool)
+	p50, p99, maxTokens := printedTokenPercentiles(t, out)
+	if p50 != wantP50 || p99 != wantP99 || maxTokens != wantMax {
+		t.Errorf("printed tokens p50/p99/max: %d/%d/%d, want %d/%d/%d",
+			p50, p99, maxTokens, wantP50, wantP99, wantMax)
+	}
+	if maxTokens == 0 {
+		t.Fatalf("fixture has no chunks; the test proves nothing")
+	}
+}
+
+// TestChunkStageMarkerAndBlockCommentCounts proves the printed marker-line and
+// block-comment-above counts equal an independent recomputation from the stored
+// content and the source tree.
+func TestChunkStageMarkerAndBlockCommentCounts(t *testing.T) {
+	pool, root := chunkFixture(t)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	rows, err := pool.Query(context.Background(), `
+		SELECT c.content, c.start_line, f.path
+		FROM chunks c JOIN files f ON f.id = c.file_id`)
+	if err != nil {
+		t.Fatalf("query chunks: %v", err)
+	}
+	defer rows.Close()
+	wantMarker, wantBlock := 0, 0
+	for rows.Next() {
+		var content, path string
+		var start int
+		if err := rows.Scan(&content, &start, &path); err != nil {
+			t.Fatalf("scan chunk: %v", err)
+		}
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "// +") || strings.HasPrefix(trimmed, "//go:") {
+				wantMarker++
+				break
+			}
+		}
+		lines := fileLines(t, root, path)
+		if start >= 2 && start-1 <= len(lines) && strings.HasSuffix(strings.TrimSpace(lines[start-2]), "*/") {
+			wantBlock++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("chunk rows: %v", err)
+	}
+
+	if got := printedCount(t, out, "chunks_with_marker_lines"); got != wantMarker {
+		t.Errorf("printed chunks_with_marker_lines = %d, want %d", got, wantMarker)
+	}
+	if got := printedCount(t, out, "chunks_with_block_comment_above"); got != wantBlock {
+		t.Errorf("printed chunks_with_block_comment_above = %d, want %d", got, wantBlock)
+	}
+	if wantMarker == 0 || wantBlock == 0 {
+		t.Errorf("fixture covers %d marker chunks and %d block-comment-above chunks; the test proves nothing",
+			wantMarker, wantBlock)
+	}
+
+	// Hand-derived against basic/basic.go, read off the source rather than the
+	// production rule, so a definitional bug in the rule (or its helper) is
+	// caught: exactly two chunks carry a marker/directive line — MarkerDoc
+	// (line 15, "// +k8s:deepcopy-gen=true") and NoInline (line 23,
+	// "//go:noinline") — and exactly one chunk, BlockCommented (line 13),
+	// follows a /* */ block comment on the immediately preceding line.
+	if line12 := fileLines(t, root, "basic/basic.go")[11]; !strings.HasSuffix(strings.TrimSpace(line12), "*/") {
+		t.Fatalf("fixture changed: basic/basic.go line 12 is not the block comment: %q", line12)
+	}
+	basicRows, err := pool.Query(context.Background(), `
+		SELECT s.name, c.content, c.start_line
+		FROM chunks c JOIN symbols s ON s.id = c.symbol_id
+		JOIN files f ON f.id = c.file_id
+		WHERE f.path = 'basic/basic.go'`)
+	if err != nil {
+		t.Fatalf("query basic.go chunks: %v", err)
+	}
+	defer basicRows.Close()
+	basicMarker, basicBlock := 0, 0
+	for basicRows.Next() {
+		var name, content string
+		var start int
+		if err := basicRows.Scan(&name, &content, &start); err != nil {
+			t.Fatalf("scan basic.go chunk: %v", err)
+		}
+		if strings.Contains(content, "// +k8s:deepcopy-gen=true") || strings.Contains(content, "//go:noinline") {
+			basicMarker++
+		}
+		if start == 13 {
+			basicBlock++
+			if name != "BlockCommented" {
+				t.Errorf("basic/basic.go chunk at line 13 = %s, want BlockCommented", name)
+			}
+		}
+	}
+	if err := basicRows.Err(); err != nil {
+		t.Fatalf("basic.go rows: %v", err)
+	}
+	if basicMarker != 2 {
+		t.Errorf("basic/basic.go chunks with a hand-listed marker line = %d, want 2 (MarkerDoc and NoInline)", basicMarker)
+	}
+	if basicBlock != 1 {
+		t.Errorf("basic/basic.go chunks starting at line 13 (BlockCommented) = %d, want 1", basicBlock)
+	}
+}
+
+// TestChunkStageZeroChunkFigures proves the three zero-chunk figures are
+// measured from the tables and the source tree only, equal an independent
+// recomputation, split the new fixtures correctly (one with declarations, one
+// without), and carry a fraction of the real slice-file denominator.
+func TestChunkStageZeroChunkFigures(t *testing.T) {
+	pool, root := chunkFixture(t)
+	ctx := context.Background()
+
+	// The whole fixture tree is out of slice; mark only the two zero-chunk
+	// fixtures in slice, as the D-080 measurement is slice-only.
+	if _, err := pool.Exec(ctx, `
+		UPDATE files SET in_slice = true
+		WHERE path IN ('zerofiles/decls.go', 'zerofiles/docs.go')`); err != nil {
+		t.Fatalf("mark slice files: %v", err)
+	}
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	sliceFiles := scalarInt(t, pool, `SELECT count(*) FROM files WHERE in_slice`)
+	rows, err := pool.Query(ctx, `
+		SELECT f.path FROM files f
+		WHERE f.in_slice AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)
+		ORDER BY f.path`)
+	if err != nil {
+		t.Fatalf("query zero-chunk files: %v", err)
+	}
+	defer rows.Close()
+	wantTotal, wantWith, wantNo := 0, 0, 0
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			t.Fatalf("scan zero-chunk file: %v", err)
+		}
+		wantTotal++
+		lines := fileLines(t, root, path)
+		if len(parse.TopLevelDecls([]byte(strings.Join(lines, "\n")))) > 0 {
+			wantWith++
+		} else {
+			wantNo++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("zero-chunk rows: %v", err)
+	}
+	if wantWith != 1 || wantNo != 1 {
+		t.Fatalf("fixture zero-chunk split = %d with decls, %d without, want 1 and 1", wantWith, wantNo)
+	}
+
+	for label, want := range map[string]int{
+		"zero_chunk_files_total":      wantTotal,
+		"zero_chunk_files_with_decls": wantWith,
+		"zero_chunk_files_no_decls":   wantNo,
+	} {
+		if got := printedCount(t, out, label); got != want {
+			t.Errorf("printed %s = %d, want %d", label, got, want)
+		}
+	}
+	wantLine := fmt.Sprintf("zero_chunk_files_total: %d (%.2f%% of %d slice files)",
+		wantTotal, 100*float64(wantTotal)/float64(sliceFiles), sliceFiles)
+	if !strings.Contains(out, wantLine) {
+		t.Errorf("output missing the real denominator line %q:\n%s", wantLine, out)
+	}
+}
+
+// TestChunkStageZeroChunkNoSliceFiles proves the zero-chunk fractions print n/a
+// when the fixture has no slice files, so the measurement still runs.
+func TestChunkStageZeroChunkNoSliceFiles(t *testing.T) {
+	pool, root := chunkFixture(t)
+	out := runChunkStage(t, pool, root, chunkOptions{})
+
+	if n := scalarInt(t, pool, `SELECT count(*) FROM files WHERE in_slice`); n != 0 {
+		t.Fatalf("fixture has %d in-slice files, want 0", n)
+	}
+	if !strings.Contains(out, "zero_chunk_files_total: 0 (n/a, 0 slice files)") {
+		t.Errorf("output missing the n/a zero-chunk line:\n%s", out)
+	}
+}
+
+// printedChunkTotals reads the "chunks: total (in in slice, out outside)" line.
+func printedChunkTotals(t *testing.T, out string) (total, inSlice, outside int) {
+	t.Helper()
+	ok := false
+	for _, line := range strings.Split(out, "\n") {
+		if _, err := fmt.Sscanf(line, "chunks: %d (%d in slice, %d outside)", &total, &inSlice, &outside); err == nil {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("output missing chunk totals:\n%s", out)
+	}
+	return total, inSlice, outside
+}
+
+// printedTokenPercentiles reads the "tokens p50/p99/max: a/b/c" line.
+func printedTokenPercentiles(t *testing.T, out string) (p50, p99, maxTokens int) {
+	t.Helper()
+	ok := false
+	for _, line := range strings.Split(out, "\n") {
+		if _, err := fmt.Sscanf(line, "tokens p50/p99/max: %d/%d/%d", &p50, &p99, &maxTokens); err == nil {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("output missing token percentiles:\n%s", out)
+	}
+	return p50, p99, maxTokens
+}
+
+// dbTokenPercentiles computes the nearest-rank p50/p99 and max token counts
+// independently from the chunks table.
+func dbTokenPercentiles(t *testing.T, pool *pgxpool.Pool) (p50, p99, maxTokens int) {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `SELECT token_count FROM chunks ORDER BY token_count`)
+	if err != nil {
+		t.Fatalf("query token counts: %v", err)
+	}
+	defer rows.Close()
+	var tokens []int
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan token count: %v", err)
+		}
+		tokens = append(tokens, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("token count rows: %v", err)
+	}
+	nearest := func(p int) int {
+		if len(tokens) == 0 {
+			return 0
+		}
+		rank := (p*len(tokens) + 99) / 100
+		if rank < 1 {
+			rank = 1
+		}
+		if rank > len(tokens) {
+			rank = len(tokens)
+		}
+		return tokens[rank-1]
+	}
+	if len(tokens) > 0 {
+		maxTokens = tokens[len(tokens)-1]
+	}
+	return nearest(50), nearest(99), maxTokens
+}
+
+// chunkMetricSnapshot is the set of table-wide figures the chunk stage prints.
+type chunkMetricSnapshot struct {
+	total, inSlice, outside int
+	p50, p99, max           int
+	marker, block           int
+	zeroTotal, zeroWith     int
+	zeroNo                  int
+}
+
+// printedChunkMetricSnapshot reads every table-wide figure from a run's output.
+func printedChunkMetricSnapshot(t *testing.T, out string) chunkMetricSnapshot {
+	t.Helper()
+	var s chunkMetricSnapshot
+	s.total, s.inSlice, s.outside = printedChunkTotals(t, out)
+	s.p50, s.p99, s.max = printedTokenPercentiles(t, out)
+	s.marker = printedCount(t, out, "chunks_with_marker_lines")
+	s.block = printedCount(t, out, "chunks_with_block_comment_above")
+	s.zeroTotal = printedCount(t, out, "zero_chunk_files_total")
+	s.zeroWith = printedCount(t, out, "zero_chunk_files_with_decls")
+	s.zeroNo = printedCount(t, out, "zero_chunk_files_no_decls")
+	return s
+}
+
+// dbChunkMetricSnapshot recomputes every printed table-wide figure independently
+// from the chunks and files tables and the fixture source.
+func dbChunkMetricSnapshot(t *testing.T, pool *pgxpool.Pool, root string) chunkMetricSnapshot {
+	t.Helper()
+	var s chunkMetricSnapshot
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*), count(*) FILTER (WHERE f.in_slice)
+		FROM chunks c JOIN files f ON f.id = c.file_id`).Scan(&s.total, &s.inSlice); err != nil {
+		t.Fatalf("count chunk totals: %v", err)
+	}
+	s.outside = s.total - s.inSlice
+	s.p50, s.p99, s.max = dbTokenPercentiles(t, pool)
+
+	rows, err := pool.Query(context.Background(), `
+		SELECT c.content, c.start_line, f.path
+		FROM chunks c JOIN files f ON f.id = c.file_id`)
+	if err != nil {
+		t.Fatalf("query chunks: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var content, path string
+		var start int
+		if err := rows.Scan(&content, &start, &path); err != nil {
+			t.Fatalf("scan chunk: %v", err)
+		}
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "// +") || strings.HasPrefix(trimmed, "//go:") {
+				s.marker++
+				break
+			}
+		}
+		lines := fileLines(t, root, path)
+		if start >= 2 && start-1 <= len(lines) && strings.HasSuffix(strings.TrimSpace(lines[start-2]), "*/") {
+			s.block++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("chunk rows: %v", err)
+	}
+
+	zeroRows, err := pool.Query(context.Background(), `
+		SELECT f.path FROM files f
+		WHERE f.in_slice AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)`)
+	if err != nil {
+		t.Fatalf("query zero-chunk files: %v", err)
+	}
+	defer zeroRows.Close()
+	for zeroRows.Next() {
+		var path string
+		if err := zeroRows.Scan(&path); err != nil {
+			t.Fatalf("scan zero-chunk file: %v", err)
+		}
+		s.zeroTotal++
+		lines := fileLines(t, root, path)
+		if len(parse.TopLevelDecls([]byte(strings.Join(lines, "\n")))) > 0 {
+			s.zeroWith++
+		} else {
+			s.zeroNo++
+		}
+	}
+	if err := zeroRows.Err(); err != nil {
+		t.Fatalf("zero-chunk rows: %v", err)
+	}
+	return s
+}
+
+// TestChunkStageMetricsAreTableWide proves the whole-repo metrics (chunk totals,
+// token percentiles, marker and block-comment counts, and the zero-chunk
+// figures) are measured from the tables and the source tree, not from the files
+// a run re-split: a --limit run and a full run over the same settled table print
+// identical numbers, and both equal an independent recomputation. Modeled on
+// TestChunkStageOversizedCountIsDBWide.
+func TestChunkStageMetricsAreTableWide(t *testing.T) {
+	pool, root := chunkFixture(t)
+	ctx := context.Background()
+
+	// The zero-chunk figures are slice-only; mark the two zero-chunk fixtures in
+	// slice so those figures are nonzero and covered.
+	if _, err := pool.Exec(ctx, `
+		UPDATE files SET in_slice = true
+		WHERE path IN ('zerofiles/decls.go', 'zerofiles/docs.go')`); err != nil {
+		t.Fatalf("mark slice files: %v", err)
+	}
+	runChunkStage(t, pool, root, chunkOptions{}) // settle the table fully
+
+	want := dbChunkMetricSnapshot(t, pool, root)
+
+	// Force every file stale so the limited run genuinely re-splits one file:
+	// the table content is unchanged, so the table-wide figures must not move.
+	if _, err := pool.Exec(ctx, `UPDATE files SET chunked_sha = NULL`); err != nil {
+		t.Fatalf("force files stale: %v", err)
+	}
+	limited := runChunkStage(t, pool, root, chunkOptions{Limit: 1})
+	if !strings.Contains(limited, "1 files re-split") {
+		t.Errorf("limited run should re-split exactly one file:\n%s", limited)
+	}
+	gotLimited := printedChunkMetricSnapshot(t, limited)
+	if gotLimited != want {
+		t.Errorf("limited run metrics = %+v, want table-wide %+v\n%s", gotLimited, want, limited)
+	}
+
+	full := runChunkStage(t, pool, root, chunkOptions{})
+	gotFull := printedChunkMetricSnapshot(t, full)
+	if gotFull != want {
+		t.Errorf("full run metrics = %+v, want table-wide %+v\n%s", gotFull, want, full)
+	}
+	if gotLimited != gotFull {
+		t.Errorf("limited run metrics %+v differ from full run %+v", gotLimited, gotFull)
+	}
+
+	// A true no-op run: the tree is fully settled, so nothing is re-split. A
+	// run-scoped computation would have nothing to measure here, yet the
+	// table-wide snapshot must not move.
+	noop := runChunkStage(t, pool, root, chunkOptions{})
+	if !strings.Contains(noop, "0 files re-split, 0 chunks changed") {
+		t.Errorf("no-op run should report the settled summary:\n%s", noop)
+	}
+	if gotNoop := printedChunkMetricSnapshot(t, noop); gotNoop != want {
+		t.Errorf("no-op run metrics = %+v, want table-wide %+v\n%s", gotNoop, want, noop)
+	}
+	if want.total == 0 || want.marker == 0 || want.block == 0 || want.zeroTotal == 0 {
+		t.Fatalf("fixture metrics %+v are degenerate; the test proves nothing", want)
 	}
 }

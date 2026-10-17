@@ -153,4 +153,32 @@ Chunks and `search_tsv` populated (none empty); A0 and A1 searchable via CLI; HN
 `indexer search --config A1 "<natural-language question>"` returns ranked files in under 1s; `indexer ann-overlap --queries probe` prints overlap >= 95%.
 
 ## Results
+
+### Chunk run over the whole filtered repo (S3-T06, 2026-10-18)
+
+Command: `./bin/indexer chunk` (KUBE_DIR `./data/kubernetes` at `v1.37.0`, dev database). First run after `TRUNCATE chunks; UPDATE files SET chunked_sha = NULL`:
+
+```
+6633 files to chunk
+6633 files re-split, 54938 chunks changed
+parts above one: 915
+oversized_statements: 349
+oversized_failed: 114
+header_degraded: 132
+chunks: 54938 (9978 in slice, 44960 outside)
+tokens p50/p99/max: 91/978/78057
+chunks_with_marker_lines: 2483 (4.52% of 54938 chunks)
+chunks_with_block_comment_above: 11 (0.02% of 54938 chunks)
+zero_chunk_files_total: 150 (17.12% of 876 slice files)
+zero_chunk_files_with_decls: 46 (5.25% of 876 slice files)
+zero_chunk_files_no_decls: 104 (11.87% of 876 slice files)
+wall time: 44.294219209s
+```
+
+A second run prints `0 files to chunk` / `0 files re-split, 0 chunks changed` with the same table-wide figures (idempotent). Cross-checks against the database matched the printed lines: `select count(*) from chunks where token_count > 1000` = 349, `... > 1633` = 114, `... header_degraded > 0` = 132.
+
+**D-080 outcome: TRIGGERED.** `zero_chunk_files_with_decls = 46` is at least the threshold of 18, so the residual-chunk ticket (S3-07) is activated and must be done before the embedding run; it must drive `zero_chunk_files_with_decls` to 0. Recorded in `decisions.md` D-080.
+
+**B0 note.** B0 indexes whole-file text (`architecture.md#keyword-baseline-b0`), so it can return the 150 zero-chunk slice files (46 with only const/var/type declarations, 104 with no declarations) that A0 and A1 cannot; a result-count difference between B0 and A0/A1 on those files is a coverage effect, not a retrieval-quality effect.
+
 (empty)

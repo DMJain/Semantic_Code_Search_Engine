@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,6 +63,7 @@ type chunkFile struct {
 // cancel, so the in-flight file always commits; ctx is checked only between
 // files.
 func chunkStage(ctx context.Context, pool *pgxpool.Pool, root string, opts chunkOptions, out io.Writer) error {
+	start := time.Now()
 	dbCtx := context.WithoutCancel(ctx)
 
 	files, err := selectChunkFiles(dbCtx, pool)
@@ -125,7 +128,231 @@ func chunkStage(ctx context.Context, pool *pgxpool.Pool, root string, opts chunk
 	}
 	fmt.Fprintf(out, "oversized_failed: %d\n", failed)
 	fmt.Fprintf(out, "header_degraded: %d\n", degraded)
+
+	// The whole-repo figures of D-080 and the token distribution are measured
+	// from the tables and the source tree, never from the files this run happened
+	// to re-split, so a --limit or no-op run prints the same numbers as a full run.
+	metrics, err := collectChunkMetrics(dbCtx, pool, root)
+	if err != nil {
+		return err
+	}
+	printChunkMetrics(out, metrics)
+	fmt.Fprintf(out, "wall time: %s\n", time.Since(start))
 	return nil
+}
+
+// chunkMetrics holds the table-wide counts the chunk command prints (D-078,
+// D-080): chunk totals by slice membership, the token distribution, the two
+// recorded doc-comment limitations, and the zero-chunk slice-file figures.
+type chunkMetrics struct {
+	total             int
+	inSlice           int
+	outside           int
+	p50, p99, max     int
+	markerLines       int
+	blockCommentAbove int
+	sliceFiles        int
+	zeroTotal         int
+	zeroWithDecls     int
+	zeroNoDecls       int
+}
+
+// collectChunkMetrics reads the table-wide counts the chunk command prints: the
+// chunk totals, the token distribution, the two doc-comment limitations, and
+// the zero-chunk slice-file figures. It never reads chunk content into Go for
+// the token distribution: the marker count is one SQL scan and only the chunk
+// path and start_line are read for the block-comment-above figure. It reads
+// only the chunks, files and symbols tables and the source under root, never
+// the mined query file sets (D-080): the measurement cannot touch the TEST pool.
+func collectChunkMetrics(ctx context.Context, pool *pgxpool.Pool, root string) (chunkMetrics, error) {
+	var m chunkMetrics
+
+	rows, err := pool.Query(ctx, `
+		SELECT c.start_line, c.token_count, f.path, f.in_slice
+		FROM chunks c JOIN files f ON f.id = c.file_id`)
+	if err != nil {
+		return m, fmt.Errorf("list chunks for metrics: %w", err)
+	}
+	type metricChunk struct {
+		startLine int
+		tokens    int
+		path      string
+		inSlice   bool
+	}
+	var chunks []metricChunk
+	for rows.Next() {
+		var c metricChunk
+		if err := rows.Scan(&c.startLine, &c.tokens, &c.path, &c.inSlice); err != nil {
+			rows.Close()
+			return m, fmt.Errorf("scan chunk for metrics: %w", err)
+		}
+		chunks = append(chunks, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return m, fmt.Errorf("iterate chunks for metrics: %w", err)
+	}
+
+	m.total = len(chunks)
+	tokens := make([]int, 0, m.total)
+	paths := make(map[string]bool)
+	for _, c := range chunks {
+		if c.inSlice {
+			m.inSlice++
+		} else {
+			m.outside++
+		}
+		tokens = append(tokens, c.tokens)
+		paths[c.path] = true
+	}
+	sort.Ints(tokens)
+	m.p50 = percentileRank(tokens, 50)
+	m.p99 = percentileRank(tokens, 99)
+	if m.total > 0 {
+		m.max = tokens[m.total-1]
+	}
+
+	// The marker count is one table scan in SQL, so no chunk content is read
+	// into Go for it (D-083, recorded limitation): a line whose trimmed text
+	// starts with "// +" or "//go:".
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM chunks WHERE content ~ '(^|\n)[[:space:]]*//([ ][+]|go:)'`).
+		Scan(&m.markerLines); err != nil {
+		return m, fmt.Errorf("count marker chunks: %w", err)
+	}
+
+	// The doc-comment-above figure is a recorded limitation (D-083): a chunk is
+	// counted only when the single line immediately above its start_line ends
+	// with */, so a /* */ block comment separated from the chunk by a blank
+	// line, a multi-line block whose closing */ sits higher, or a split part
+	// that starts on a statement rather than its declaration is not counted.
+	// The source of each chunked file is read once.
+	lines, err := readSourceLines(root, paths)
+	if err != nil {
+		return m, err
+	}
+	for _, c := range chunks {
+		if c.startLine < 2 {
+			continue
+		}
+		ls := lines[c.path]
+		if c.startLine-1 > len(ls) {
+			continue
+		}
+		if strings.HasSuffix(strings.TrimSpace(ls[c.startLine-2]), "*/") {
+			m.blockCommentAbove++
+		}
+	}
+
+	if err := collectZeroChunkFiles(ctx, pool, root, &m); err != nil {
+		return m, err
+	}
+	return m, nil
+}
+
+// collectZeroChunkFiles counts the slice files with no chunks row and splits
+// them by whether the file has at least one top-level const, var or type
+// declaration (D-080). The denominator is the live in-slice file count.
+func collectZeroChunkFiles(ctx context.Context, pool *pgxpool.Pool, root string, m *chunkMetrics) error {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM files WHERE in_slice`).Scan(&m.sliceFiles); err != nil {
+		return fmt.Errorf("count slice files: %w", err)
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT f.path FROM files f
+		WHERE f.in_slice AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)
+		ORDER BY f.path`)
+	if err != nil {
+		return fmt.Errorf("list zero-chunk slice files: %w", err)
+	}
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan zero-chunk file: %w", err)
+		}
+		paths = append(paths, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate zero-chunk files: %w", err)
+	}
+
+	for _, p := range paths {
+		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", p, err)
+		}
+		m.zeroTotal++
+		if len(parse.TopLevelDecls(src)) > 0 {
+			m.zeroWithDecls++
+		} else {
+			m.zeroNoDecls++
+		}
+	}
+	return nil
+}
+
+// readSourceLines reads each path under root once and splits it into lines.
+func readSourceLines(root string, paths map[string]bool) (map[string][]string, error) {
+	out := make(map[string][]string, len(paths))
+	for p := range paths {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", p, err)
+		}
+		out[p] = strings.Split(string(b), "\n")
+	}
+	return out, nil
+}
+
+// percentileRank returns the nearest-rank p-th percentile (0-100) of the
+// ascending values, the same definition as the graph histogram (empty = 0).
+func percentileRank(sorted []int, p int) int {
+	if len(sorted) == 0 {
+		return 0
+	}
+	rank := (p*len(sorted) + 99) / 100
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
+}
+
+// printChunkMetrics prints the whole-repo chunk figures. The marker and
+// block-comment counts carry their fraction of all chunks; the zero-chunk
+// figures carry their fraction of the slice files.
+func printChunkMetrics(out io.Writer, m chunkMetrics) {
+	fmt.Fprintf(out, "chunks: %d (%d in slice, %d outside)\n", m.total, m.inSlice, m.outside)
+	fmt.Fprintf(out, "tokens p50/p99/max: %d/%d/%d\n", m.p50, m.p99, m.max)
+	fmt.Fprintf(out, "chunks_with_marker_lines: %d (%s of %d chunks)\n",
+		m.markerLines, fraction(m.markerLines, m.total), m.total)
+	fmt.Fprintf(out, "chunks_with_block_comment_above: %d (%s of %d chunks)\n",
+		m.blockCommentAbove, fraction(m.blockCommentAbove, m.total), m.total)
+	printZeroChunkMetric(out, "zero_chunk_files_total", m.zeroTotal, m.sliceFiles)
+	printZeroChunkMetric(out, "zero_chunk_files_with_decls", m.zeroWithDecls, m.sliceFiles)
+	printZeroChunkMetric(out, "zero_chunk_files_no_decls", m.zeroNoDecls, m.sliceFiles)
+}
+
+// printZeroChunkMetric prints one zero-chunk count with its fraction of the
+// slice-file count, or n/a when there are no slice files.
+func printZeroChunkMetric(out io.Writer, label string, n, denom int) {
+	if denom == 0 {
+		fmt.Fprintf(out, "%s: %d (n/a, 0 slice files)\n", label, n)
+		return
+	}
+	fmt.Fprintf(out, "%s: %d (%.2f%% of %d slice files)\n", label, n, 100*float64(n)/float64(denom), denom)
+}
+
+// fraction formats n as a percentage of denom, or "n/a" when denom is zero.
+func fraction(n, denom int) string {
+	if denom == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2f%%", 100*float64(n)/float64(denom))
 }
 
 // countChunks runs one counting query with optional args.
@@ -327,7 +554,7 @@ func listOversized(ctx context.Context, pool *pgxpool.Pool) ([]oversizedPart, er
 	var out []oversizedPart
 	for rows.Next() {
 		var o oversizedPart
-		if err := rows.Scan(&o.path, &o.symbol, &o.partIdx, &o.parts, &o.tokens); err != nil {
+		if err := rows.Scan(&o.path, &o.symbol, &o.partIdx, &o.tokens, &o.parts); err != nil {
 			return nil, fmt.Errorf("scan oversized part: %w", err)
 		}
 		out = append(out, o)

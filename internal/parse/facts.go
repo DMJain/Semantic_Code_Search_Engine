@@ -70,6 +70,38 @@ func FileFacts(src []byte) Facts {
 	return facts
 }
 
+// TopLevelDecls parses src as a Go file and returns the inclusive 1-based line
+// ranges of its top-level const, var and type declarations in source order. A
+// grouped `const ( ... )` or `var ( ... )` block is one range; a type
+// declaration covers aliases, structs, interfaces and other named types.
+// Functions and methods are not declarations. It returns nil for a file with
+// none (a doc.go-style file), and nil when src does not parse.
+func TopLevelDecls(src []byte) []LineRange {
+	p := sitter.NewParser()
+	defer p.Close()
+	p.SetLanguage(golang.GetLanguage())
+
+	tree, err := p.ParseCtx(context.Background(), nil, src)
+	if err != nil {
+		return nil
+	}
+	defer tree.Close()
+	root := tree.RootNode()
+
+	var out []LineRange
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		n := root.NamedChild(i)
+		switch n.Type() {
+		case "const_declaration", "var_declaration", "type_declaration":
+			out = append(out, LineRange{
+				StartLine: int(n.StartPoint().Row) + 1,
+				EndLine:   int(n.EndPoint().Row) + 1,
+			})
+		}
+	}
+	return out
+}
+
 // bodyStatementRanges returns the line ranges of the direct top-level statements
 // of a body, skipping comments.
 func bodyStatementRanges(body *sitter.Node) []LineRange {

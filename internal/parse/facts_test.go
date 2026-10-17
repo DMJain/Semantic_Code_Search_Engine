@@ -106,3 +106,53 @@ func TestFileFactsNoBody(t *testing.T) {
 	}
 	_ = parse.FileFacts([]byte("package p\n\nfunc Bad( {\n"))
 }
+
+// TestTopLevelDecls pins the ranges of top-level const, var and type
+// declarations, including grouped blocks and struct/interface/alias types, in
+// source order; functions and methods are not declarations.
+func TestTopLevelDecls(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want []parse.LineRange
+	}{
+		{"const-only", "package p\n\nconst c = 1\n", []parse.LineRange{{StartLine: 3, EndLine: 3}}},
+		{"var-only", "package p\n\nvar v = 2\n", []parse.LineRange{{StartLine: 3, EndLine: 3}}},
+		{"type-only", "package p\n\ntype T = int\n", []parse.LineRange{{StartLine: 3, EndLine: 3}}},
+		{"none", "package p\n\n// just a comment\n", nil},
+		{"mixed", `package p
+
+const c = 1
+
+var v = 2
+
+type Alias = int
+
+func F() {}
+
+type S struct{}
+
+const (
+	grouped = 3
+)
+
+var (
+	groupedVar = 4
+)
+`, []parse.LineRange{
+			{StartLine: 3, EndLine: 3},
+			{StartLine: 5, EndLine: 5},
+			{StartLine: 7, EndLine: 7},
+			{StartLine: 11, EndLine: 11},
+			{StartLine: 13, EndLine: 15},
+			{StartLine: 17, EndLine: 19},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parse.TopLevelDecls([]byte(tc.src)); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("TopLevelDecls = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
