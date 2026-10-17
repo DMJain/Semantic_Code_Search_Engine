@@ -1,0 +1,14 @@
+{
+  "model": "nomic-embed-text",
+  "ollama_version": "0.40.1",
+  "seed": 1,
+  "n": 400,
+  "accepted": 400,
+  "rejected": 0,
+  "fallback": false,
+  "ratio_p50": 1.314477468839885,
+  "ratio_p99": 1.6512605042016806,
+  "ratio_max": 1.7450980392156863,
+  "est_max": 1101,
+  "real_max": 1675
+}

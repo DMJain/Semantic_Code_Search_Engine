@@ -8,7 +8,7 @@
 - **Part**: one piece of a function split at top-level statement boundaries; `part_idx` from 0; every part keeps the signature (D-078). Part 0 starts at its first doc-comment line, where the doc comment is the S1 `doc()` run of `//` lines (D-083).
 - **Group chunk**: a struct or interface with its same-file `NewX` constructor, one chunk when the pair fits `GroupMaxTokens`.
 - **Oversized statement**: a single statement over `ChunkMaxTokens`; kept whole as its own part and counted. It still embeds (header degraded) while its content fits the request budget less the largest document prefix; above that it fails in both A0 and A1 (D-082).
-- **Request budget**: `0.8 x` the smallest embedding `num_ctx` in the registry (1638); chunk content plus header must fit it (D-078, D-082).
+- **Request budget**: the largest estimated request a model can serve; `0.8 x` the smallest embedding `num_ctx` gave 1638, but the nomic fit check replaced it with the measured 1084 (D-078). Chunk content plus header must fit it (D-078, D-082).
 - **Degraded header**: a header with callers, callees or signature dropped to fit the request budget; `chunks.header_degraded > 0` (D-082).
 - **Zero-chunk file**: a slice file with no chunk; counted by D-080, with or without top-level decls.
 - **Residual chunk**: conditional per-file chunk of uncovered top-level const/var/type-alias decls (D-080).

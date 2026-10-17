@@ -192,16 +192,19 @@ func probeTokenCount(ctx context.Context, client *embed.Ollama) (bool, error) {
 	return count == 0, nil
 }
 
-// loadFitCandidates reads every in-slice chunk_header document ordered by chunk
-// id and renders it with the model's document prefix. The estimate is the
-// bytes/4 estimate of the rendered request (D-078).
+// loadFitCandidates reads every in-slice, embeddable chunk_header document
+// ordered by chunk id and renders it with the model's document prefix. Chunks
+// whose content token_count exceeds EmbeddableContentMax are excluded: the
+// embed stage skips them as too_large and never sends them, so measuring them
+// would fail the check on documents that can never be embedded (D-082). The
+// estimate is the bytes/4 estimate of the rendered request (D-078).
 func loadFitCandidates(ctx context.Context, pool *pgxpool.Pool, prefix string) ([]fitCandidate, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT c.id, c.header, c.content
 		FROM chunks c
 		JOIN files f ON f.id = c.file_id
-		WHERE f.in_slice
-		ORDER BY c.id`)
+		WHERE f.in_slice AND c.token_count <= $1
+		ORDER BY c.id`, chunk.EmbeddableContentMax)
 	if err != nil {
 		return nil, fmt.Errorf("list chunk_header documents: %w", err)
 	}

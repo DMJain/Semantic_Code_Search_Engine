@@ -10,9 +10,13 @@ const (
 	GroupMaxTokens = 550
 )
 
-// RequestBudget is the largest estimated request a model can serve: 0.8 of the
-// smallest registry context (D-078), derived rather than hard-coded.
-var RequestBudget = int(0.8 * float64(embed.MinNumCtx()))
+// RequestBudget is the largest estimated request a model can serve. It was
+// 0.8 of the smallest registry context, 1638 (D-078). The nomic fit check
+// replaced it with floor(0.95*2048/ratio_max), because nomic's real tokenizer
+// produced up to 1.7941x the bytes/4 estimate on the embeddable
+// chunk_header documents, so the 1638 budget overflowed nomic's 2048 context
+// (D-078 outcome). It is now a measured constant, not the derived formula.
+var RequestBudget = 1084
 
 // MaxDocPrefixTokens is the largest static document prefix in the embed
 // registry, in estimated tokens (nomic's "search_document: ", 5). The header

@@ -205,3 +205,15 @@ wall time: 40.041107334s
 `zero_chunk_files_with_decls` dropped from 46 to **0**: the 46 slice files (and their 249 out-of-slice peers) now have a residual chunk. The only zero-chunk files left are the 104 doc-only files that hold no declaration and so can never be chunked. Cross-checks matched: 410 chunks over 1000 tokens, 152 over 1633, 170 degraded, 270 synthetic `decl` owner symbols holding 295 residual chunks. This run supersedes the S3-06 chunk figures above (the corpus grew by 295 residual chunks and the counts moved); the S3-06 numbers are kept as the pre-residual snapshot.
 
 The idempotency, stable-id, re-parse-survival and graph-freshness properties of residual chunks are covered by the chunk, parse, walk and graph tests.
+
+### Nomic fit check and the D-078 budget outcome (S3-08, 2026-10-18)
+
+Live Ollama 0.40.1, model `nomic-embed-text`, 400 documents one per request, `truncate:false`, `num_ctx` 2048; the model was unloaded after each run (`ollama ps` was empty before it).
+
+1. First run (`go run ./cmd/tools nomic-fit --seed 1`, budget 1638), with the original sampler that took the 200 largest in-slice `chunk_header` documents from ALL in-slice chunks: `n=400 accepted=386 rejected=14 ratio_p50=1.3130 ratio_p99=1.6837 ratio_max=1.7065 est_max=7283 real_max=2019`; the rule proposed `RequestBudget 1638 -> 1140`. **Bug found:** the pool included in-slice chunks the embed stage skips as `too_large` (content over `EmbeddableContentMax`), which are never sent to Ollama, so 11 of the 14 rejections measured requests that never happen and the check could not converge on a re-run.
+2. Sampler corrected to measure only the documents the embed stage will send (content within `EmbeddableContentMax`). Second run at budget 1638: `n=400 accepted=397 rejected=3 ratio_p50=1.3157 ratio_p99=1.7143 ratio_max=1.7941 est_max=1638 real_max=2019`; the rule proposed `RequestBudget 1638 -> 1084`. This is a genuine failure: nomic's real tokenizer produces up to 1.7941x the bytes/4 estimate on embeddable documents, so a 1638-estimate request overflows its 2048 context.
+3. `RequestBudget` replaced with `floor(0.95 x 2048 / 1.7941) = 1084` (`EmbeddableContentMax` 1079). The whole-repo `indexer chunk` was re-run (headers re-degraded; no file re-split because the budget is not part of `chunked_sha`), then the fit check passed: `rejected=0 ratio_max=1.7451`, and `1.7451 x 1084 = 1892 <= 1945`. `eval/results/bench/nomic-fit.json` holds this passing run.
+
+**D-078 outcome: budget REPLACED, 1638 -> 1084.** The settled whole-repo chunk run at 1084: `chunks 55233 (10026 in slice)`, `oversized_statements 410`, `oversized_failed 354`, `header_degraded 577`, `tokens p50/p99/max 92/986/78057`, zero-chunk figures unchanged (`0` with decls, `104` doc-only). In the slice: 10026 chunks, 45 over 1079 tokens (the embedding failures, identical in A0 and A1), 127 with a degraded header. These figures supersede the pre-fit numbers in the two sections above; the final sprint numbers are the post-1084 ones.
+
+This resolves the S3-06/S3-07 snapshot drift: any chunk run before the budget replacement used a 1638 budget and is superseded.

@@ -213,11 +213,22 @@ func insertFitFile(t *testing.T, pool *pgxpool.Pool, path string, inSlice bool) 
 
 func insertFitChunk(t *testing.T, pool *pgxpool.Pool, fileID, symID int64, part int, header string) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(), `
+	insertFitChunkTokens(t, pool, fileID, symID, part, header, 0)
+}
+
+// insertFitChunkTokens inserts one chunk with an explicit content token_count
+// and returns its chunk id, so a test can place a document over the embeddable
+// ceiling and later prove it was never sampled.
+func insertFitChunkTokens(t *testing.T, pool *pgxpool.Pool, fileID, symID int64, part int, header string, tokens int) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(), `
 		INSERT INTO chunks (symbol_id, file_id, part_idx, content, header, content_hash, token_count, start_line, end_line)
-		VALUES ($1, $2, $3, '', $4, 'h', 0, 1, 1)`, symID, fileID, part, header); err != nil {
+		VALUES ($1, $2, $3, '', $4, 'h', $5, 1, 1) RETURNING id`,
+		symID, fileID, part, header, tokens).Scan(&id); err != nil {
 		t.Fatalf("insert chunk: %v", err)
 	}
+	return id
 }
 
 func readFitResult(t *testing.T, path string) nomicFitResult {
@@ -355,6 +366,62 @@ func TestLoadFitCandidates(t *testing.T) {
 		}
 		if i > 0 && cands[i].ID <= cands[i-1].ID {
 			t.Errorf("candidates not ordered by id: %d after %d", cands[i].ID, cands[i-1].ID)
+		}
+	}
+}
+
+// TestLoadFitCandidatesExcludesTooLarge proves a chunk whose content
+// token_count exceeds EmbeddableContentMax is never a candidate, so it can be
+// neither in the largest-N half nor the seeded-random half: the embed stage
+// skips such chunks as too_large and never sends them (D-082). The oversized
+// chunk carries the largest rendered estimate, so only the token_count filter
+// keeps it out, and the seed stays deterministic over the remaining pool.
+func TestLoadFitCandidatesExcludesTooLarge(t *testing.T) {
+	pool := testdb.New(t)
+	fileID, symID := insertFitFile(t, pool, "fit/fit.go", true)
+
+	var wantIDs []int64
+	for i := 0; i < 5; i++ {
+		header := fmt.Sprintf("// package: fit\nfunc f%03d() {}\n%s", i, strings.Repeat("z", 100+i*37))
+		wantIDs = append(wantIDs, insertFitChunkTokens(t, pool, fileID, symID, i, header, 100))
+	}
+	// The oversized chunk: the biggest document in the table, but a content
+	// token_count one over the ceiling, exactly what the embed stage skips.
+	oversized := insertFitChunkTokens(t, pool, fileID, symID, 5,
+		fmt.Sprintf("// package: fit\nfunc huge() {}\n%s", strings.Repeat("z", 20000)),
+		chunk.EmbeddableContentMax+1)
+
+	cands, err := loadFitCandidates(context.Background(), pool, "search_document: ")
+	if err != nil {
+		t.Fatalf("loadFitCandidates: %v", err)
+	}
+	if len(cands) != len(wantIDs) {
+		t.Fatalf("candidates = %d, want %d (the oversized chunk excluded)", len(cands), len(wantIDs))
+	}
+	for _, c := range cands {
+		if c.ID == oversized {
+			t.Fatalf("oversized chunk %d was loaded as a candidate", oversized)
+		}
+	}
+
+	// The largest-N selection is over the remaining pool: the oversized chunk
+	// would sort first by estimate, so it is absent here while the embeddable
+	// chunks are the top N.
+	sample := selectFitSample(cands, 1, 3)
+	if len(sample) != 6 {
+		t.Fatalf("sample size = %d, want 6 (3 largest + 3 random)", len(sample))
+	}
+	for _, c := range sample {
+		if c.ID == oversized {
+			t.Fatalf("oversized chunk %d was sampled (largest or random)", oversized)
+		}
+	}
+
+	// Determinism under the seed survives the filter.
+	again := selectFitSample(cands, 1, 3)
+	for i, c := range again {
+		if c.ID != sample[i].ID {
+			t.Fatalf("same seed differs at %d: %d vs %d", i, c.ID, sample[i].ID)
 		}
 	}
 }

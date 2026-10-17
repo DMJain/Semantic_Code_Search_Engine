@@ -82,20 +82,22 @@ func TestChunkSizeConstants(t *testing.T) {
 	}
 }
 
-// TestRequestBudgetDerivedFromRegistry pins the derived request budget: it is
-// 0.8 of the smallest registry context (nomic 2048), truncated.
-func TestRequestBudgetDerivedFromRegistry(t *testing.T) {
+// TestRequestBudgetPinned pins the request budget: 0.8 of the smallest
+// registry context (nomic 2048) was 1638, but the nomic fit check replaced it
+// with 1084 = floor(0.95*2048/1.7941), the ratio_max measured on the embeddable
+// chunk_header documents (D-078 outcome).
+func TestRequestBudgetPinned(t *testing.T) {
 	if got := embed.MinNumCtx(); got != 2048 {
 		t.Fatalf("embed.MinNumCtx() = %d, want 2048", got)
 	}
-	if RequestBudget != 1638 {
-		t.Errorf("RequestBudget = %d, want 1638", RequestBudget)
+	if RequestBudget != 1084 {
+		t.Errorf("RequestBudget = %d, want 1084", RequestBudget)
 	}
 }
 
 // TestHeaderBudgetConstants pins the document-prefix allowance and the
 // embeddable content ceiling from D-082: MaxDocPrefixTokens is 5 and
-// EmbeddableContentMax is RequestBudget - 5 = 1633.
+// EmbeddableContentMax is RequestBudget - 5 = 1079.
 func TestHeaderBudgetConstants(t *testing.T) {
 	if embed.MaxDocPrefix() != "search_document: " {
 		t.Fatalf("embed.MaxDocPrefix() = %q, want nomic's prefix", embed.MaxDocPrefix())
@@ -103,7 +105,7 @@ func TestHeaderBudgetConstants(t *testing.T) {
 	if MaxDocPrefixTokens != 5 {
 		t.Errorf("MaxDocPrefixTokens = %d, want 5", MaxDocPrefixTokens)
 	}
-	if EmbeddableContentMax != 1633 {
-		t.Errorf("EmbeddableContentMax = %d, want 1633", EmbeddableContentMax)
+	if EmbeddableContentMax != 1079 {
+		t.Errorf("EmbeddableContentMax = %d, want 1079", EmbeddableContentMax)
 	}
 }
