@@ -71,7 +71,7 @@ func TestSplitFileSpans(t *testing.T) {
 		{ID: 1, FileID: 10, Kind: "func", Name: "F", StartLine: 5, EndLine: 5, Doc: "// Doc line one\n// Doc line two"},
 		{ID: 2, FileID: 10, Kind: "func", Name: "G", StartLine: 7, EndLine: 7},
 	}
-	got := SplitFile(syms, src, nil)
+	got := SplitFile(syms, src, parse.Facts{})
 	if len(got) != 2 {
 		t.Fatalf("chunk count = %d, want 2", len(got))
 	}
@@ -102,7 +102,7 @@ func TestSplitFileSpans(t *testing.T) {
 					t.Errorf("%s: SplitFile did not reject the bad span", bad.name)
 				}
 			}()
-			SplitFile([]Symbol{bad.sym}, src, nil)
+			SplitFile([]Symbol{bad.sym}, src, parse.Facts{})
 		}()
 	}
 }
@@ -132,7 +132,7 @@ func longFunctionSource(n int) ([]string, []parse.LineRange) {
 func TestSplitFileParts(t *testing.T) {
 	lines, ranges := longFunctionSource(20)
 	sym := Symbol{ID: 1, FileID: 2, Kind: "func", Name: "Long", Signature: "func Long()", StartLine: 4, EndLine: len(lines), Doc: "// Doc"}
-	parts := SplitFile([]Symbol{sym}, lines, map[int][]parse.LineRange{4: ranges})
+	parts := SplitFile([]Symbol{sym}, lines, parse.Facts{Statements: map[int][]parse.LineRange{4: ranges}})
 	if len(parts) < 2 {
 		t.Fatalf("part count = %d, want at least 2", len(parts))
 	}
@@ -202,7 +202,7 @@ func TestSplitFileOversizedStatement(t *testing.T) {
 	body := "\t_ = \"" + strings.Repeat("x", 5000) + "\""
 	lines := []string{"package p", "func Giant() {", body, "}"}
 	sym := Symbol{ID: 3, FileID: 4, Kind: "func", Name: "Giant", Signature: "func Giant()", StartLine: 2, EndLine: 4}
-	parts := SplitFile([]Symbol{sym}, lines, map[int][]parse.LineRange{2: {{StartLine: 3, EndLine: 3}}})
+	parts := SplitFile([]Symbol{sym}, lines, parse.Facts{Statements: map[int][]parse.LineRange{2: {{StartLine: 3, EndLine: 3}}}})
 	if len(parts) != 1 {
 		t.Fatalf("part count = %d, want 1 (the oversized statement is one part)", len(parts))
 	}
@@ -233,7 +233,7 @@ func TestSplitFilePartsNeedStatements(t *testing.T) {
 			t.Errorf("SplitFile did not reject an over-ceiling symbol without statements")
 		}
 	}()
-	SplitFile([]Symbol{{ID: 5, StartLine: 2, EndLine: 4}}, lines, nil)
+	SplitFile([]Symbol{{ID: 5, StartLine: 2, EndLine: 4}}, lines, parse.Facts{})
 }
 
 // TestChunkedSHAIncludesParameters proves the marker hashes the file sha, both
@@ -324,7 +324,7 @@ func TestSplitFileSharedDeclarationLine(t *testing.T) {
 		ID: 7, FileID: 8, Kind: "func", Name: "OneLine",
 		Signature: "func OneLine()", StartLine: 2, EndLine: len(lines),
 	}
-	parts := SplitFile([]Symbol{sym}, lines, map[int][]parse.LineRange{2: ranges})
+	parts := SplitFile([]Symbol{sym}, lines, parse.Facts{Statements: map[int][]parse.LineRange{2: ranges}})
 	if len(parts) < 2 {
 		t.Fatalf("part count = %d, want at least 2", len(parts))
 	}

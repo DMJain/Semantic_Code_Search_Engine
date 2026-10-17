@@ -12,7 +12,7 @@ import (
 
 // ChunkerVersion changes whenever the splitting logic changes, so every file's
 // chunk marker changes and the whole corpus is re-split (D-078).
-const ChunkerVersion = 2
+const ChunkerVersion = 3
 
 // Symbol is the subset of a parsed symbol the chunker needs: its identity, its
 // declaration span and its leading doc comment (the D-083 parse rule).
@@ -28,8 +28,9 @@ type Symbol struct {
 	Doc       string
 }
 
-// Chunk is one embeddable unit: a whole symbol, or one part of a symbol split
-// at top-level statement boundaries. Struct/interface/group chunks come later.
+// Chunk is one embeddable unit: a whole struct or interface, a type-with-
+// constructor group, or one part of a function or method split at top-level
+// statement boundaries.
 type Chunk struct {
 	SymbolID    int64
 	FileID      int64
@@ -62,49 +63,163 @@ func ContentHash(header, content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SplitFile returns chunks for every function or method symbol, in the given
-// order. A symbol whose whole content fits ChunkMaxTokens produces exactly one
-// part identical to the source span (D-083). A larger symbol is split at the
-// top-level statement ranges in statements, keyed by the symbol's start line,
-// into greedy-filled parts with a signature header and a `// ... part i/n`
+// SplitFile returns chunks for every struct, interface, function and method
+// symbol, in the given order.
+//
+// A struct or interface gets exactly one chunk — never split, even over
+// ChunkMaxTokens — spanning its doc comment start through its end line. When the
+// type has a same-file constructor (a function named New<Name> or new<Name>, or
+// one whose single declared result type is the type or a pointer to it), the pair
+// becomes one group chunk owned by the type, spanning the first declaration's doc
+// start through the last's end line, only while the whole span is within
+// GroupMaxTokens; the constructor then gets no chunk of its own. A function is
+// claimed by at most one group.
+//
+// A function or method whose whole content fits ChunkMaxTokens produces exactly
+// one part identical to the source span (D-083). A larger one is split at the
+// top-level statement ranges in facts.Statements, keyed by the symbol's start
+// line, into greedy-filled parts with a signature header and a `// ... part i/n`
 // marker; a single oversized statement stays whole as its own part (D-078,
 // D-082). It panics on a bad span or a split symbol without statements, so a
 // malformed symbol can never reach the chunks table.
-func SplitFile(symbols []Symbol, src []string, statements map[int][]parse.LineRange) []Chunk {
+func SplitFile(symbols []Symbol, src []string, facts parse.Facts) []Chunk {
+	groups, groupedAway := planGroups(symbols, src, facts.Results)
 	out := make([]Chunk, 0, len(symbols))
 	for _, sym := range symbols {
-		docLines := 0
-		if sym.Doc != "" {
-			docLines = strings.Count(sym.Doc, "\n") + 1
+		if groupedAway[sym.ID] {
+			continue
 		}
-		start := sym.StartLine - docLines
-		end := sym.EndLine
-		if start < 1 || end < start || end > len(src) {
-			panic(fmt.Sprintf("chunk: bad span for symbol %d (%s): start %d end %d, source has %d lines",
-				sym.ID, sym.Name, start, end, len(src)))
+		if g, ok := groups[sym.ID]; ok {
+			out = append(out, g)
+			continue
 		}
-		content := strings.Join(src[start-1:end], "\n")
-		if EstimateTokens(content) <= ChunkMaxTokens {
-			out = append(out, Chunk{
-				SymbolID:    sym.ID,
-				FileID:      sym.FileID,
+		if sym.Kind == parse.KindStruct || sym.Kind == parse.KindInterface {
+			out = append(out, typeChunk(sym, src))
+			continue
+		}
+		out = append(out, functionChunks(sym, src, facts.Statements)...)
+	}
+	return out
+}
+
+// planGroups returns, per type symbol id, its group chunk, and the set of
+// constructor symbol ids that must produce no chunk. A type groups with the
+// FIRST same-file function candidate in source order (name or return type) that
+// no earlier type has already claimed, so one function can never join two
+// groups; if the combined span is over GroupMaxTokens no grouping happens at
+// all, so the type and every candidate keep their own chunk.
+func planGroups(symbols []Symbol, src []string, results map[int]string) (map[int64]Chunk, map[int64]bool) {
+	groups := make(map[int64]Chunk)
+	groupedAway := make(map[int64]bool)
+	for _, t := range symbols {
+		if t.Kind != parse.KindStruct && t.Kind != parse.KindInterface {
+			continue
+		}
+		for _, c := range symbols {
+			if c.Kind != parse.KindFunc || groupedAway[c.ID] || !isConstructor(c, t, results) {
+				continue
+			}
+			start := min(docStart(t), docStart(c))
+			end := max(t.EndLine, c.EndLine)
+			if start < 1 || end > len(src) || end < start {
+				break
+			}
+			content := strings.Join(src[start-1:end], "\n")
+			if EstimateTokens(content) > GroupMaxTokens {
+				break
+			}
+			groups[t.ID] = Chunk{
+				SymbolID:    t.ID,
+				FileID:      t.FileID,
 				PartIdx:     0,
 				StartLine:   start,
 				EndLine:     end,
 				TokenCount:  EstimateTokens(content),
 				Content:     content,
 				ContentHash: ContentHash("", content),
-			})
-			continue
+			}
+			groupedAway[c.ID] = true
+			break
 		}
-		ranges := statements[sym.StartLine]
-		if len(ranges) == 0 {
-			panic(fmt.Sprintf("chunk: symbol %d (%s) is over the ceiling but has no statement ranges",
-				sym.ID, sym.Name))
-		}
-		out = append(out, splitParts(sym, src, start, docLines, ranges)...)
 	}
-	return out
+	return groups, groupedAway
+}
+
+// isConstructor reports whether c is a same-file constructor of t: a function
+// named New<t> or new<t>, or one whose single declared result type is t or a
+// pointer to t.
+func isConstructor(c, t Symbol, results map[int]string) bool {
+	if c.Name == "New"+t.Name || c.Name == "new"+t.Name {
+		return true
+	}
+	rt := results[c.StartLine]
+	return rt != "" && (rt == t.Name || rt == "*"+t.Name)
+}
+
+// docStart returns the first line of a symbol including its doc comment.
+func docStart(sym Symbol) int {
+	n := 0
+	if sym.Doc != "" {
+		n = strings.Count(sym.Doc, "\n") + 1
+	}
+	return sym.StartLine - n
+}
+
+// typeChunk builds the single, never-split chunk of a struct or interface: its
+// doc comment start through its end line, exactly the source span. A type over
+// ChunkMaxTokens is deliberately kept whole: D-078 defines splitting only for
+// function bodies, so an over-ceiling type is reported as oversized and handled
+// by the embed request budget, not split here.
+func typeChunk(sym Symbol, src []string) Chunk {
+	start, end := docStart(sym), sym.EndLine
+	if start < 1 || end < start || end > len(src) {
+		panic(fmt.Sprintf("chunk: bad span for symbol %d (%s): start %d end %d, source has %d lines",
+			sym.ID, sym.Name, start, end, len(src)))
+	}
+	content := strings.Join(src[start-1:end], "\n")
+	return Chunk{
+		SymbolID:    sym.ID,
+		FileID:      sym.FileID,
+		PartIdx:     0,
+		StartLine:   start,
+		EndLine:     end,
+		TokenCount:  EstimateTokens(content),
+		Content:     content,
+		ContentHash: ContentHash("", content),
+	}
+}
+
+// functionChunks builds the single-or-parts chunks of one function or method. A
+// symbol whose whole content fits ChunkMaxTokens produces exactly one part
+// identical to the source span (D-083); a larger one splits at its statement
+// ranges.
+func functionChunks(sym Symbol, src []string, statements map[int][]parse.LineRange) []Chunk {
+	start := docStart(sym)
+	docLines := sym.StartLine - start
+	end := sym.EndLine
+	if start < 1 || end < start || end > len(src) {
+		panic(fmt.Sprintf("chunk: bad span for symbol %d (%s): start %d end %d, source has %d lines",
+			sym.ID, sym.Name, start, end, len(src)))
+	}
+	content := strings.Join(src[start-1:end], "\n")
+	if EstimateTokens(content) <= ChunkMaxTokens {
+		return []Chunk{{
+			SymbolID:    sym.ID,
+			FileID:      sym.FileID,
+			PartIdx:     0,
+			StartLine:   start,
+			EndLine:     end,
+			TokenCount:  EstimateTokens(content),
+			Content:     content,
+			ContentHash: ContentHash("", content),
+		}}
+	}
+	ranges := statements[sym.StartLine]
+	if len(ranges) == 0 {
+		panic(fmt.Sprintf("chunk: symbol %d (%s) is over the ceiling but has no statement ranges",
+			sym.ID, sym.Name))
+	}
+	return splitParts(sym, src, start, docLines, ranges)
 }
 
 // partHeader is the synthetic declaration header every part starts with: the

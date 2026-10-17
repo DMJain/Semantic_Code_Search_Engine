@@ -108,7 +108,7 @@ func TestChunkStageOneChunkPerFuncMethod(t *testing.T) {
 	if bad := scalarInt(t, pool, `SELECT count(*) FROM chunks WHERE start_line <= 0 OR end_line < start_line`); bad != 0 {
 		t.Errorf("chunks with a bad span = %d, want 0", bad)
 	}
-	wantSummary := fmt.Sprintf("3 files re-split, %d chunks changed", chunks)
+	wantSummary := fmt.Sprintf("5 files re-split, %d chunks changed", chunks)
 	if !strings.Contains(out, wantSummary) {
 		t.Errorf("output missing %q:\n%s", wantSummary, out)
 	}
@@ -125,6 +125,7 @@ func TestChunkStageDocCases(t *testing.T) {
 	want := map[string][2]int{
 		"Documented":     {3, 4},
 		"Plain":          {6, 6},
+		"Widget":         {8, 8},
 		"Method":         {10, 10},
 		"BlockCommented": {13, 13},
 		"MarkerDoc":      {15, 17},
@@ -446,7 +447,7 @@ func TestChunkStageParts(t *testing.T) {
 		t.Fatalf("read Long symbol: %v", err)
 	}
 	src := []byte(strings.Join(lines, "\n"))
-	ranges := parse.BodyStatements("parts/parts.go", src)[symStart]
+	ranges := parse.FileFacts("parts/parts.go", src).Statements[symStart]
 	if len(ranges) < 2 {
 		t.Fatalf("Long statement ranges = %d, want at least 2", len(ranges))
 	}
@@ -507,7 +508,7 @@ func TestChunkStageParts(t *testing.T) {
 		`SELECT start_line FROM symbols WHERE name = 'GiantSwitch'`).Scan(&giantStart); err != nil {
 		t.Fatalf("read GiantSwitch symbol: %v", err)
 	}
-	giantRanges := parse.BodyStatements("parts/parts.go", src)[giantStart]
+	giantRanges := parse.FileFacts("parts/parts.go", src).Statements[giantStart]
 	g := giant[0]
 	if g.tokens <= chunk.ChunkMaxTokens {
 		t.Errorf("GiantSwitch token_count = %d, want > %d (oversized statement)", g.tokens, chunk.ChunkMaxTokens)
@@ -717,5 +718,204 @@ func TestChunkPartGolden(t *testing.T) {
 	}
 	if !bytes.Equal(data, want) {
 		t.Errorf("part golden mismatch (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", data, want)
+	}
+}
+
+// symbolSpan reads one symbol's stored span and doc, so a group-span
+// expectation is derived from the same stored facts the chunker used.
+func symbolSpan(t *testing.T, pool *pgxpool.Pool, name string) (start, end int, doc string) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(),
+		`SELECT start_line, end_line, coalesce(doc, '') FROM symbols WHERE name = $1`, name).
+		Scan(&start, &end, &doc); err != nil {
+		t.Fatalf("read %s symbol: %v", name, err)
+	}
+	return start, end, doc
+}
+
+// docStartLine is the first line of a declaration including its doc comment.
+func docStartLine(start int, doc string) int {
+	n := 0
+	if doc != "" {
+		n = strings.Count(doc, "\n") + 1
+	}
+	return start - n
+}
+
+// TestChunkStageGroupChunks proves the struct/interface group rules over the
+// real fixture tree and Postgres: a type with a same-file constructor is one
+// group chunk owned by the type spanning both declarations (the constructor gets
+// no chunk); a type with no constructor is one chunk; a pair over GroupMaxTokens
+// is two chunks; a constructor in another file is never grouped; the first of
+// two candidates groups and the second keeps its own chunk; a function is a
+// constructor by return type alone; no symbol owns two part-0 chunks; and a
+// rerun leaves every chunk id, including the group chunk, unchanged.
+func TestChunkStageGroupChunks(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+	ctx := context.Background()
+
+	for _, g := range []struct{ typ, ctor string }{
+		{"Gadget", "NewGadget"},
+		{"Reader", "NewReader"},
+		{"Twin", "NewTwin"},
+		{"Zed", "buildZed"},
+	} {
+		parts := symbolParts(t, pool, g.typ)
+		if len(parts) != 1 || parts[0].partIdx != 0 {
+			t.Fatalf("%s chunks = %+v, want exactly one part 0", g.typ, parts)
+		}
+		if ctor := symbolParts(t, pool, g.ctor); len(ctor) != 0 {
+			t.Errorf("grouped constructor %s still has a chunk: %+v", g.ctor, ctor)
+		}
+		ts, _, tdoc := symbolSpan(t, pool, g.typ)
+		_, ce, _ := symbolSpan(t, pool, g.ctor)
+		wantStart := docStartLine(ts, tdoc)
+		p := parts[0]
+		if p.start != wantStart || p.end != ce {
+			t.Errorf("%s group span = %d..%d, want %d..%d", g.typ, p.start, p.end, wantStart, ce)
+		}
+		lines := fileLines(t, root, "group/group.go")
+		if p.start < 1 || p.end > len(lines) {
+			t.Errorf("%s group span %d..%d outside %d lines", g.typ, p.start, p.end, len(lines))
+			continue
+		}
+		if want := strings.Join(lines[p.start-1:p.end], "\n"); p.content != want {
+			t.Errorf("%s group content mismatch\ngot  %q\nwant %q", g.typ, p.content, want)
+		}
+		// The group span must cover both declarations, not just the type.
+		if p.end < ce {
+			t.Errorf("%s group span ends at %d, before the constructor end %d", g.typ, p.end, ce)
+		}
+	}
+
+	// A struct with no constructor: one chunk of its own declaration.
+	s, e, doc := symbolSpan(t, pool, "Solo")
+	if parts := symbolParts(t, pool, "Solo"); len(parts) != 1 || parts[0].start != docStartLine(s, doc) || parts[0].end != e {
+		t.Errorf("Solo chunks = %+v, want one span %d..%d", parts, docStartLine(s, doc), e)
+	}
+
+	// A pair over GroupMaxTokens: the type and the constructor keep separate
+	// chunks; the constructor is not grouped.
+	big, newBig := symbolParts(t, pool, "Big"), symbolParts(t, pool, "NewBig")
+	if len(big) != 1 || len(newBig) != 1 {
+		t.Fatalf("Big parts = %d, NewBig parts = %d, want 1 each (not grouped)", len(big), len(newBig))
+	}
+	if big[0].end >= newBig[0].start {
+		t.Errorf("Big chunk end %d reaches NewBig start %d; the pair was grouped", big[0].end, newBig[0].start)
+	}
+
+	// A constructor in another file: never grouped.
+	if far, newFar := symbolParts(t, pool, "Far"), symbolParts(t, pool, "NewFar"); len(far) != 1 || len(newFar) != 1 {
+		t.Errorf("Far parts = %d, NewFar parts = %d, want 1 each", len(far), len(newFar))
+	}
+
+	// The second of two candidates keeps its own chunk.
+	if made := symbolParts(t, pool, "MakeTwin"); len(made) != 1 {
+		t.Errorf("MakeTwin chunks = %d, want 1 (second candidate not grouped)", len(made))
+	}
+
+	// A function matched by two types (NewBeta by name matches Beta, by return
+	// type matches Alpha) joins exactly one group: it owns no chunk, its body
+	// sits in one chunk only, and the Alpha group and the Beta chunk do not
+	// overlap.
+	if nb := symbolParts(t, pool, "NewBeta"); len(nb) != 0 {
+		t.Errorf("NewBeta owns a chunk: %+v", nb)
+	}
+	alpha, beta := symbolParts(t, pool, "Alpha"), symbolParts(t, pool, "Beta")
+	if len(alpha) != 1 || len(beta) != 1 {
+		t.Fatalf("Alpha parts = %d, Beta parts = %d, want 1 each", len(alpha), len(beta))
+	}
+	lines := fileLines(t, root, "group/group.go")
+	_, nbEnd, _ := symbolSpan(t, pool, "NewBeta")
+	nbStart, _, _ := symbolSpan(t, pool, "NewBeta")
+	if nbStart < 1 || nbEnd > len(lines) {
+		t.Fatalf("NewBeta span %d..%d outside %d lines", nbStart, nbEnd, len(lines))
+	}
+	body := strings.Join(lines[nbStart-1:nbEnd], "\n")
+	hits := 0
+	all := append(append([]storedPart{}, alpha...), beta...)
+	for _, p := range all {
+		if strings.Contains(p.content, body) {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Errorf("NewBeta body appears in %d group chunks, want exactly 1", hits)
+	}
+	if alpha[0].start <= beta[0].end && beta[0].start <= alpha[0].end {
+		t.Errorf("Alpha group %d..%d overlaps Beta chunk %d..%d",
+			alpha[0].start, alpha[0].end, beta[0].start, beta[0].end)
+	}
+
+	// No symbol owns more than one part-0 chunk.
+	if n := scalarInt(t, pool, `
+		SELECT count(*) FROM (
+			SELECT symbol_id FROM chunks WHERE part_idx = 0 GROUP BY symbol_id HAVING count(*) > 1
+		) dup`); n != 0 {
+		t.Errorf("%d symbols have more than one part 0 chunk", n)
+	}
+
+	// A rerun over the unchanged tree changes no id, the group chunk included.
+	var gadgetBefore int64
+	if err := pool.QueryRow(ctx, `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id WHERE s.name = 'Gadget'`).
+		Scan(&gadgetBefore); err != nil {
+		t.Fatalf("read Gadget chunk id: %v", err)
+	}
+	out := runChunkStage(t, pool, root, chunkOptions{})
+	if !strings.Contains(out, "0 files re-split, 0 chunks changed") {
+		t.Errorf("rerun summary not settled:\n%s", out)
+	}
+	var gadgetAfter int64
+	if err := pool.QueryRow(ctx, `
+		SELECT c.id FROM chunks c JOIN symbols s ON s.id = c.symbol_id WHERE s.name = 'Gadget'`).
+		Scan(&gadgetAfter); err != nil {
+		t.Fatalf("read Gadget chunk id after rerun: %v", err)
+	}
+	if gadgetAfter != gadgetBefore {
+		t.Errorf("group chunk id changed on rerun: before %d, after %d", gadgetBefore, gadgetAfter)
+	}
+}
+
+// TestChunkGroupGolden pins the split shape of the group fixture: the grouped
+// types (one chunk each), the ungrouped type and constructors, and the second
+// candidate's own chunk. Regenerate manually with -update only.
+func TestChunkGroupGolden(t *testing.T) {
+	pool, root := chunkFixture(t)
+	runChunkStage(t, pool, root, chunkOptions{})
+
+	got := map[string][]partGolden{}
+	for _, name := range []string{
+		"Alpha", "Big", "Beta", "Far", "Gadget", "MakeTwin", "NewBig", "NewFar", "Reader", "Solo", "Twin", "Zed",
+	} {
+		for _, p := range symbolParts(t, pool, name) {
+			got[name] = append(got[name], partGolden{
+				PartIdx: p.partIdx, StartLine: p.start, EndLine: p.end, TokenCount: p.tokens,
+			})
+		}
+	}
+	data, err := json.MarshalIndent(got, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal golden: %v", err)
+	}
+	data = append(data, '\n')
+
+	golden := filepath.Join("testdata", "chunk", "golden", "groups.json")
+	if *updateChunkGoldens {
+		if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {
+			t.Fatalf("create golden dir: %v", err)
+		}
+		if err := os.WriteFile(golden, data, 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Errorf("group golden mismatch (regenerate with -update if intended):\n--- got ---\n%s\n--- want ---\n%s", data, want)
 	}
 }

@@ -53,8 +53,9 @@ type chunkFile struct {
 	chunkedSHA *string
 }
 
-// chunkStage turns every function and method of the stale files into one chunk
-// each, one transaction per file. Only files whose graph exists and is current
+// chunkStage turns every function, method, struct and interface of the stale
+// files into chunks (a type pairs with its same-file constructor as one group
+// chunk), one transaction per file. Only files whose graph exists and is current
 // and whose chunk marker is stale are processed, so a rerun over an unchanged
 // tree writes nothing (D-078, D-081). DB work uses a context a signal does not
 // cancel, so the in-flight file always commits; ctx is checked only between
@@ -181,11 +182,12 @@ type chunkStats struct {
 	extraParts int
 }
 
-// chunkFileTx reads one file, splits its functions and methods into parts, and
-// writes the chunks in a single transaction. Unchanged chunks are left
-// untouched (the upsert updates only on a content-hash change), vanished parts
-// and symbols are deleted, and the file is stamped last, so a rerun never
-// changes a surviving chunk id (D-081).
+// chunkFileTx reads one file, splits its symbols into chunks (one whole chunk
+// per struct/interface, a type grouped with its same-file constructor as one
+// chunk, and single-or-parts chunks per function/method), and writes them in a
+// single transaction. Unchanged chunks are left untouched (the upsert updates
+// only on a content-hash change), vanished parts and symbols are deleted, and the
+// file is stamped last, so a rerun never changes a surviving chunk id (D-081).
 func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFile) (chunkStats, error) {
 	var stats chunkStats
 	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.path)))
@@ -194,7 +196,7 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 	}
 	lines := strings.Split(string(src), "\n")
 
-	statements := parse.BodyStatements(f.path, src)
+	facts := parse.FileFacts(f.path, src)
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -206,7 +208,7 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 	if err != nil {
 		return stats, err
 	}
-	chunks := chunk.SplitFile(symbols, lines, statements)
+	chunks := chunk.SplitFile(symbols, lines, facts)
 
 	seen := make([]int64, 0, len(symbols))
 	partCount := make(map[int64]int)
@@ -273,15 +275,16 @@ func chunkFileTx(ctx context.Context, pool *pgxpool.Pool, root string, f chunkFi
 	return stats, nil
 }
 
-// fileChunkSymbols loads the function and method symbols of one file in source
-// order, with the span and doc the chunker needs.
+// fileChunkSymbols loads the function, method, struct and interface symbols of
+// one file in source order, with the span and doc the chunker needs.
 func fileChunkSymbols(ctx context.Context, tx pgx.Tx, fileID int64) ([]chunk.Symbol, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, file_id, kind, name, coalesce(receiver, ''), coalesce(signature, ''),
 		       start_line, end_line, coalesce(doc, '')
 		FROM symbols
-		WHERE file_id = $1 AND kind IN ($2, $3)
-		ORDER BY start_line, id`, fileID, parse.KindFunc, parse.KindMethod)
+		WHERE file_id = $1 AND kind IN ($2, $3, $4, $5)
+		ORDER BY start_line, id`, fileID,
+		parse.KindFunc, parse.KindMethod, parse.KindStruct, parse.KindInterface)
 	if err != nil {
 		return nil, fmt.Errorf("list symbols: %w", err)
 	}
