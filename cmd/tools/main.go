@@ -17,7 +17,7 @@ import (
 
 var commands = []cli.Command{
 	{Name: "gate", Short: "print the quality-gate sample with code and write the grade sheet", Run: runGate},
-	{Name: "nomic-fit", Short: "measure chunk and header documents against nomic's real context", Run: runNomicFit},
+	{Name: "nomic-fit", Short: "measure chunk and header documents against a registry model's real context (default nomic-embed-text)", Run: runNomicFit},
 }
 
 func main() {

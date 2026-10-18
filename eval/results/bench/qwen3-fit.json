@@ -1,0 +1,14 @@
+{
+  "model": "qwen3-embedding:0.6b",
+  "ollama_version": "0.40.1",
+  "seed": 1,
+  "n": 400,
+  "accepted": 400,
+  "rejected": 0,
+  "fallback": false,
+  "ratio_p50": 1.0233463035019454,
+  "ratio_p99": 1.2333333333333334,
+  "ratio_max": 1.316326530612245,
+  "est_max": 1097,
+  "real_max": 1233
+}

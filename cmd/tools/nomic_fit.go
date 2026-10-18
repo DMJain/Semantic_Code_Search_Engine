@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -21,8 +23,9 @@ import (
 	"github.com/DMJain/Semantic_Code_Search_Engine/internal/store"
 )
 
-// nomicModel is the second embedding model, the one whose real 2048-token
-// context the fit check measures (D-078).
+// nomicModel is the default embedding model the fit check measures: the
+// smallest-context model, against which the request budget is sized (D-078).
+// The --model flag overrides it to measure any other registry model.
 const nomicModel = "nomic-embed-text"
 
 // fitSampleN is how many documents each half of the sample draws: the largest
@@ -72,14 +75,27 @@ func runNomicFit(ctx context.Context, args []string) error {
 	fs := newFlagSet("nomic-fit")
 	seed := fs.Int64("seed", 1, "sampling seed")
 	jsonPath := fs.String("json", defaultNomicFitPath, "JSON record path")
+	model := fs.String("model", nomicModel, "embedding model to measure (a registry name)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// When --json is left at its default, derive the record path from the model
+	// so measuring a second model never overwrites the nomic record. nomic still
+	// writes the spec's default path.
+	jsonSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "json" {
+			jsonSet = true
+		}
+	})
+	if !jsonSet {
+		*jsonPath = fitJSONPath(*model)
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	client, err := embed.NewOllama(cfg.OllamaURL, nomicModel, 0)
+	client, err := embed.NewOllama(cfg.OllamaURL, *model, 0)
 	if err != nil {
 		return err
 	}
@@ -169,6 +185,16 @@ func nomicFit(ctx context.Context, pool *pgxpool.Pool, client *embed.Ollama, opt
 			return fmt.Errorf(
 				"nomic fit failed (rejected=%d); request budget unchanged, ratio unavailable in fallback mode",
 				res.Rejected)
+		}
+		// RequestBudget is one shared value sized for the smallest registry
+		// context. Only that model's fit may propose a replacement; another
+		// model's num_ctx would give an unsound budget for the shared ceiling.
+		if client.NumCtx() != embed.MinNumCtx() {
+			fmt.Fprintf(out, "nomic-fit: FAILED rejected=%d ratio_max=%.4f; %s num_ctx %d is not the budget model (%d), no shared-budget replacement proposed\n",
+				res.Rejected, res.RatioMax, res.Model, client.NumCtx(), embed.MinNumCtx())
+			return fmt.Errorf(
+				"fit failed for %s (rejected=%d, ratio_max=%.4f); RequestBudget is sized for the smallest-context model and is not replaced from %s",
+				res.Model, res.Rejected, res.RatioMax, res.Model)
 		}
 		fmt.Fprintf(out, "nomic-fit: FAILED rejected=%d ratio_max=%.4f; RequestBudget %d -> %d\n",
 			res.Rejected, res.RatioMax, chunk.RequestBudget, newBudget)
@@ -283,6 +309,31 @@ func fitFailure(rejected int, ratioMax float64, budget, numCtx int) (newBudget i
 		return 0, true
 	}
 	return int(math.Floor(0.95 * float64(numCtx) / ratioMax)), true
+}
+
+// fitJSONPath is the default record path for a model: the spec's
+// eval/results/bench/nomic-fit.json for nomic, and a model-suffixed path for
+// any other model so measuring a second model never overwrites the nomic record.
+func fitJSONPath(model string) string {
+	if model == nomicModel {
+		return defaultNomicFitPath
+	}
+	return "eval/results/bench/" + fitSlug(model) + "-fit.json"
+}
+
+// fitSlug turns a model name into a filename-safe slug, the same rule the
+// vector index name uses: lowercase, every character outside [a-z0-9] becomes
+// an underscore.
+func fitSlug(model string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(model) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	return b.String()
 }
 
 // writeNomicFitResult writes res as indented JSON, creating parent

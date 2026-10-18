@@ -26,6 +26,8 @@ import (
 // fitRequest is one request the fake server observed.
 type fitRequest struct {
 	Path      string
+	Model     string
+	NumCtx    int
 	Input     []string
 	KeepAlive *int
 }
@@ -88,11 +90,15 @@ func (f *fitFake) handle(w http.ResponseWriter, r *http.Request) {
 		Input     []string `json:"input"`
 		KeepAlive *int     `json:"keep_alive"`
 		Truncate  *bool    `json:"truncate"`
+		Options   struct {
+			NumCtx int `json:"num_ctx"`
+		} `json:"options"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		f.t.Errorf("decode embed request: %v", err)
 	}
-	f.record(fitRequest{Path: r.URL.Path, Input: append([]string(nil), req.Input...), KeepAlive: req.KeepAlive})
+	f.record(fitRequest{Path: r.URL.Path, Model: req.Model, NumCtx: req.Options.NumCtx,
+		Input: append([]string(nil), req.Input...), KeepAlive: req.KeepAlive})
 
 	for _, in := range req.Input {
 		if f.fail[in] {
@@ -111,8 +117,12 @@ func (f *fitFake) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([][]float64, len(req.Input))
+	dim := 768
+	if req.Model == qwenModel {
+		dim = 1024
+	}
 	for i := range req.Input {
-		out[i] = make([]float64, 768)
+		out[i] = make([]float64, dim)
 	}
 	resp := map[string]any{"embeddings": out}
 	if !f.omit {
@@ -157,6 +167,19 @@ func (f *fitFake) embedSizes() []int {
 	return out
 }
 
+// embedRequests returns every /api/embed request the fake server observed.
+func (f *fitFake) embedRequests() []fitRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []fitRequest
+	for _, r := range f.reqs {
+		if r.Path == "/api/embed" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // sawUnload reports whether a /api/generate request carried keep_alive 0.
 func (f *fitFake) sawUnload() bool {
 	f.mu.Lock()
@@ -172,6 +195,19 @@ func (f *fitFake) sawUnload() bool {
 func nomicClient(t *testing.T, f *fitFake) *embed.Ollama {
 	t.Helper()
 	c, err := embed.NewOllama(f.server.URL, nomicModel, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// qwenModel is the other registry model, the one the fit check can be pointed
+// at to measure its real-vs-estimate ratio without re-embedding the corpus.
+const qwenModel = "qwen3-embedding:0.6b"
+
+func qwenClient(t *testing.T, f *fitFake) *embed.Ollama {
+	t.Helper()
+	c, err := embed.NewOllama(f.server.URL, qwenModel, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,6 +548,76 @@ func TestNomicFitRecordAndUnload(t *testing.T) {
 	}
 }
 
+// TestNomicFitQwen3UsesModelContextAndPrefix proves the fit check can be
+// pointed at any registry model: it uses that model's own document prefix
+// (qwen3 has none, unlike nomic) and num_ctx, records the chosen model, and
+// passes because the request budget is sized for the smallest context (nomic's
+// 2048), so it fits qwen3's 4096 without re-embedding the corpus.
+func TestNomicFitQwen3UsesModelContextAndPrefix(t *testing.T) {
+	ctx := context.Background()
+	pool, headers := fitFixture(t, 5)
+
+	f := newFitFake(t)
+	f.countFn = chunk.EstimateTokens
+	client := qwenClient(t, f)
+	if client.NumCtx() != 4096 {
+		t.Fatalf("qwen3 NumCtx = %d, want 4096", client.NumCtx())
+	}
+	path := filepath.Join(t.TempDir(), "qwen3-fit.json")
+
+	var buf bytes.Buffer
+	if err := nomicFit(ctx, pool, client, fitOptions{Seed: 1, JSONPath: path}, &buf); err != nil {
+		t.Fatalf("nomicFit: %v\n%s", err, buf.String())
+	}
+
+	res := readFitResult(t, path)
+	if res.Model != qwenModel {
+		t.Errorf("model = %q, want %q", res.Model, qwenModel)
+	}
+
+	// Every embed request must carry qwen3's model and num_ctx.
+	for i, r := range f.embedRequests() {
+		if r.Model != qwenModel {
+			t.Errorf("embed request %d model = %q, want %q", i, r.Model, qwenModel)
+		}
+		if r.NumCtx != 4096 {
+			t.Errorf("embed request %d num_ctx = %d, want 4096", i, r.NumCtx)
+		}
+	}
+
+	// qwen3's document template has no prefix, so each document is the header
+	// and a newline: nomic's "search_document: " must not leak in.
+	inputs := f.embedInputs()
+	got := make(map[string]bool, len(inputs))
+	for _, in := range inputs {
+		got[in] = true
+		if strings.HasPrefix(in, "search_document: ") {
+			t.Errorf("input %q used the nomic document prefix", in)
+		}
+	}
+	for _, h := range headers {
+		if !got[h+"\n"] {
+			t.Errorf("qwen3-rendered document %q missing from the inputs", h+"\n")
+		}
+	}
+}
+
+// TestRunNomicFitRefusesUnknownModelBeforeSQL proves an unknown --model is
+// rejected when the client is built, before any database connection is opened:
+// DATABASE_URL points at nothing, yet the error names the model, not the pool.
+func TestRunNomicFitRefusesUnknownModelBeforeSQL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://127.0.0.1:1/nope")
+	t.Setenv("OLLAMA_URL", "http://127.0.0.1:1")
+
+	err := runNomicFit(context.Background(), []string{"--model", "not-a-model"})
+	if err == nil {
+		t.Fatal("runNomicFit = nil, want an unknown-model error")
+	}
+	if !strings.Contains(err.Error(), "unknown embedding model") {
+		t.Fatalf("err = %v, want the unknown-model error before SQL", err)
+	}
+}
+
 // TestNomicFitFallbackWithoutTokenCount proves the fallback when the server
 // returns no prompt_eval_count: accept/reject only, zero ratios, exit 0.
 func TestNomicFitFallbackWithoutTokenCount(t *testing.T) {
@@ -616,6 +722,44 @@ func TestNomicFitFailureOnOverLimitRatio(t *testing.T) {
 	}
 	if res.Rejected != 0 {
 		t.Errorf("rejected = %d, want 0 (the failure is the ratio)", res.Rejected)
+	}
+}
+
+// TestFitJSONPath proves the default record path is the spec's nomic path for
+// nomic and a model-suffixed path for any other model, so a second model's run
+// cannot overwrite the nomic record.
+func TestFitJSONPath(t *testing.T) {
+	if got := fitJSONPath(nomicModel); got != defaultNomicFitPath {
+		t.Errorf("fitJSONPath(%s) = %q, want %q", nomicModel, got, defaultNomicFitPath)
+	}
+	if got, want := fitJSONPath(qwenModel), "eval/results/bench/qwen3_embedding_0_6b-fit.json"; got != want {
+		t.Errorf("fitJSONPath(%s) = %q, want %q", qwenModel, got, want)
+	}
+}
+
+// TestNomicFitNonBudgetModelNoReplacement proves a failure for a model whose
+// context is not the registry minimum reports the failure but does NOT propose
+// a replacement RequestBudget, which is one shared value sized for the smallest
+// context (only the budget model may replace it).
+func TestNomicFitNonBudgetModelNoReplacement(t *testing.T) {
+	pool, _ := fitFixture(t, 4)
+	f := newFitFake(t)
+	// A ratio high enough to fail even qwen3's 4096 context, so the guard that
+	// withholds a shared-budget replacement is exercised.
+	f.countFn = func(in string) int { return 4 * chunk.EstimateTokens(in) }
+	client := qwenClient(t, f)
+	path := filepath.Join(t.TempDir(), "qwen-fit.json")
+
+	var buf bytes.Buffer
+	err := nomicFit(context.Background(), pool, client, fitOptions{Seed: 1, JSONPath: path}, &buf)
+	if err == nil {
+		t.Fatalf("nomicFit = nil, want a failure\n%s", buf.String())
+	}
+	if strings.Contains(err.Error(), "re-run chunk with RequestBudget") {
+		t.Errorf("err proposes a shared-budget replacement for a non-budget model: %v", err)
+	}
+	if !strings.Contains(err.Error(), qwenModel) {
+		t.Errorf("err = %v, want it to name the model %s", err, qwenModel)
 	}
 }
 
