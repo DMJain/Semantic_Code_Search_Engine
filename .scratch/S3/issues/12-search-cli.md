@@ -4,7 +4,7 @@
 
 **Blocked by:** 11
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `indexer search --config A0|A1 [--limit 10] "query"` prints tab-separated `rank`, `score` (four decimals), path, `start-end` and the signature line of the best chunk's first declaration (a grouped chunk uses its first declaration's signature).
 - [ ] A0 uses `chunk_raw`, A1 uses `chunk_header`.

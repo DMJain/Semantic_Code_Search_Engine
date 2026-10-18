@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A part is greedy-filled to at most `ChunkMaxTokens`; each part is prefixed with the signature line and a `part i/n` marker; `part_idx` starts at 0; part 0 carries the doc comment, later parts the signature only; the synthetic prefix lines are not counted in line spans.
 - [ ] `function.start_line <= start_line <= end_line <= function.end_line` for every part.

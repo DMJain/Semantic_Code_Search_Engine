@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Every struct and interface gets its own chunk: signature, doc comment and body text, up to the ceiling.
 - [ ] A struct or interface is grouped with a function in the same file and package named `NewX` or `newX` (or whose single return type is `*X` or `X`) only when the pair is at most `GroupMaxTokens` (550); the group chunk's owner is the type's symbol and its span covers both declarations; a grouped chunk uses the first declaration's doc start for `start_line`.

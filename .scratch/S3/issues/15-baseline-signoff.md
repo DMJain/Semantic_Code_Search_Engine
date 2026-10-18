@@ -4,7 +4,7 @@
 
 **Blocked by:** 12, 13, 14
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `indexer search --config A1 "preempt lower priority pods"` prints 10 in-slice files in under 1 second; `--config A0` also works.
 - [ ] `indexer ann-overlap --model qwen3-embedding:0.6b --kind chunk_header --queries probe` and the same for `chunk_raw`: chunk-level mean at least 95% at the chosen `ef_search`, or `ef_search` tuned to reach it; mean, min, file-level overlap and the chosen width recorded in Results and D-027.

@@ -4,7 +4,7 @@
 
 **Blocked by:** 03, 04
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Header text, in order: `package` import path, `file` path, `signature`, up to 5 `calls`, up to 5 `called by`; empty lists print `none`; deterministic.
 - [ ] Callees and callers come from `edges` with `source='treesitter'` only, `exact` before `name_only`, `ambiguous` excluded, ties by name, names as short qualified names; unit test of the ranking with mixed resolutions; golden for a symbol with 7 callees printing the top 5.

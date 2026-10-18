@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 (and 07 if activated)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Separate step that writes nothing to `embeddings`; flag `--seed` (default 1).
 - [ ] Sample: the 200 largest in-slice `chunk_header` documents by estimate plus 200 seeded-random; one document per `/api/embed` request with `truncate:false` and nomic's `num_ctx` 2048; the model is unloaded afterwards (`keep_alive` 0).

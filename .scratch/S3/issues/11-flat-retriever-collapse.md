@@ -4,7 +4,7 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `Result{File, Score, Source, Evidence}`; `Hit{Kind, ChunkID, File, StartLine, EndLine, Score}`; `Source` is `flat_raw` (A0) or `flat_header` (A1); score is `1 - (vec <=> q)`.
 - [ ] The collapse helper applies in order: slice filter, best-score-per-file with all hits kept, stable sort by score descending then path ascending, cut to the limit.

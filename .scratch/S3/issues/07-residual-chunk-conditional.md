@@ -4,7 +4,7 @@
 
 **Blocked by:** 06
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Only starts if the trigger fired in ticket 06; otherwise the ticket is closed with the recorded number and no code change.
 - [ ] One residual chunk per file holding its uncovered top-level const, var and type-alias declarations, statement-aligned, split at `ChunkMaxTokens`, with the same header, doc rule, stable ids and idempotency as other chunks.

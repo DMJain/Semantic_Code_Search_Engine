@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Selects files where `chunked_sha` differs from the file sha and the graph sha equals the file sha; `chunked_sha` is a hash of the file sha plus `ChunkMaxTokens`, `GroupMaxTokens` and a chunker version (D-078).
 - [ ] Doc comment is the S1 `doc()` rule only (D-083): the chunker reads the stored doc and does not redefine it. `start_line = symbol.start_line - n`, `n = 0` for an empty doc else its line count.

@@ -4,7 +4,7 @@
 
 **Blocked by:** 06, 08, 10 (and 07 if activated)
 
-**Status:** ready-for-human
+**Status:** done
 
 - [ ] Preconditions recorded in Results: ticket 06 D-080 outcome recorded, ticket 08 passed (`rejected=0`, budget kept or replaced and re-chunked), ticket 07 done if activated.
 - [ ] Summary run paused (S1 procedure step 2); `ollama ps` lists no loaded model, pasted into Results; nothing else uses Ollama.

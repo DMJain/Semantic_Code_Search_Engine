@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `indexer chunk` prints: chunks total (in slice and outside), files re-split, chunks changed, parts above one, `oversized_statements`, `oversized_failed`, `header_degraded`, token p50/p99/max, `chunks_with_block_comment_above`, `chunks_with_marker_lines` (count and fraction), and wall time.
 - [ ] Prints `zero_chunk_files_total`, `zero_chunk_files_with_decls` (at least one top-level declaration, no chunk) and `zero_chunk_files_no_decls`, each also as a fraction of the 876 slice files.

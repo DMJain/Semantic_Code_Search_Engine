@@ -4,7 +4,7 @@
 
 **Blocked by:** 11
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `indexer ann-overlap --model M --kind K --queries <file|probe> [--ef 200,400,800]` (maximum 1000).
 - [ ] `probe` builds 30 queries (seed 5) from first sentences of doc comments of random in-slice functions, at least 12 words each; documented in D-027 as a smoke gate that is optimistic (queries sit near their own chunk).

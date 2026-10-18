@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Migration 00006 adds `embeddings.input_hash` (not null, default empty), a unique key on `(target_kind, target_id, model)`, `files.chunked_sha`, `chunks.start_line` and `chunks.end_line` (not null, default 0), `chunks.header` (if absent), `chunks.content_hash`, `chunks.header_degraded` smallint not null default 0, and `embed_failures(target_kind, target_id, model, reason, input_hash, created_at)` with primary key on the first three.
 - [ ] After migrate, `\d embeddings`, `\d chunks` and `\d embed_failures` show the columns, the unique index and the primary key; inserting a duplicate `(kind, id, model)` fails.

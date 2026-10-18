@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 05
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Flags: `--model` (default the configured embedding model), `--kinds chunk_raw,chunk_header`, `--limit`, `--retry-failed`; an unknown model is a startup error; the existing probe runs and aborts on failure.
 - [ ] Starts with one transaction deleting orphan vectors of `chunk_raw` and `chunk_header` only and prints `orphans_deleted`; no eval or query code ever deletes. Test: delete one chunk, run embed, `orphans_deleted = 2` and `embeddings LEFT JOIN chunks WHERE chunks.id IS NULL` is 0 rows.
